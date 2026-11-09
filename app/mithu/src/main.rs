@@ -162,11 +162,16 @@ impl ApplicationHandler for App {
                 }
                 let ctrl = self.modifiers.control_key();
                 let alt = self.modifiers.alt_key();
+                let shift = self.modifiers.shift_key();
                 let focused = self.browser.omnibox_focused;
                 match event.logical_key {
+                    Key::Named(NamedKey::Enter) if self.browser.find_focused && shift => self.browser.find_previous(),
+                    Key::Named(NamedKey::Enter) if self.browser.find_focused => self.browser.find_next(),
                     Key::Named(NamedKey::Enter) if focused => self.browser.submit_omnibox(),
                     Key::Named(NamedKey::Enter) if self.browser.field_focused() => self.browser.submit_field(),
+                    Key::Named(NamedKey::Escape) if self.browser.find_is_open() => self.browser.close_find(),
                     Key::Named(NamedKey::Escape) => self.browser.blur_page(),
+                    Key::Named(NamedKey::Backspace) if self.browser.find_focused => self.browser.find_backspace(),
                     Key::Named(NamedKey::Backspace) if focused => self.browser.backspace(),
                     Key::Named(NamedKey::Backspace) if self.browser.field_focused() => self.browser.field_backspace(),
                     Key::Named(NamedKey::ArrowLeft) if focused && !alt => self.browser.move_cursor(-1),
@@ -179,10 +184,22 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::PageUp) if !focused => self.browser.scroll_page(-1.0),
                     Key::Named(NamedKey::Home) if !focused => self.browser.scroll_by(-1.0e9),
                     Key::Named(NamedKey::End) if !focused => self.browser.scroll_by(1.0e9),
+                    Key::Named(NamedKey::Tab) if ctrl => self.browser.next_tab(),
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("t") => self.browser.new_tab(),
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("w") => self.browser.close_tab(),
+                    Key::Character(text) if ctrl && (text == "+" || text == "=") => self.browser.zoom_in(),
+                    Key::Character(text) if ctrl && (text == "-" || text == "_") => self.browser.zoom_out(),
+                    Key::Character(text) if ctrl && text == "0" => self.browser.zoom_reset(),
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("f") => self.browser.open_find(),
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("l") => self.browser.focus_omnibox(),
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("r") => self.browser.reload(),
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("a") && focused => {
                         self.browser.select_all_text();
+                    }
+                    Key::Character(text) if self.browser.find_focused && !ctrl && !alt => {
+                        for ch in text.chars() {
+                            self.browser.find_insert(ch);
+                        }
                     }
                     Key::Character(text) if focused && !ctrl && !alt => {
                         for ch in text.chars() {

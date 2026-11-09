@@ -1239,7 +1239,7 @@ mod tests {
 
     #[test]
     fn image_uses_its_pixel_size() {
-        let doc = parse_html(r#"<img id="pic" src="pixel.png">"#);
+        let doc = parse_html(r#"<img id="pic" src="pixel.png" style="border-width:0">"#);
         let styles = style_document(&doc, "");
         let id = doc.get_element_by_id("pic").unwrap();
         let bitmap = Arc::new(mithu_image::Bitmap {

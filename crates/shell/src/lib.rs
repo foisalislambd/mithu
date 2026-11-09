@@ -18,7 +18,10 @@ use mithu_style::{style_document, ComputedStyle};
 use mithu_text::{FontBook, MeasureText};
 use mithu_url::{Url, UrlError};
 
+pub const TAB_H: f32 = 40.0;
 pub const TOOLBAR_H: f32 = 56.0;
+pub const CONTENT_TOP: f32 = TAB_H + TOOLBAR_H;
+pub const FIND_H: f32 = 36.0;
 pub const STATUS_H: f32 = 26.0;
 
 const TOOLBAR: Color = Color::rgb(22, 52, 47);
@@ -31,11 +34,12 @@ const ADDRESS_FOCUS: Color = Color::rgb(244, 208, 122);
 const STATUS_BG: Color = Color::rgb(236, 232, 223);
 const STATUS_TEXT: Color = Color::rgb(62, 56, 48);
 const SELECTION: Color = Color::rgb(196, 220, 246);
+const FIND_HIT: Color = Color::rgb(255, 214, 64);
+const FIND_ACTIVE: Color = Color::rgb(255, 140, 40);
+const FIND_BAR: Color = Color::rgb(255, 248, 220);
+const ZOOMS: [f32; 17] = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0];
 
-pub struct Browser {
-    fonts: FontBook,
-    viewport_w: f32,
-    viewport_h: f32,
+struct Page {
     history: Vec<Url>,
     index: usize,
     current: Url,
@@ -43,7 +47,6 @@ pub struct Browser {
     omnibox: String,
     cursor: usize,
     select_all: bool,
-    pub omnibox_focused: bool,
     scroll: f32,
     title: String,
     status: String,
@@ -53,6 +56,62 @@ pub struct Browser {
     images: HashMap<NodeId, Arc<Bitmap>>,
     session: Option<Session>,
     focused: Option<NodeId>,
+    find_query: String,
+    find_open: bool,
+    find_at: usize,
+    zoom: f32,
+}
+
+struct Tabs {
+    pages: Vec<Page>,
+    active: usize,
+}
+
+impl Tabs {
+    fn page(&self) -> &Page {
+        &self.pages[self.active]
+    }
+
+    fn page_mut(&mut self) -> &mut Page {
+        &mut self.pages[self.active]
+    }
+}
+
+impl Page {
+    fn blank(width: f32) -> Self {
+        let blank = Url::parse("about:blank").expect("about:blank");
+        Self {
+            history: Vec::new(),
+            index: 0,
+            current: blank.clone(),
+            base: blank,
+            omnibox: String::new(),
+            cursor: 0,
+            select_all: false,
+            scroll: 0.0,
+            title: String::new(),
+            status: String::new(),
+            document: Document::new(),
+            styles: Vec::new(),
+            layout: layout_tree(&Document::new(), &[], width, &mithu_text::NaiveMetrics, &HashMap::new()),
+            images: HashMap::new(),
+            session: None,
+            focused: None,
+            find_query: String::new(),
+            find_open: false,
+            find_at: 0,
+            zoom: 1.0,
+        }
+    }
+}
+
+pub struct Browser {
+    fonts: FontBook,
+    viewport_w: f32,
+    viewport_h: f32,
+    pub omnibox_focused: bool,
+    pub find_focused: bool,
+    tabs: Tabs,
 }
 
 struct Fetched {
@@ -62,31 +121,109 @@ struct Fetched {
 }
 
 impl Browser {
+    fn page(&self) -> &Page {
+        self.tabs.page()
+    }
+
+    fn page_mut(&mut self) -> &mut Page {
+        self.tabs.page_mut()
+    }
+
     pub fn new() -> Self {
         let mut browser = Self {
             fonts: FontBook::load(),
             viewport_w: 1200.0,
             viewport_h: 800.0,
-            history: Vec::new(),
-            index: 0,
-            current: Url::parse("about:blank").expect("about:blank"),
-            base: Url::parse("about:blank").expect("about:blank"),
-            omnibox: String::new(),
-            cursor: 0,
-            select_all: false,
             omnibox_focused: false,
-            scroll: 0.0,
-            title: String::new(),
-            status: String::new(),
-            document: Document::new(),
-            styles: Vec::new(),
-            layout: layout_tree(&Document::new(), &[], 1200.0, &mithu_text::NaiveMetrics, &HashMap::new()),
-            images: HashMap::new(),
-            session: None,
-            focused: None,
+            find_focused: false,
+            tabs: Tabs {
+                pages: vec![Page::blank(1200.0)],
+                active: 0,
+            },
         };
         browser.navigate("about:mithu");
         browser
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.pages.len()
+    }
+
+    pub fn active_tab(&self) -> usize {
+        self.tabs.active
+    }
+
+    pub fn new_tab(&mut self) {
+        self.omnibox_focused = false;
+        self.find_focused = false;
+        self.tabs.pages.push(Page::blank(self.viewport_w));
+        self.tabs.active = self.tabs.pages.len() - 1;
+        self.navigate("about:mithu");
+    }
+
+    pub fn select_tab(&mut self, index: usize) {
+        if index >= self.tabs.pages.len() {
+            return;
+        }
+        self.omnibox_focused = false;
+        self.find_focused = false;
+        self.tabs.active = index;
+    }
+
+    pub fn next_tab(&mut self) {
+        if self.tabs.pages.is_empty() {
+            return;
+        }
+        let next = (self.tabs.active + 1) % self.tabs.pages.len();
+        self.select_tab(next);
+    }
+
+    pub fn zoom(&self) -> f32 {
+        self.page().zoom
+    }
+
+    pub fn zoom_in(&mut self) {
+        self.step_zoom(1);
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.step_zoom(-1);
+    }
+
+    pub fn zoom_reset(&mut self) {
+        self.set_zoom(1.0);
+    }
+
+    fn step_zoom(&mut self, direction: i32) {
+        let current = self.page().zoom;
+        let next = if direction > 0 {
+            ZOOMS.into_iter().find(|level| *level > current + 0.001).unwrap_or(ZOOMS[ZOOMS.len() - 1])
+        } else {
+            ZOOMS.into_iter().rev().find(|level| *level < current - 0.001).unwrap_or(ZOOMS[0])
+        };
+        self.set_zoom(next);
+    }
+
+    fn set_zoom(&mut self, zoom: f32) {
+        self.page_mut().zoom = zoom;
+        self.relayout();
+        let max = self.max_scroll();
+        let page = self.page_mut();
+        page.scroll = page.scroll.clamp(0.0, max);
+    }
+
+    pub fn close_tab(&mut self) {
+        self.omnibox_focused = false;
+        self.find_focused = false;
+        if self.tabs.pages.len() == 1 {
+            self.navigate("about:mithu");
+            return;
+        }
+        let index = self.tabs.active;
+        self.tabs.pages.remove(index);
+        if self.tabs.active >= self.tabs.pages.len() {
+            self.tabs.active = self.tabs.pages.len() - 1;
+        }
     }
 
     pub fn navigate(&mut self, input: &str) {
@@ -94,25 +231,31 @@ impl Browser {
     }
 
     pub fn back(&mut self) {
-        if self.index == 0 || self.history.is_empty() {
-            return;
-        }
-        self.index -= 1;
-        let url = self.history[self.index].clone();
+        let url = {
+            let page = self.page_mut();
+            if page.index == 0 || page.history.is_empty() {
+                return;
+            }
+            page.index -= 1;
+            page.history[page.index].clone()
+        };
         self.load_url(url);
     }
 
     pub fn forward(&mut self) {
-        if self.index + 1 >= self.history.len() {
-            return;
-        }
-        self.index += 1;
-        let url = self.history[self.index].clone();
+        let url = {
+            let page = self.page_mut();
+            if page.index + 1 >= page.history.len() {
+                return;
+            }
+            page.index += 1;
+            page.history[page.index].clone()
+        };
         self.load_url(url);
     }
 
     pub fn reload(&mut self) {
-        let url = self.current.clone();
+        let url = self.page().current.clone();
         self.load_url(url);
     }
 
@@ -120,11 +263,16 @@ impl Browser {
         self.viewport_w = width.max(1.0);
         self.viewport_h = height.max(1.0);
         self.relayout();
-        self.scroll = self.scroll.clamp(0.0, self.max_scroll());
+        let max = self.max_scroll();
+        let page = self.page_mut();
+        page.scroll = page.scroll.clamp(0.0, max);
     }
 
     pub fn scroll_by(&mut self, delta: f32) {
-        self.scroll = (self.scroll + delta).clamp(0.0, self.max_scroll());
+        let zoom = self.page().zoom.max(0.01);
+        let max = self.max_scroll();
+        let page = self.page_mut();
+        page.scroll = (page.scroll + delta / zoom).clamp(0.0, max);
     }
 
     pub fn scroll_page(&mut self, pages: f32) {
@@ -135,7 +283,24 @@ impl Browser {
         if y >= self.viewport_h - STATUS_H {
             return;
         }
-        if y < TOOLBAR_H {
+        if self.page().find_open {
+            let bar = find_bar_rect(self.viewport_w, self.viewport_h);
+            if bar.contains(x, y) {
+                self.find_focused = true;
+                self.omnibox_focused = false;
+                return;
+            }
+        }
+        if y < TAB_H {
+            let (tabs, plus) = tab_rects(self.viewport_w, self.tab_count());
+            if plus.contains(x, y) {
+                self.new_tab();
+            } else if let Some(index) = tabs.iter().position(|rect| rect.contains(x, y)) {
+                self.select_tab(index);
+            }
+            return;
+        }
+        if y < CONTENT_TOP {
             let (back, forward, reload, address) = chrome_rects(self.viewport_w);
             if back.contains(x, y) && self.can_back() {
                 self.back();
@@ -149,20 +314,24 @@ impl Browser {
             return;
         }
         self.omnibox_focused = false;
-        self.select_all = false;
-        let doc_y = y - TOOLBAR_H + self.scroll;
-        self.activate(x, doc_y);
+        self.find_focused = false;
+        let scroll = self.page().scroll;
+        let zoom = self.page().zoom.max(0.01);
+        self.page_mut().select_all = false;
+        let doc_x = x / zoom;
+        let doc_y = (y - CONTENT_TOP) / zoom + scroll;
+        self.activate(doc_x, doc_y);
     }
 
     pub fn field_focused(&self) -> bool {
-        self.focused.is_some() && !self.omnibox_focused
+        self.page().focused.is_some() && !self.omnibox_focused
     }
 
     pub fn field_insert(&mut self, ch: char) {
-        let Some(id) = self.focused else {
+        let Some(id) = self.page().focused else {
             return;
         };
-        if let Some(session) = self.session.as_mut() {
+        if let Some(session) = self.page_mut().session.as_mut() {
             session.edit(|doc| {
                 let mut text = field_text(doc, id);
                 text.push(ch);
@@ -174,10 +343,10 @@ impl Browser {
     }
 
     pub fn field_backspace(&mut self) {
-        let Some(id) = self.focused else {
+        let Some(id) = self.page().focused else {
             return;
         };
-        if let Some(session) = self.session.as_mut() {
+        if let Some(session) = self.page_mut().session.as_mut() {
             session.edit(|doc| {
                 let mut text = field_text(doc, id);
                 text.pop();
@@ -189,10 +358,10 @@ impl Browser {
     }
 
     pub fn submit_field(&mut self) {
-        let Some(id) = self.focused else {
+        let Some(id) = self.page().focused else {
             return;
         };
-        let submission = self.session.as_mut().and_then(|session| session.submission(id));
+        let submission = self.page_mut().session.as_mut().and_then(|session| session.submission(id));
         self.pull_page();
         if let Some(submission) = submission {
             self.send_form(submission);
@@ -201,83 +370,186 @@ impl Browser {
 
     pub fn blur_page(&mut self) {
         self.omnibox_focused = false;
-        self.select_all = false;
-        self.focused = None;
+        let page = self.page_mut();
+        page.select_all = false;
+        page.focused = None;
+    }
+
+    pub fn open_find(&mut self) {
+        self.omnibox_focused = false;
+        self.find_focused = true;
+        self.page_mut().find_open = true;
+        self.reveal_find();
+    }
+
+    pub fn close_find(&mut self) {
+        self.find_focused = false;
+        self.page_mut().find_open = false;
+    }
+
+    pub fn find_insert(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        {
+            let page = self.page_mut();
+            page.find_query.push(ch);
+            page.find_at = 0;
+            page.find_open = true;
+        }
+        self.find_focused = true;
+        self.reveal_find();
+    }
+
+    pub fn find_backspace(&mut self) {
+        {
+            let page = self.page_mut();
+            page.find_query.pop();
+            page.find_at = 0;
+        }
+        self.reveal_find();
+    }
+
+    pub fn find_next(&mut self) {
+        self.step_find(1);
+    }
+
+    pub fn find_previous(&mut self) {
+        self.step_find(-1);
+    }
+
+    pub fn find_is_open(&self) -> bool {
+        self.page().find_open
+    }
+
+    pub fn find_count(&self) -> usize {
+        self.find_hits().len()
+    }
+
+    pub fn find_active(&self) -> Option<usize> {
+        let count = self.find_hits().len();
+        (count > 0).then(|| self.page().find_at.min(count - 1))
+    }
+
+    fn step_find(&mut self, delta: i32) {
+        let count = self.find_hits().len() as i32;
+        if count == 0 {
+            return;
+        }
+        let at = self.page().find_at as i32;
+        let next = (at + delta).rem_euclid(count) as usize;
+        self.page_mut().find_at = next;
+        self.reveal_find();
+    }
+
+    fn reveal_find(&mut self) {
+        let hits = self.find_hits();
+        if hits.is_empty() {
+            return;
+        }
+        let at = self.page().find_at.min(hits.len() - 1);
+        self.page_mut().find_at = at;
+        let Some(rect) = hits[at].first().copied() else {
+            return;
+        };
+        let view = self.page_height();
+        let scroll = self.page().scroll;
+        let next = if rect.y < scroll {
+            (rect.y - 8.0).max(0.0)
+        } else if rect.bottom() > scroll + view {
+            (rect.bottom() - view + 8.0).max(0.0)
+        } else {
+            scroll
+        };
+        let max = (self.page().layout.content_height - view).max(0.0);
+        self.page_mut().scroll = next.min(max);
+    }
+
+    fn find_hits(&self) -> Vec<Vec<Rect>> {
+        let page = self.page();
+        if !page.find_open || page.find_query.is_empty() {
+            return Vec::new();
+        }
+        text_matches(&self.fonts, &page.layout, &page.find_query)
     }
 
     pub fn focus_omnibox(&mut self) {
         self.omnibox_focused = true;
-        self.select_all = true;
+        self.find_focused = false;
+        self.page_mut().select_all = true;
     }
 
     pub fn blur_omnibox(&mut self) {
         self.omnibox_focused = false;
-        self.select_all = false;
+        self.page_mut().select_all = false;
     }
 
     pub fn insert_char(&mut self, ch: char) {
         if ch.is_control() {
             return;
         }
-        if self.select_all {
-            self.omnibox.clear();
-            self.cursor = 0;
-            self.select_all = false;
+        let page = self.page_mut();
+        if page.select_all {
+            page.omnibox.clear();
+            page.cursor = 0;
+            page.select_all = false;
         }
-        let mut chars: Vec<char> = self.omnibox.chars().collect();
-        let index = self.cursor.min(chars.len());
+        let mut chars: Vec<char> = page.omnibox.chars().collect();
+        let index = page.cursor.min(chars.len());
         chars.insert(index, ch);
-        self.cursor = index + 1;
-        self.omnibox = chars.into_iter().collect();
+        page.cursor = index + 1;
+        page.omnibox = chars.into_iter().collect();
     }
 
     pub fn backspace(&mut self) {
-        if self.select_all {
-            self.omnibox.clear();
-            self.cursor = 0;
-            self.select_all = false;
+        let page = self.page_mut();
+        if page.select_all {
+            page.omnibox.clear();
+            page.cursor = 0;
+            page.select_all = false;
             return;
         }
-        if self.cursor == 0 {
+        if page.cursor == 0 {
             return;
         }
-        let mut chars: Vec<char> = self.omnibox.chars().collect();
-        let index = self.cursor.min(chars.len());
+        let mut chars: Vec<char> = page.omnibox.chars().collect();
+        let index = page.cursor.min(chars.len());
         if index == 0 {
             return;
         }
         chars.remove(index - 1);
-        self.cursor = index - 1;
-        self.omnibox = chars.into_iter().collect();
+        page.cursor = index - 1;
+        page.omnibox = chars.into_iter().collect();
     }
 
     pub fn move_cursor(&mut self, delta: i32) {
-        let len = self.omnibox.chars().count();
-        if self.select_all {
-            self.select_all = false;
-            self.cursor = if delta < 0 { 0 } else { len };
+        let page = self.page_mut();
+        let len = page.omnibox.chars().count();
+        if page.select_all {
+            page.select_all = false;
+            page.cursor = if delta < 0 { 0 } else { len };
             return;
         }
-        self.cursor = (self.cursor as i32 + delta).clamp(0, len as i32) as usize;
+        page.cursor = (page.cursor as i32 + delta).clamp(0, len as i32) as usize;
     }
 
     pub fn select_all_text(&mut self) {
-        self.select_all = true;
+        self.page_mut().select_all = true;
     }
 
     pub fn submit_omnibox(&mut self) {
-        let text = self.omnibox.clone();
+        let text = self.page().omnibox.clone();
         self.omnibox_focused = false;
-        self.select_all = false;
+        self.page_mut().select_all = false;
         self.navigate(&text);
     }
 
     pub fn title(&self) -> &str {
-        &self.title
+        &self.page().title
     }
 
     pub fn location(&self) -> String {
-        self.current.to_display()
+        self.page().current.to_display()
     }
 
     pub fn render(&mut self, width: f32, height: f32) -> Vec<u32> {
@@ -290,20 +562,27 @@ impl Browser {
     }
 
     fn navigate_url(&mut self, url: Url) {
-        if self.history.get(self.index) == Some(&url) {
+        let same = {
+            let page = self.page();
+            page.history.get(page.index) == Some(&url)
+        };
+        if same {
             self.load_url(url);
             return;
         }
-        if self.index + 1 < self.history.len() {
-            self.history.truncate(self.index + 1);
+        {
+            let page = self.page_mut();
+            if page.index + 1 < page.history.len() {
+                page.history.truncate(page.index + 1);
+            }
+            page.history.push(url.clone());
+            page.index = page.history.len() - 1;
         }
-        self.history.push(url.clone());
-        self.index = self.history.len() - 1;
         self.load_url(url);
     }
 
     fn load_url(&mut self, url: Url) {
-        self.status = format!("Loading {}", url.to_display());
+        self.page_mut().status = format!("Loading {}", url.to_display());
         match retrieve(&url) {
             Ok(fetched) => self.install(fetched),
             Err(message) => self.install(Fetched {
@@ -315,6 +594,10 @@ impl Browser {
     }
 
     fn install(&mut self, fetched: Fetched) {
+        let find_query = self.page().find_query.clone();
+        let find_open = self.page().find_open;
+        let zoom = self.page().zoom;
+        let layout_width = self.layout_width();
         let document = parse_html(&fetched.html);
         let base = match &document.base_href {
             Some(href) => fetched.url.resolve(href).unwrap_or_else(|_| fetched.url.clone()),
@@ -339,63 +622,82 @@ impl Browser {
         }
         let styles = style_document(&document, &author);
         let images = load_images(&document, &base);
-        let layout = layout_tree(&document, &styles, self.viewport_w, &self.fonts, &images);
-        self.title = if document.title.is_empty() {
+        let layout = layout_tree(&document, &styles, layout_width, &self.fonts, &images);
+        self.omnibox_focused = false;
+        let page = self.page_mut();
+        page.title = if document.title.is_empty() {
             fetched.url.to_display()
         } else {
             document.title.clone()
         };
-        self.status = if logs.is_empty() {
+        page.status = if logs.is_empty() {
             fetched.status
         } else {
             logs.last().cloned().unwrap_or(fetched.status)
         };
-        self.current = fetched.url.clone();
-        self.base = base;
-        self.omnibox = fetched.url.to_display();
-        self.cursor = self.omnibox.chars().count();
-        self.omnibox_focused = false;
-        self.select_all = false;
-        self.scroll = 0.0;
-        self.document = document;
-        self.styles = styles;
-        self.images = images;
-        self.layout = layout;
-        self.session = Some(session);
-        self.focused = None;
+        page.current = fetched.url.clone();
+        page.base = base;
+        page.omnibox = fetched.url.to_display();
+        page.cursor = page.omnibox.chars().count();
+        page.select_all = false;
+        page.scroll = 0.0;
+        page.document = document;
+        page.styles = styles;
+        page.images = images;
+        page.layout = layout;
+        page.session = Some(session);
+        page.focused = None;
+        page.find_query = find_query;
+        page.find_open = find_open;
+        page.find_at = 0;
+        page.zoom = zoom;
+        let reopen = page.find_open && !page.find_query.is_empty();
+        let _ = page;
+        if reopen {
+            self.reveal_find();
+        }
+    }
+
+    fn layout_width(&self) -> f32 {
+        (self.viewport_w / self.page().zoom.max(0.01)).max(1.0)
     }
 
     fn relayout(&mut self) {
-        self.layout = layout_tree(
-            &self.document,
-            &self.styles,
-            self.viewport_w,
-            &self.fonts,
-            &self.images,
-        );
+        let width = self.layout_width();
+        let layout = {
+            let page = self.tabs.page();
+            layout_tree(&page.document, &page.styles, width, &self.fonts, &page.images)
+        };
+        self.page_mut().layout = layout;
     }
 
     fn activate(&mut self, x: f32, y: f32) {
-        let hit = hit_test(&self.layout, x, y);
+        let hit = hit_test(&self.page().layout, x, y);
         let mut allow_default = true;
         let mut focus_field = None;
         let mut submission = None;
         if let Some(node) = hit
-            && let Some(session) = self.session.as_mut()
+            && let Some(session) = self.page_mut().session.as_mut()
         {
             allow_default = session.dispatch(node, "click");
             let document = session.document();
-            if allow_default && is_text_field(&document, node) {
-                focus_field = Some(node);
-            } else if allow_default && is_checkbox(&document, node) {
-                session.edit(|doc| toggle_checked(doc, node));
-                session.dispatch(node, "change");
-            } else if allow_default && is_submit(&document, node) {
-                submission = session.submission(node);
+            if allow_default
+                && let Some(field) = nearest(&document, node, is_text_field)
+            {
+                focus_field = Some(field);
+            } else if allow_default
+                && let Some(control) = nearest(&document, node, is_checkbox)
+            {
+                session.edit(|doc| toggle_checked(doc, control));
+                session.dispatch(control, "change");
+            } else if allow_default
+                && let Some(control) = nearest(&document, node, is_submit)
+            {
+                submission = session.submission(control);
             }
         }
         self.pull_page();
-        self.focused = focus_field;
+        self.page_mut().focused = focus_field;
         if let Some(submission) = submission {
             self.send_form(submission);
             return;
@@ -408,30 +710,37 @@ impl Browser {
     }
 
     fn pull_page(&mut self) {
-        let Some(session) = self.session.as_mut() else {
-            return;
+        let base = self.page().base.clone();
+        let (document, logs) = {
+            let Some(session) = self.page_mut().session.as_mut() else {
+                return;
+            };
+            session.edit(|doc| doc.refresh_metadata());
+            (session.document(), session.logs())
         };
-        session.edit(|doc| doc.refresh_metadata());
-        let document = session.document();
-        let logs = session.logs();
-        let author = author_css(&document, &self.base);
-        self.styles = style_document(&document, &author);
-        self.images = load_images(&document, &self.base);
-        if let Some(log) = logs.last() {
-            self.status = log.clone();
+        let author = author_css(&document, &base);
+        let styles = style_document(&document, &author);
+        let images = load_images(&document, &base);
+        {
+            let page = self.page_mut();
+            if let Some(log) = logs.last() {
+                page.status = log.clone();
+            }
+            if !document.title.is_empty() {
+                page.title = document.title.clone();
+            }
+            page.styles = styles;
+            page.images = images;
+            page.document = document;
         }
-        if !document.title.is_empty() {
-            self.title = document.title.clone();
-        }
-        self.document = document;
         self.relayout();
     }
 
     fn send_form(&mut self, submission: Submission) {
         let mut url = if submission.action.is_empty() {
-            self.current.clone()
+            self.page().current.clone()
         } else {
-            self.base
+            self.page().base
                 .resolve(&submission.action)
                 .unwrap_or_else(|_| interpret(&submission.action))
         };
@@ -464,50 +773,99 @@ impl Browser {
     }
 
     fn follow(&mut self, href: String) {
-        let url = self.base.resolve(&href).unwrap_or_else(|_| interpret(&href));
+        let url = self.page().base.resolve(&href).unwrap_or_else(|_| interpret(&href));
         self.navigate_url(url);
     }
 
     fn hit_link(&self, x: f32, y: f32) -> Option<String> {
-        self.layout.links.iter().rev().find(|link| link.rect.contains(x, y)).map(|link| link.href.clone())
+        self.page().layout.links.iter().rev().find(|link| link.rect.contains(x, y)).map(|link| link.href.clone())
     }
 
     fn can_back(&self) -> bool {
-        self.index > 0
+        self.page().index > 0
     }
 
     fn can_forward(&self) -> bool {
-        self.index + 1 < self.history.len()
+        self.page().index + 1 < self.page().history.len()
+    }
+
+    fn device_page_height(&self) -> f32 {
+        let find = if self.page().find_open { FIND_H } else { 0.0 };
+        (self.viewport_h - CONTENT_TOP - STATUS_H - find).max(1.0)
     }
 
     fn page_height(&self) -> f32 {
-        (self.viewport_h - TOOLBAR_H - STATUS_H).max(1.0)
+        (self.device_page_height() / self.page().zoom.max(0.01)).max(1.0)
     }
 
     fn max_scroll(&self) -> f32 {
-        (self.layout.content_height - self.page_height()).max(0.0)
+        (self.page().layout.content_height - self.page_height()).max(0.0)
     }
 
     fn paint(&self, width: u32, height: u32) -> Vec<u32> {
-        let mut pixels = vec![self.layout.background.to_u32(); width as usize * height as usize];
-        let clip = Rect::new(0.0, TOOLBAR_H, width as f32, (height as f32 - TOOLBAR_H - STATUS_H).max(1.0));
+        let background = self.page().layout.background;
+        let mut pixels = vec![background.to_u32(); width as usize * height as usize];
+        let zoom = self.page().zoom;
+        if (zoom - 1.0).abs() < 0.001 {
+            self.paint_page(&mut pixels, width, height, CONTENT_TOP);
+        } else {
+            self.paint_zoomed_page(&mut pixels, width, height, zoom);
+        }
+        let mut canvas = Canvas {
+            pixels: &mut pixels,
+            width: width as i32,
+            height: height as i32,
+        };
+        self.paint_chrome(&mut canvas);
+        pixels
+    }
+
+    fn paint_page(&self, pixels: &mut [u32], width: u32, height: u32, origin_y: f32) {
+        let scroll = self.page().scroll;
+        let find = if self.page().find_open { FIND_H } else { 0.0 };
+        let clip = Rect::new(0.0, origin_y, width as f32, (height as f32 - origin_y - STATUS_H - find).max(1.0));
+        let mut canvas = Canvas {
+            pixels,
+            width: width as i32,
+            height: height as i32,
+        };
+        self.paint_find_hits(&mut canvas, scroll, clip, origin_y);
+        paint_layout(&mut canvas, &self.tabs.page().layout, &self.fonts, clip, scroll, origin_y);
+    }
+
+    fn paint_zoomed_page(&self, pixels: &mut [u32], width: u32, height: u32, zoom: f32) {
+        let scroll = self.page().scroll;
+        let find = if self.page().find_open { FIND_H } else { 0.0 };
+        let device_h = (height as f32 - CONTENT_TOP - STATUS_H - find).max(1.0);
+        let css_w = ((width as f32) / zoom).round().max(1.0) as i32;
+        let css_h = (device_h / zoom).round().max(1.0) as i32;
+        let mut page_pixels = vec![self.page().layout.background.to_u32(); (css_w * css_h) as usize];
+        let clip = Rect::new(0.0, 0.0, css_w as f32, css_h as f32);
         {
             let mut canvas = Canvas {
-                pixels: &mut pixels,
-                width: width as i32,
-                height: height as i32,
+                pixels: &mut page_pixels,
+                width: css_w,
+                height: css_h,
             };
-            paint_layout(&mut canvas, &self.layout, &self.fonts, clip, self.scroll, TOOLBAR_H);
-            self.paint_chrome(&mut canvas);
+            self.paint_find_hits(&mut canvas, scroll, clip, 0.0);
+            paint_layout(&mut canvas, &self.tabs.page().layout, &self.fonts, clip, scroll, 0.0);
         }
-        pixels
+        blit_nearest(
+            pixels,
+            width as i32,
+            &page_pixels,
+            css_w,
+            css_h,
+            Rect::new(0.0, CONTENT_TOP, width as f32, device_h),
+        );
     }
 
     fn paint_chrome(&self, canvas: &mut Canvas<'_>) {
         let width = canvas.width as f32;
         let height = canvas.height as f32;
         let full = Rect::new(0.0, 0.0, width, height);
-        canvas.fill(Rect::new(0.0, 0.0, width, TOOLBAR_H), TOOLBAR, full);
+        canvas.fill(Rect::new(0.0, 0.0, width, CONTENT_TOP), TOOLBAR, full);
+        self.paint_tabs(canvas);
         let (back, forward, reload, address) = chrome_rects(width);
         self.paint_button(canvas, back, "<", self.can_back());
         self.paint_button(canvas, forward, ">", self.can_forward());
@@ -522,23 +880,23 @@ impl Browser {
         );
         let text_clip = Rect::new(address.x + 8.0, address.y + 4.0, (address.width - 16.0).max(1.0), address.height - 8.0);
         let size = 16.0;
-        let prefix: String = self.omnibox.chars().take(self.cursor).collect();
+        let prefix: String = self.page().omnibox.chars().take(self.page().cursor).collect();
         let prefix_w = self.fonts.width(&prefix, size, false, false);
-        let full_w = self.fonts.width(&self.omnibox, size, false, false);
+        let full_w = self.fonts.width(&self.page().omnibox, size, false, false);
         let mut shift = 0.0;
         if full_w > text_clip.width {
             shift = (prefix_w - text_clip.width + 12.0).max(0.0);
         }
         let text_x = text_clip.x - shift;
         let baseline = address.y + 22.0;
-        if self.omnibox_focused && self.select_all && !self.omnibox.is_empty() {
+        if self.omnibox_focused && self.page().select_all && !self.page().omnibox.is_empty() {
             canvas.fill(Rect::new(text_x - 2.0, address.y + 6.0, full_w + 4.0, 22.0), SELECTION, text_clip);
         }
         canvas.text(
             &self.fonts,
             text_x,
             baseline,
-            &self.omnibox,
+            &self.page().omnibox,
             size,
             Color::rgb(28, 26, 22),
             false,
@@ -546,15 +904,18 @@ impl Browser {
             false,
             text_clip,
         );
-        if self.omnibox_focused && !self.select_all {
+        if self.omnibox_focused && !self.page().select_all {
             canvas.fill(Rect::new(text_x + prefix_w, address.y + 8.0, 1.5, 18.0), Color::rgb(22, 52, 47), text_clip);
         }
         canvas.fill(Rect::new(0.0, height - STATUS_H, width, STATUS_H), STATUS_BG, full);
-        let status = if self.title.is_empty() {
-            self.status.clone()
+        let mut status = if self.page().title.is_empty() {
+            self.page().status.clone()
         } else {
-            format!("{}  —  {}", self.title, self.status)
+            format!("{}  —  {}", self.page().title, self.page().status)
         };
+        if (self.page().zoom - 1.0).abs() > 0.001 {
+            status.push_str(&format!("  ·  {}%", (self.page().zoom * 100.0).round()));
+        }
         canvas.text(
             &self.fonts,
             12.0,
@@ -567,6 +928,70 @@ impl Browser {
             false,
             Rect::new(8.0, height - STATUS_H, width - 16.0, STATUS_H),
         );
+        if self.page().find_open {
+            self.paint_find_bar(canvas);
+        }
+    }
+
+    fn paint_find_hits(&self, canvas: &mut Canvas<'_>, scroll: f32, clip: Rect, origin_y: f32) {
+        let hits = self.find_hits();
+        let active = self.page().find_at;
+        for (index, hit) in hits.iter().enumerate() {
+            let color = if index == active { FIND_ACTIVE } else { FIND_HIT };
+            for rect in hit {
+                canvas.fill(
+                    Rect::new(rect.x, rect.y - scroll + origin_y, rect.width, rect.height),
+                    color,
+                    clip,
+                );
+            }
+        }
+    }
+
+    fn paint_find_bar(&self, canvas: &mut Canvas<'_>) {
+        let width = canvas.width as f32;
+        let height = canvas.height as f32;
+        let bar = find_bar_rect(width, height);
+        let full = Rect::new(0.0, 0.0, width, height);
+        let border = if self.find_focused { ADDRESS_FOCUS } else { ADDRESS_BORDER };
+        canvas.fill(bar, border, full);
+        canvas.fill(Rect::new(bar.x + 2.0, bar.y + 2.0, bar.width - 4.0, bar.height - 4.0), FIND_BAR, full);
+        let count = self.find_hits().len();
+        let label = if self.page().find_query.is_empty() {
+            "Find".to_string()
+        } else if count == 0 {
+            format!("{}   0/0", self.page().find_query)
+        } else {
+            format!("{}   {}/{count}", self.page().find_query, self.page().find_at.min(count - 1) + 1)
+        };
+        canvas.text(
+            &self.fonts,
+            bar.x + 12.0,
+            bar.y + 24.0,
+            &label,
+            14.0,
+            Color::rgb(28, 26, 22),
+            false,
+            false,
+            false,
+            Rect::new(bar.x + 8.0, bar.y + 4.0, bar.width - 16.0, bar.height - 8.0),
+        );
+    }
+
+    fn paint_tabs(&self, canvas: &mut Canvas<'_>) {
+        let (rects, plus) = tab_rects(canvas.width as f32, self.tabs.pages.len());
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        for (index, rect) in rects.iter().enumerate() {
+            let active = index == self.tabs.active;
+            canvas.fill(*rect, if active { ADDRESS } else { BUTTON }, full);
+            let title = {
+                let page = &self.tabs.pages[index];
+                if page.title.is_empty() { page.current.to_display() } else { page.title.clone() }
+            };
+            canvas.text(&self.fonts, rect.x + 8.0, rect.y + 18.0, &title, 13.0, Color::rgb(28, 26, 22), active, false, false, *rect);
+        }
+        canvas.fill(plus, BUTTON, full);
+        canvas.text(&self.fonts, plus.x + 8.0, plus.y + 18.0, "+", 16.0, BUTTON_TEXT, true, false, false, plus);
     }
 
     fn paint_button(&self, canvas: &mut Canvas<'_>, rect: Rect, label: &str, enabled: bool) {
@@ -596,8 +1021,134 @@ impl Default for Browser {
     }
 }
 
+fn blit_nearest(dst: &mut [u32], dst_w: i32, src: &[u32], src_w: i32, src_h: i32, dest: Rect) {
+    if src_w <= 0 || src_h <= 0 || dest.width <= 0.0 || dest.height <= 0.0 || dst_w <= 0 {
+        return;
+    }
+    let x0 = dest.x.floor().max(0.0) as i32;
+    let y0 = dest.y.floor().max(0.0) as i32;
+    let dst_h = dst.len() as i32 / dst_w;
+    let x1 = dest.right().ceil().min(dst_w as f32) as i32;
+    let y1 = dest.bottom().ceil().min(dst_h as f32) as i32;
+    for y in y0..y1 {
+        let v = (((y as f32 + 0.5 - dest.y) / dest.height) * src_h as f32).floor() as i32;
+        let v = v.clamp(0, src_h - 1) as usize;
+        let row = y as usize * dst_w as usize;
+        for x in x0..x1 {
+            let u = (((x as f32 + 0.5 - dest.x) / dest.width) * src_w as f32).floor() as i32;
+            let u = u.clamp(0, src_w - 1) as usize;
+            dst[row + x as usize] = src[v * src_w as usize + u];
+        }
+    }
+}
+
+fn find_bar_rect(width: f32, height: f32) -> Rect {
+    Rect::new(0.0, height - STATUS_H - FIND_H, width, FIND_H)
+}
+
+struct TextRun {
+    x: f32,
+    baseline: f32,
+    ascent: f32,
+    height: f32,
+    text: String,
+    size: f32,
+    bold: bool,
+    mono: bool,
+}
+
+fn text_matches(fonts: &FontBook, tree: &LayoutTree, query: &str) -> Vec<Vec<Rect>> {
+    let needle: Vec<char> = query.chars().map(|ch| ch.to_ascii_lowercase()).collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut runs = Vec::new();
+    collect_runs(&tree.root, &mut runs);
+    let mut slots: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut folded = Vec::new();
+    for (index, run) in runs.iter().enumerate() {
+        if index > 0 && (run.baseline - runs[index - 1].baseline).abs() < 0.5 && run.x > runs[index - 1].x + 0.5 {
+            folded.push(' ');
+            slots.push(None);
+        }
+        for (char_index, ch) in run.text.chars().enumerate() {
+            folded.push(ch.to_ascii_lowercase());
+            slots.push(Some((index, char_index)));
+        }
+    }
+    let mut hits = Vec::new();
+    if folded.len() < needle.len() {
+        return hits;
+    }
+    for start in 0..=folded.len() - needle.len() {
+        if folded[start..start + needle.len()] != needle[..] {
+            continue;
+        }
+        let mut rects = Vec::new();
+        let mut cursor = start;
+        let end = start + needle.len();
+        while cursor < end {
+            let Some((run_index, char_start)) = slots[cursor] else {
+                cursor += 1;
+                continue;
+            };
+            let mut char_end = char_start + 1;
+            cursor += 1;
+            while cursor < end && slots[cursor].is_some_and(|(next_run, next_char)| next_run == run_index && next_char == char_end)
+            {
+                char_end += 1;
+                cursor += 1;
+            }
+            let run = &runs[run_index];
+            let prefix: String = run.text.chars().take(char_start).collect();
+            let slice: String = run.text.chars().skip(char_start).take(char_end - char_start).collect();
+            let x = run.x + fonts.width(&prefix, run.size, run.bold, run.mono);
+            let width = fonts.width(&slice, run.size, run.bold, run.mono).max(1.0);
+            rects.push(Rect::new(x, run.baseline - run.ascent, width, run.height.max(1.0)));
+        }
+        if !rects.is_empty() {
+            hits.push(rects);
+        }
+    }
+    hits
+}
+
+fn collect_runs(box_: &mithu_layout::LayoutBox, runs: &mut Vec<TextRun>) {
+    for line in &box_.lines {
+        for fragment in &line.fragments {
+            if fragment.text.is_empty() {
+                continue;
+            }
+            runs.push(TextRun {
+                x: fragment.x,
+                baseline: line.baseline,
+                ascent: line.ascent,
+                height: line.height,
+                text: fragment.text.clone(),
+                size: fragment.size,
+                bold: fragment.bold,
+                mono: fragment.mono,
+            });
+        }
+    }
+    for child in &box_.children {
+        collect_runs(child, runs);
+    }
+}
+
+fn tab_rects(width: f32, count: usize) -> (Vec<Rect>, Rect) {
+    let count = count.max(1) as f32;
+    let available = (width - 52.0).max(80.0);
+    let tab_w = (available / count - 4.0).clamp(48.0, 180.0);
+    let rects = (0..count as usize)
+        .map(|index| Rect::new(8.0 + index as f32 * (tab_w + 4.0), 6.0, tab_w, TAB_H - 12.0))
+        .collect();
+    let plus = Rect::new(8.0 + count * (tab_w + 4.0), 6.0, 28.0, TAB_H - 12.0);
+    (rects, plus)
+}
+
 fn chrome_rects(width: f32) -> (Rect, Rect, Rect, Rect) {
-    let y = 12.0;
+    let y = TAB_H + 12.0;
     let size = 32.0;
     (
         Rect::new(12.0, y, size, size),
@@ -683,6 +1234,21 @@ fn load_images(document: &Document, base: &Url) -> HashMap<NodeId, Arc<Bitmap>> 
         }
     }
     images
+}
+
+fn nearest(document: &Document, id: NodeId, matches: fn(&Document, NodeId) -> bool) -> Option<NodeId> {
+    let mut current = if document.element_name(id).is_some() {
+        Some(id)
+    } else {
+        document.parent_element(id)
+    };
+    while let Some(node) = current {
+        if matches(document, node) {
+            return Some(node);
+        }
+        current = document.parent_element(node);
+    }
+    None
 }
 
 fn is_text_field(document: &Document, id: NodeId) -> bool {
@@ -881,7 +1447,8 @@ mod tests {
         let mut browser = Browser::new();
         let frame = browser.render(800.0, 600.0);
         assert_eq!(frame.len(), 800 * 600);
-        assert_eq!(frame[10], TOOLBAR.to_u32());
+        let toolbar_row = (TAB_H as usize + 8) * 800 + 10;
+        assert_eq!(frame[toolbar_row], TOOLBAR.to_u32());
         let page = frame[400 * 800 + 20];
         assert_ne!(page, TOOLBAR.to_u32());
     }
@@ -890,8 +1457,8 @@ mod tests {
     fn clicking_a_link_navigates() {
         let mut browser = Browser::new();
         let test_url = Url::parse("about:test").unwrap();
-        browser.history = vec![test_url.clone()];
-        browser.index = 0;
+        browser.page_mut().history = vec![test_url.clone()];
+        browser.page_mut().index = 0;
         browser.install(Fetched {
             url: Url::parse("about:test").unwrap(),
             html: "<a href=\"about:blank\">Go there now</a>".to_string(),
@@ -899,16 +1466,173 @@ mod tests {
         });
         browser.resize(800.0, 600.0);
         let link = browser
+            .page()
             .layout
             .links
             .iter()
             .find(|link| link.href.contains("about:blank"))
             .expect("link")
             .rect;
-        browser.pointer_down(link.x + 2.0, link.y + 2.0 + TOOLBAR_H);
+        browser.pointer_down(link.x + 2.0, link.y + 2.0 + CONTENT_TOP);
         assert_eq!(browser.location(), "about:blank");
         assert!(browser.can_back());
         browser.back();
         assert_eq!(browser.location(), "about:test");
+    }
+
+    #[test]
+    fn a_data_image_paints_its_pixel() {
+        let mut browser = Browser::new();
+        browser.install(Fetched {
+            url: Url::parse("about:test").unwrap(),
+            html: "<img id=\"pic\" alt=\"red\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\">".to_string(),
+            status: "test".to_string(),
+        });
+        browser.resize(800.0, 600.0);
+        let pic = browser.page().document.get_element_by_id("pic").unwrap();
+        let laid = find_box(&browser.page().layout.root, pic).expect("image box");
+        assert!(laid.image.is_some());
+        let x = (laid.rect.x + laid.rect.width / 2.0).floor() as usize;
+        let y = (laid.rect.y + laid.rect.height / 2.0 + CONTENT_TOP).floor() as usize;
+        let frame = browser.render(800.0, 600.0);
+        assert_eq!(frame[y * 800 + x], 0x00FF_0000, "pixel {x},{y} is {:06x}", frame[y * 800 + x]);
+    }
+
+    #[test]
+    fn a_click_runs_the_listener_and_a_form_navigates() {
+        let mut browser = Browser::new();
+        browser.install(Fetched {
+            url: Url::parse("about:test").unwrap(),
+            html: r#"<button id="go">Go</button><p id="out">old</p>
+                <a id="stay" href="about:blank">Stay</a>
+                <form action="about:blank"><input name="q" value="mithu"><button id="send" type="submit">Send</button></form>
+                <script>
+                  document.getElementById("go").addEventListener("click", function () {
+                    document.getElementById("out").textContent = "clicked";
+                  });
+                  document.getElementById("stay").addEventListener("click", function (event) {
+                    event.preventDefault();
+                  });
+                </script>"#
+                .to_string(),
+            status: "test".to_string(),
+        });
+        click_id(&mut browser, "go");
+        let out = browser.page().document.get_element_by_id("out").unwrap();
+        assert_eq!(browser.page().document.text_content(out), "clicked");
+        click_id(&mut browser, "stay");
+        assert_eq!(browser.location(), "about:test");
+        click_id(&mut browser, "send");
+        assert_eq!(browser.page().current.query.as_deref(), Some("q=mithu"));
+        assert_eq!(browser.location(), "about:blank");
+    }
+
+    #[test]
+    fn tabs_keep_separate_pages() {
+        let mut browser = Browser::new();
+        browser.install(Fetched {
+            url: Url::parse("about:test").unwrap(),
+            html: "<title>One</title><p>one</p>".to_string(),
+            status: "test".to_string(),
+        });
+        browser.new_tab();
+        assert_eq!(browser.tab_count(), 2);
+        assert_eq!(browser.active_tab(), 1);
+        assert_eq!(browser.location(), "about:mithu");
+        browser.select_tab(0);
+        assert_eq!(browser.location(), "about:test");
+        assert_eq!(browser.title(), "One");
+        let (tabs, plus) = tab_rects(browser.viewport_w, browser.tab_count());
+        browser.pointer_down(plus.x + 4.0, plus.y + 4.0);
+        assert_eq!(browser.tab_count(), 3);
+        browser.pointer_down(tabs[0].x + 4.0, tabs[0].y + 4.0);
+        assert_eq!(browser.active_tab(), 0);
+        browser.close_tab();
+        assert_eq!(browser.tab_count(), 2);
+        assert_eq!(browser.location(), "about:mithu");
+    }
+
+    #[test]
+    fn find_wraps_matches_and_scrolls_to_the_active_one() {
+        let mut browser = Browser::new();
+        browser.resize(800.0, 600.0);
+        browser.install(Fetched {
+            url: Url::parse("about:test").unwrap(),
+            html: "<style>p{margin:0}</style><p>alpha beta alpha</p><div style=\"height:1800px\"></div><p>alpha tail</p>".to_string(),
+            status: "test".to_string(),
+        });
+        browser.open_find();
+        for ch in "Alpha".chars() {
+            browser.find_insert(ch);
+        }
+        assert_eq!(browser.find_count(), 3);
+        assert_eq!(browser.find_active(), Some(0));
+        assert!(browser.page().scroll < 20.0);
+        browser.find_next();
+        browser.find_next();
+        assert_eq!(browser.find_active(), Some(2));
+        assert!(browser.page().scroll > 400.0, "scroll {}", browser.page().scroll);
+        browser.find_next();
+        assert_eq!(browser.find_active(), Some(0));
+        let frame = browser.render(800.0, 600.0);
+        let bar_y = (600.0 - STATUS_H - FIND_H / 2.0) as usize;
+        assert_eq!(frame[bar_y * 800 + 20], FIND_BAR.to_u32());
+        browser.close_find();
+        assert!(!browser.find_is_open());
+        assert_eq!(browser.find_count(), 0);
+    }
+
+    #[test]
+    fn zoom_scales_the_page_and_reflows() {
+        let mut browser = Browser::new();
+        browser.resize(800.0, 600.0);
+        browser.install(Fetched {
+            url: Url::parse("about:test").unwrap(),
+            html: "<div style=\"width:100px;height:40px;background:#ff0000;margin:0\"></div>".to_string(),
+            status: "test".to_string(),
+        });
+        let y = (CONTENT_TOP + 20.0) as usize;
+        let frame = browser.render(800.0, 600.0);
+        assert_eq!(frame[y * 800 + 20], 0x00FF_0000);
+        assert_ne!(frame[y * 800 + 150], 0x00FF_0000);
+        while browser.zoom() < 1.99 {
+            browser.zoom_in();
+        }
+        assert!((browser.zoom() - 2.0).abs() < 0.01);
+        let frame = browser.render(800.0, 600.0);
+        assert_eq!(frame[y * 800 + 40], 0x00FF_0000, "scaled pixel {:06x}", frame[y * 800 + 40]);
+        assert_eq!(frame[y * 800 + 150], 0x00FF_0000);
+        browser.zoom_reset();
+        assert!((browser.zoom() - 1.0).abs() < 0.01);
+        let frame = browser.render(800.0, 600.0);
+        assert_ne!(frame[y * 800 + 150], 0x00FF_0000);
+    }
+
+    fn click_id(browser: &mut Browser, id: &str) {
+        let (x, y) = {
+            let page = browser.page();
+            let node = page.document.get_element_by_id(id).unwrap();
+            if let Some(laid) = find_box(&page.layout.root, node) {
+                (laid.rect.x + laid.rect.width / 2.0, laid.rect.y + laid.rect.height / 2.0)
+            } else if let Some(href) = page.document.attr(node, "href") {
+                let link = page
+                    .layout
+                    .links
+                    .iter()
+                    .find(|link| link.href == href)
+                    .unwrap_or_else(|| panic!("missing link {id}"));
+                (link.rect.x + 2.0, link.rect.y + 2.0)
+            } else {
+                panic!("missing box {id}")
+            }
+        };
+        browser.pointer_down(x, y + CONTENT_TOP);
+    }
+
+    fn find_box(box_: &mithu_layout::LayoutBox, id: NodeId) -> Option<&mithu_layout::LayoutBox> {
+        if box_.node == id {
+            return Some(box_);
+        }
+        box_.children.iter().find_map(|child| find_box(child, id))
     }
 }

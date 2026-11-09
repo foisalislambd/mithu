@@ -491,7 +491,7 @@ impl Parser {
             Token::Start { name, attrs, .. } if matches!(name.as_str(), "title" | "style" | "script" | "textarea") => {
                 self.start_raw(name, attrs);
             }
-            Token::Start { name, attrs, .. } if is_void(&name) => {
+            Token::Start { name, attrs, .. } if matches!(name.as_str(), "base" | "link" | "meta") => {
                 let id = self.insert(&name);
                 self.apply_attrs(id, attrs);
                 self.stack.pop();
@@ -856,5 +856,19 @@ mod tests {
         let doc = parse_html("<link rel='stylesheet' href='app.css'><!-- <div id=no> --><p>Hi</p>");
         assert_eq!(doc.stylesheet_links, vec!["app.css".to_string()]);
         assert!(doc.get_element_by_id("no").is_none());
+    }
+
+    #[test]
+    fn an_image_before_body_is_not_hidden_in_head() {
+        let doc = parse_html("<link rel='stylesheet' href='app.css'><img id='pic' src='pixel.png'><p id='text'>Hi</p>");
+        let html = doc.node(doc.root).children[0];
+        let head = doc.node(html).children[0];
+        let body = doc.node(html).children[1];
+        assert_eq!(doc.element_name(head), Some("head"));
+        assert_eq!(doc.element_name(body), Some("body"));
+        assert!(doc.node(head).children.iter().all(|id| doc.element_name(*id) != Some("img")));
+        let pic = doc.get_element_by_id("pic").unwrap();
+        assert_eq!(doc.parent_element(pic), Some(body));
+        assert_eq!(doc.parent_element(doc.get_element_by_id("text").unwrap()), Some(body));
     }
 }
