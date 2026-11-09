@@ -70,6 +70,8 @@ pub enum Pseudo {
     Empty,
     Not(Box<Compound>),
     Hover,
+    Before,
+    After,
     /// `:focus`, `:active`, and other pseudos that the style engine does not match yet.
     Unmatched,
 }
@@ -116,6 +118,7 @@ fn compound_specificity(compound: &Compound) -> (u32, u32, u32) {
                 classes += more_classes;
                 types += more_types;
             }
+            Pseudo::Before | Pseudo::After => types += 1,
             Pseudo::Unmatched => {}
             _ => classes += 1,
         }
@@ -306,8 +309,16 @@ impl CssParser {
                     self.bump();
                     if self.peek() == Some(':') {
                         self.bump();
-                        let _ = self.read_ident();
-                        self.skip_function_args();
+                        let name = self.read_ident().to_ascii_lowercase();
+                        match name.as_str() {
+                            "before" => compound.pseudos.push(Pseudo::Before),
+                            "after" => compound.pseudos.push(Pseudo::After),
+                            _ => {
+                                self.skip_function_args();
+                                compound.pseudos.push(Pseudo::Unmatched);
+                            }
+                        }
+                        any = true;
                         continue;
                     }
                     let name = self.read_ident().to_ascii_lowercase();

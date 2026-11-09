@@ -13,7 +13,7 @@ html, address, article, aside, blockquote, div, dl, fieldset, figcaption, figure
 footer, form, h1, h2, h3, h4, h5, h6, header, hr, main, nav, ol, p, pre, section,
 table, ul, dd, dt { display: block; }
 li { display: list-item; }
-head, style, script, title, meta, link, base, template { display: none; }
+head, style, script, title, meta, link, base, template, noscript { display: none; }
 span, a, b, strong, i, em, code, label, small, sup, sub { display: inline; }
 img, br, button, input, textarea, select, iframe, video, canvas, svg, audio { display: inline-block; }
 body { margin: 8px; color: #000000; background-color: #ffffff; font-size: 16px; }
@@ -52,6 +52,7 @@ pub enum Position {
     Static,
     Relative,
     Absolute,
+    Fixed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +174,20 @@ pub struct ComputedStyle {
     pub visible: bool,
     pub z_index: i32,
     pub text_transform: TextTransform,
+    pub borders: [f32; 4],
+    pub before: Option<Generated>,
+    pub after: Option<Generated>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Generated {
+    pub text: String,
+    pub color: Color,
+    pub background: Color,
+    pub font_size: f32,
+    pub bold: bool,
+    pub width: Option<f32>,
+    pub height: Option<f32>,
 }
 
 impl ComputedStyle {
@@ -218,6 +233,9 @@ impl ComputedStyle {
             visible: true,
             z_index: 0,
             text_transform: TextTransform::None,
+            borders: [0.0; 4],
+            before: None,
+            after: None,
         }
     }
 }
@@ -259,6 +277,7 @@ struct Specified {
     margin: [Option<Ranked<Length>>; 4],
     padding: [Option<Ranked<Length>>; 4],
     border_width: Option<Ranked<f32>>,
+    border_sides: [Option<Ranked<f32>>; 4],
     border_color: Option<Ranked<Color>>,
     line_height: Option<Ranked<LineHeight>>,
     position: Option<Ranked<Position>>,
@@ -327,7 +346,9 @@ fn compute(
         return;
     }
     let (specified, vars) = cascade(doc, id, ua, author, state, parent_vars);
-    let computed = concretize(doc, id, &specified, parent);
+    let mut computed = concretize(doc, id, &specified, parent);
+    computed.before = build_generated(doc, id, ua, author, state, &vars, &computed, true);
+    computed.after = build_generated(doc, id, ua, author, state, &vars, &computed, false);
     styles[id.0] = computed.clone();
     for child in doc.node(id).children.clone() {
         compute(doc, child, &computed, ua, author, state, &vars, styles);
@@ -614,6 +635,7 @@ fn matches_pseudo(doc: &Document, id: NodeId, pseudo: &Pseudo, state: StyleState
         Pseudo::Link => doc.element_name(id) == Some("a") && doc.attr(id, "href").is_some(),
         Pseudo::Empty => is_empty(doc, id),
         Pseudo::Hover => is_hovered(doc, id, state.hover),
+        Pseudo::Before | Pseudo::After => false,
         Pseudo::Not(inner) => !matches_compound(doc, id, inner, state),
         Pseudo::Unmatched => false,
     }
@@ -734,17 +756,28 @@ fn apply_declaration(
         "padding-left" => set_padding(&mut specified.padding, 3, value, spec),
         "border" => {
             if let Some((width, color)) = parse_border(value) {
-                rank(&mut specified.border_width, width, spec);
+                rank_uniform_border(specified, width, spec);
                 if let Some(color) = color {
                     rank(&mut specified.border_color, color, spec);
                 }
             }
         }
         "border-width" => {
-            if let Some(width) = parse_border_width(value) {
-                rank(&mut specified.border_width, width, spec);
+            if let Some(sides) = parse_border_widths(value) {
+                rank_uniform_border(specified, sides[0], spec);
+                for (slot, side) in specified.border_sides.iter_mut().zip(sides) {
+                    rank(slot, side, spec);
+                }
             }
         }
+        "border-top-width" => set_border_side(&mut specified.border_sides, 0, value, spec),
+        "border-right-width" => set_border_side(&mut specified.border_sides, 1, value, spec),
+        "border-bottom-width" => set_border_side(&mut specified.border_sides, 2, value, spec),
+        "border-left-width" => set_border_side(&mut specified.border_sides, 3, value, spec),
+        "border-top" => set_border_edge(specified, 0, value, spec),
+        "border-right" => set_border_edge(specified, 1, value, spec),
+        "border-bottom" => set_border_edge(specified, 2, value, spec),
+        "border-left" => set_border_edge(specified, 3, value, spec),
         "border-color" => {
             if let Some(color) = parse_color(value) {
                 rank(&mut specified.border_color, color, spec);
@@ -941,6 +974,9 @@ fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &Comput
         margin: take_sides(&specified.margin, Length::Px(0.0)),
         padding: take_sides(&specified.padding, Length::Px(0.0)),
         border_width: specified.border_width.as_ref().map(|item| item.value).unwrap_or(0.0),
+        borders: border_sides(specified),
+        before: None,
+        after: None,
         border_color: specified
             .border_color
             .as_ref()
@@ -998,6 +1034,233 @@ fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &Comput
     };
     apply_presentational_hints(doc, id, &mut computed);
     computed
+}
+
+fn rank_uniform_border(specified: &mut Specified, width: f32, spec: u32) {
+    rank(&mut specified.border_width, width, spec);
+    for slot in &mut specified.border_sides {
+        rank(slot, width, spec);
+    }
+}
+
+fn set_border_side(sides: &mut [Option<Ranked<f32>>; 4], index: usize, value: &str, spec: u32) {
+    if let Some(width) = parse_border_width(value) {
+        rank(&mut sides[index], width.max(0.0), spec);
+    }
+}
+
+fn set_border_edge(specified: &mut Specified, index: usize, value: &str, spec: u32) {
+    if let Some((width, color)) = parse_border(value) {
+        rank(&mut specified.border_sides[index], width, spec);
+        if let Some(color) = color {
+            rank(&mut specified.border_color, color, spec);
+        }
+    }
+}
+
+fn border_sides(specified: &Specified) -> [f32; 4] {
+    let uniform = specified.border_width.as_ref().map(|item| item.value).unwrap_or(0.0);
+    [
+        specified.border_sides[0].as_ref().map(|item| item.value).unwrap_or(uniform),
+        specified.border_sides[1].as_ref().map(|item| item.value).unwrap_or(uniform),
+        specified.border_sides[2].as_ref().map(|item| item.value).unwrap_or(uniform),
+        specified.border_sides[3].as_ref().map(|item| item.value).unwrap_or(uniform),
+    ]
+}
+
+fn parse_border_widths(value: &str) -> Option<[f32; 4]> {
+    let sides: Vec<f32> = value.split_whitespace().filter_map(parse_border_width).collect();
+    match sides.as_slice() {
+        [one] => Some([*one, *one, *one, *one]),
+        [top, right] => Some([*top, *right, *top, *right]),
+        [top, right, bottom] => Some([*top, *right, *bottom, *right]),
+        [top, right, bottom, left, ..] => Some([*top, *right, *bottom, *left]),
+        _ => None,
+    }
+}
+
+fn build_generated(
+    doc: &Document,
+    id: NodeId,
+    ua: &Stylesheet,
+    author: &Stylesheet,
+    state: StyleState,
+    vars: &HashMap<String, String>,
+    element: &ComputedStyle,
+    before: bool,
+) -> Option<Generated> {
+    let mut content: Option<Ranked<String>> = None;
+    let mut hidden: Option<u32> = None;
+    let mut color = None;
+    let mut background = None;
+    let mut bold = None;
+    let mut font_size = None;
+    let mut width = None;
+    let mut height = None;
+    for sheet in [ua, author] {
+        for rule in &sheet.rules {
+            if !media_applies(rule.media.as_ref(), state.viewport_width) {
+                continue;
+            }
+            for selector in &rule.selectors {
+                let Some(stripped) = strip_generated(selector, before) else {
+                    continue;
+                };
+                if !matches_selector(doc, id, &stripped, state) {
+                    continue;
+                }
+                let spec = selector.specificity();
+                for declaration in &rule.declarations {
+                    if declaration.name.starts_with("--") {
+                        continue;
+                    }
+                    let expanded = expand_vars(&declaration.value, vars);
+                    let value = expanded.as_str();
+                    let important = if declaration.important { 100_000 } else { 0 };
+                    let spec = spec + important;
+                    match declaration.name.as_str() {
+                        "content" => match parse_content(value, doc, id) {
+                            Some(None) => {
+                                if hidden.is_none_or(|current| spec >= current) {
+                                    hidden = Some(spec);
+                                    content = None;
+                                }
+                            }
+                            Some(Some(text)) => {
+                                if hidden.is_none_or(|current| spec >= current) {
+                                    hidden = None;
+                                    rank(&mut content, text, spec);
+                                }
+                            }
+                            None => {}
+                        },
+                        "color" => {
+                            if let Some(parsed) = parse_color(value) {
+                                rank(&mut color, parsed, spec);
+                            }
+                        }
+                        "background" | "background-color" => {
+                            if let Some(parsed) = parse_color(value) {
+                                rank(&mut background, parsed, spec);
+                            }
+                        }
+                        "font-weight" => {
+                            if let Some(parsed) = parse_bold(value) {
+                                rank(&mut bold, parsed, spec);
+                            }
+                        }
+                        "font-size" => {
+                            if let Some(size) = parse_font_size(value) {
+                                rank(&mut font_size, size, spec);
+                            }
+                        }
+                        "width" => {
+                            if let Some(length) = parse_length(value) {
+                                rank(&mut width, length, spec);
+                            }
+                        }
+                        "height" => {
+                            if let Some(length) = parse_length(value) {
+                                rank(&mut height, length, spec);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    let text = content?.value;
+    let font_size = match font_size.as_ref().map(|item| item.value) {
+        Some(FontSize::Px(value)) => value.max(1.0),
+        Some(FontSize::Em(value)) => (element.font_size * value).max(1.0),
+        Some(FontSize::Percent(value)) => (element.font_size * value / 100.0).max(1.0),
+        None => element.font_size,
+    };
+    Some(Generated {
+        text,
+        color: color.as_ref().map(|item| item.value).unwrap_or(element.color),
+        background: background.as_ref().map(|item| item.value).unwrap_or(Color::TRANSPARENT),
+        font_size,
+        bold: bold.as_ref().map(|item| item.value).unwrap_or(element.bold),
+        width: width.as_ref().and_then(|item| match item.value {
+            Length::Px(px) => Some(px.max(0.0)),
+            Length::Em(em) => Some((em * font_size).max(0.0)),
+            Length::Rem(rem) => Some((rem * 16.0).max(0.0)),
+            _ => None,
+        }),
+        height: height.as_ref().and_then(|item| match item.value {
+            Length::Px(px) => Some(px.max(0.0)),
+            Length::Em(em) => Some((em * font_size).max(0.0)),
+            Length::Rem(rem) => Some((rem * 16.0).max(0.0)),
+            _ => None,
+        }),
+    })
+}
+
+fn strip_generated(selector: &mithu_css::Selector, before: bool) -> Option<mithu_css::Selector> {
+    let mut selector = selector.clone();
+    let last = selector.compounds.last_mut()?;
+    let wanted = if before { Pseudo::Before } else { Pseudo::After };
+    if !last.pseudos.contains(&wanted) {
+        return None;
+    }
+    if last.pseudos.iter().any(|pseudo| matches!(pseudo, Pseudo::Before | Pseudo::After) && pseudo != &wanted) {
+        return None;
+    }
+    last.pseudos.retain(|pseudo| !matches!(pseudo, Pseudo::Before | Pseudo::After));
+    Some(selector)
+}
+
+fn parse_content(value: &str, doc: &Document, id: NodeId) -> Option<Option<String>> {
+    let mut rest = value.trim();
+    if rest.eq_ignore_ascii_case("none") || rest.eq_ignore_ascii_case("normal") {
+        return Some(None);
+    }
+    let mut text = String::new();
+    let mut saw = false;
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        let quote = rest.chars().next()?;
+        if quote == '"' || quote == '\'' {
+            let mut chars = rest[1..].chars();
+            let mut closed = false;
+            while let Some(ch) = chars.next() {
+                if ch == '\\' {
+                    if let Some(escaped) = chars.next() {
+                        text.push(escaped);
+                    }
+                    continue;
+                }
+                if ch == quote {
+                    closed = true;
+                    break;
+                }
+                text.push(ch);
+            }
+            if !closed {
+                return None;
+            }
+            let consumed = rest.len() - chars.as_str().len();
+            rest = &rest[consumed..];
+            saw = true;
+            continue;
+        }
+        let lower = rest.to_ascii_lowercase();
+        if let Some(inner) = lower.strip_prefix("attr(") {
+            let end = inner.find(')')?;
+            let name = rest[5..5 + end].trim();
+            text.push_str(doc.attr(id, name).unwrap_or(""));
+            rest = &rest[5 + end + 1..];
+            saw = true;
+            continue;
+        }
+        return None;
+    }
+    saw.then_some(Some(text))
 }
 
 fn take_sides(sides: &[Option<Ranked<Length>>; 4], default: Length) -> [Length; 4] {
@@ -1126,7 +1389,8 @@ fn parse_position(value: &str) -> Option<Position> {
     Some(match value.trim().to_ascii_lowercase().as_str() {
         "static" => Position::Static,
         "relative" => Position::Relative,
-        "absolute" | "fixed" | "sticky" => Position::Absolute,
+        "absolute" | "sticky" => Position::Absolute,
+        "fixed" => Position::Fixed,
         _ => return None,
     })
 }

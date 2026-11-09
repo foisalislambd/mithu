@@ -151,7 +151,7 @@ pub fn paint_layout(
 }
 
 fn paint_box(canvas: &mut Canvas<'_>, box_: &LayoutBox, fonts: &FontBook, clip: Rect, scroll: f32, origin_y: f32) {
-    paint_box_with_opacity(canvas, box_, fonts, clip, scroll, origin_y, 1.0);
+    paint_box_with_opacity(canvas, box_, fonts, clip, scroll, origin_y, 1.0, false);
 }
 
 fn paint_box_with_opacity(
@@ -162,49 +162,53 @@ fn paint_box_with_opacity(
     scroll: f32,
     origin_y: f32,
     opacity: f32,
+    pinned: bool,
 ) {
     if !box_.visible {
         return;
     }
+    let pinned = pinned || box_.fixed;
     let opacity = (opacity * box_.opacity).clamp(0.0, 1.0);
-    let screen = Rect::new(
-        box_.rect.x,
-        box_.rect.y - scroll + origin_y,
-        box_.rect.width,
-        box_.rect.height,
-    );
+    let screen_y = if pinned { box_.rect.y + origin_y } else { box_.rect.y - scroll + origin_y };
+    let screen = Rect::new(box_.rect.x, screen_y, box_.rect.width, box_.rect.height);
     let background = scale_alpha(box_.background, opacity);
     if background.a > 0 {
         canvas.fill_round(screen, background, box_.border_radius, clip);
     }
     if let Some(bitmap) = &box_.image {
-        let inset = box_.border_width.max(0.0);
+        let left = box_.borders[3].max(0.0);
+        let right = box_.borders[1].max(0.0);
+        let top = box_.borders[0].max(0.0);
+        let bottom = box_.borders[2].max(0.0);
         canvas.image(
             Rect::new(
-                screen.x + inset,
-                screen.y + inset,
-                (screen.width - inset * 2.0).max(0.0),
-                (screen.height - inset * 2.0).max(0.0),
+                screen.x + left,
+                screen.y + top,
+                (screen.width - left - right).max(0.0),
+                (screen.height - top - bottom).max(0.0),
             ),
             bitmap,
             clip,
         );
     }
-    let border = box_.border_width;
     let border_color = scale_alpha(box_.border_color, opacity);
-    if border > 0.0 && border_color.a > 0 {
-        canvas.fill(Rect::new(screen.x, screen.y, screen.width, border), border_color, clip);
-        canvas.fill(
-            Rect::new(screen.x, screen.bottom() - border, screen.width, border),
-            border_color,
-            clip,
-        );
-        canvas.fill(Rect::new(screen.x, screen.y, border, screen.height), border_color, clip);
-        canvas.fill(
-            Rect::new(screen.right() - border, screen.y, border, screen.height),
-            border_color,
-            clip,
-        );
+    if border_color.a > 0 {
+        let top = box_.borders[0].max(0.0);
+        let right = box_.borders[1].max(0.0);
+        let bottom = box_.borders[2].max(0.0);
+        let left = box_.borders[3].max(0.0);
+        if top > 0.0 {
+            canvas.fill(Rect::new(screen.x, screen.y, screen.width, top), border_color, clip);
+        }
+        if bottom > 0.0 {
+            canvas.fill(Rect::new(screen.x, screen.bottom() - bottom, screen.width, bottom), border_color, clip);
+        }
+        if left > 0.0 {
+            canvas.fill(Rect::new(screen.x, screen.y, left, screen.height), border_color, clip);
+        }
+        if right > 0.0 {
+            canvas.fill(Rect::new(screen.right() - right, screen.y, right, screen.height), border_color, clip);
+        }
     }
     let child_clip = if box_.overflow_hidden {
         match intersect(clip, screen) {
@@ -218,7 +222,7 @@ fn paint_box_with_opacity(
         let baseline = box_
             .lines
             .first()
-            .map(|line| line.baseline - scroll + origin_y)
+            .map(|line| if pinned { line.baseline + origin_y } else { line.baseline - scroll + origin_y })
             .unwrap_or(screen.y + box_.font_size);
         canvas.text(
             fonts,
@@ -234,7 +238,7 @@ fn paint_box_with_opacity(
         );
     }
     for line in &box_.lines {
-        let baseline = line.baseline - scroll + origin_y;
+        let baseline = if pinned { line.baseline + origin_y } else { line.baseline - scroll + origin_y };
         for fragment in &line.fragments {
             canvas.text(
                 fonts,
@@ -253,7 +257,7 @@ fn paint_box_with_opacity(
     let mut order: Vec<usize> = (0..box_.children.len()).collect();
     order.sort_by_key(|index| box_.children[*index].z_index);
     for index in order {
-        paint_box_with_opacity(canvas, &box_.children[index], fonts, child_clip, scroll, origin_y, opacity);
+        paint_box_with_opacity(canvas, &box_.children[index], fonts, child_clip, scroll, origin_y, opacity, pinned);
     }
 }
 

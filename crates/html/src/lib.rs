@@ -506,7 +506,7 @@ impl Parser {
         match token {
             Token::Comment | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "title" | "style" | "script" | "textarea") => {
+            Token::Start { name, attrs, .. } if matches!(name.as_str(), "title" | "style" | "script" | "textarea" | "noscript") => {
                 self.start_raw(name, attrs);
             }
             Token::Start { name, attrs, .. } if matches!(name.as_str(), "base" | "link" | "meta") => {
@@ -595,7 +595,7 @@ impl Parser {
             return;
         }
         self.reconstruct();
-        if matches!(name.as_str(), "title" | "style" | "script" | "textarea") {
+        if matches!(name.as_str(), "title" | "style" | "script" | "textarea" | "iframe" | "noscript" | "noembed" | "noframes" | "xmp") {
             self.start_raw(name, attrs);
             return;
         }
@@ -1344,6 +1344,55 @@ fn named_entity(name: &str) -> Option<char> {
         "yen" => '¥',
         "deg" => '°',
         "plusmn" => '±',
+        "sect" => '§',
+        "para" => '¶',
+        "micro" => 'µ',
+        "cent" => '¢',
+        "curren" => '¤',
+        "brvbar" => '¦',
+        "uml" => '¨',
+        "ordf" => 'ª',
+        "not" => '¬',
+        "shy" => '\u{00AD}',
+        "macr" => '¯',
+        "sup2" => '²',
+        "sup3" => '³',
+        "acute" => '´',
+        "cedil" => '¸',
+        "sup1" => '¹',
+        "ordm" => 'º',
+        "frac14" => '¼',
+        "frac12" => '½',
+        "frac34" => '¾',
+        "iquest" => '¿',
+        "lsquo" => '‘',
+        "rsquo" => '’',
+        "ldquo" => '“',
+        "rdquo" => '”',
+        "sbquo" => '‚',
+        "bdquo" => '„',
+        "dagger" => '†',
+        "Dagger" => '‡',
+        "permil" => '‰',
+        "lsaquo" => '‹',
+        "rsaquo" => '›',
+        "oline" => '‾',
+        "frasl" => '⁄',
+        "minus" => '−',
+        "lowast" => '∗',
+        "radic" => '√',
+        "infin" => '∞',
+        "asymp" => '≈',
+        "ne" => '≠',
+        "le" => '≤',
+        "ge" => '≥',
+        "lang" => '⟨',
+        "rang" => '⟩',
+        "loz" => '◊',
+        "spades" => '♠',
+        "clubs" => '♣',
+        "hearts" => '♥',
+        "diams" => '♦',
         _ => return None,
     })
 }
@@ -1487,5 +1536,15 @@ mod tests {
             .find(|id| doc.element_name(*id) == Some("b"))
             .expect("reopened b");
         assert_eq!(doc.text_content(inside), "text");
+    }
+
+    #[test]
+    fn raw_text_elements_keep_their_markup_as_text() {
+        let doc = parse_html("<iframe id='frame'><p id='no'>Hi</p></iframe><noscript><div id='also'>x</div></noscript>");
+        let frame = doc.get_element_by_id("frame").unwrap();
+        assert!(doc.node(frame).children.iter().all(|id| doc.element_name(*id).is_none()));
+        assert!(doc.text_content(frame).contains("<p"));
+        assert!(doc.get_element_by_id("no").is_none());
+        assert!(doc.get_element_by_id("also").is_none());
     }
 }
