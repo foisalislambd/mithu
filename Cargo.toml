@@ -6,6 +6,7 @@ members = [
     "crates/net",
     "crates/dom",
     "crates/html",
+    "crates/js",
     "crates/css",
     "crates/style",
     "crates/text",

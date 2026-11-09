@@ -1,8 +1,8 @@
 //! CSS parser for the subset Mithu's style engine understands.
 //!
-//! Selectors support type, class, id, the descendant combinator, and the child
-//! combinator. At-rules are skipped. Declarations stay as strings so the style
-//! crate can interpret them.
+//! Selectors support type, class, id, attributes, structural and link
+//! pseudos, and the descendant, child, and sibling combinators. At-rules are
+//! skipped. Declarations stay as strings so the style crate can interpret them.
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stylesheet {
@@ -26,12 +26,45 @@ pub struct Compound {
     pub tag: Option<String>,
     pub id: Option<String>,
     pub classes: Vec<String>,
+    pub attrs: Vec<AttrSelector>,
+    pub pseudos: Vec<Pseudo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttrSelector {
+    pub name: String,
+    pub op: Option<AttrOp>,
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttrOp {
+    Exact,
+    Includes,
+    Dash,
+    Prefix,
+    Suffix,
+    Substring,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pseudo {
+    FirstChild,
+    LastChild,
+    Nth(i32, i32),
+    Link,
+    Empty,
+    Not(Box<Compound>),
+    /// `:hover`, `:focus`, and `:active` are parsed and do not match a static page.
+    Unmatched,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Combinator {
     Descendant,
     Child,
+    NextSibling,
+    SubsequentSibling,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,16 +80,32 @@ impl Selector {
         let mut classes = 0;
         let mut types = 0;
         for compound in &self.compounds {
-            if compound.id.is_some() {
-                ids += 1;
-            }
-            classes += compound.classes.len() as u32;
-            if compound.tag.is_some() {
-                types += 1;
-            }
+            let (more_ids, more_classes, more_types) = compound_specificity(compound);
+            ids += more_ids;
+            classes += more_classes;
+            types += more_types;
         }
         ids * 100 + classes * 10 + types
     }
+}
+
+fn compound_specificity(compound: &Compound) -> (u32, u32, u32) {
+    let mut ids = u32::from(compound.id.is_some());
+    let mut classes = compound.classes.len() as u32 + compound.attrs.len() as u32;
+    let mut types = u32::from(compound.tag.is_some());
+    for pseudo in &compound.pseudos {
+        match pseudo {
+            Pseudo::Not(inner) => {
+                let (more_ids, more_classes, more_types) = compound_specificity(inner);
+                ids += more_ids;
+                classes += more_classes;
+                types += more_types;
+            }
+            Pseudo::Unmatched => {}
+            _ => classes += 1,
+        }
+    }
+    (ids, classes, types)
 }
 
 pub fn parse_css(input: &str) -> Stylesheet {
@@ -150,13 +199,17 @@ impl CssParser {
                     }
                     break;
                 }
-                Some('>') => {
-                    self.bump();
+                Some('>') | Some('+') | Some('~') => {
+                    let symbol = self.bump();
                     self.skip_ws();
                     let Some(next) = self.parse_compound() else {
                         break;
                     };
-                    combinators.push(Combinator::Child);
+                    combinators.push(match symbol {
+                        Some('+') => Combinator::NextSibling,
+                        Some('~') => Combinator::SubsequentSibling,
+                        _ => Combinator::Child,
+                    });
                     compounds.push(next);
                 }
                 Some(_) if saw_ws => {
@@ -185,6 +238,8 @@ impl CssParser {
             tag: None,
             id: None,
             classes: Vec::new(),
+            attrs: Vec::new(),
+            pseudos: Vec::new(),
         };
         let mut any = false;
         loop {
@@ -219,10 +274,184 @@ impl CssParser {
                     compound.tag = Some(tag);
                     any = true;
                 }
+                Some('[') => {
+                    if let Some(attr) = self.parse_attribute() {
+                        compound.attrs.push(attr);
+                        any = true;
+                    } else {
+                        break;
+                    }
+                }
+                Some(':') => {
+                    self.bump();
+                    if self.peek() == Some(':') {
+                        self.bump();
+                        let _ = self.read_ident();
+                        self.skip_function_args();
+                        continue;
+                    }
+                    let name = self.read_ident().to_ascii_lowercase();
+                    match name.as_str() {
+                        "first-child" => compound.pseudos.push(Pseudo::FirstChild),
+                        "last-child" => compound.pseudos.push(Pseudo::LastChild),
+                        "link" | "visited" => compound.pseudos.push(Pseudo::Link),
+                        "empty" => compound.pseudos.push(Pseudo::Empty),
+                        "hover" | "focus" | "active" => compound.pseudos.push(Pseudo::Unmatched),
+                        "nth-child" => compound.pseudos.push(self.parse_nth()),
+                        "not" => {
+                            if let Some(inner) = self.parse_not() {
+                                compound.pseudos.push(Pseudo::Not(Box::new(inner)));
+                            } else {
+                                compound.pseudos.push(Pseudo::Unmatched);
+                            }
+                        }
+                        _ => {
+                            self.skip_function_args();
+                            compound.pseudos.push(Pseudo::Unmatched);
+                        }
+                    }
+                    any = true;
+                }
                 _ => break,
             }
         }
         any.then_some(compound)
+    }
+
+    fn parse_attribute(&mut self) -> Option<AttrSelector> {
+        if self.peek() != Some('[') {
+            return None;
+        }
+        self.bump();
+        self.skip_ws();
+        let name = self.read_ident().to_ascii_lowercase();
+        if name.is_empty() {
+            return None;
+        }
+        self.skip_ws();
+        let op = match self.peek() {
+            Some(']') => None,
+            Some('=') => {
+                self.bump();
+                Some(AttrOp::Exact)
+            }
+            Some(symbol) if matches!(symbol, '~' | '|' | '^' | '$' | '*') => {
+                self.bump();
+                if self.peek() != Some('=') {
+                    return None;
+                }
+                self.bump();
+                Some(match symbol {
+                    '~' => AttrOp::Includes,
+                    '|' => AttrOp::Dash,
+                    '^' => AttrOp::Prefix,
+                    '$' => AttrOp::Suffix,
+                    _ => AttrOp::Substring,
+                })
+            }
+            _ => return None,
+        };
+        self.skip_ws();
+        let value = if op.is_some() {
+            let value = if self.peek() == Some('"') || self.peek() == Some('\'') {
+                self.read_string()
+            } else {
+                self.read_ident()
+            };
+            Some(value)
+        } else {
+            None
+        };
+        self.skip_ws();
+        if self.peek() == Some(']') {
+            self.bump();
+        }
+        Some(AttrSelector { name, op, value })
+    }
+
+    fn parse_nth(&mut self) -> Pseudo {
+        let text = self.read_function_args();
+        let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let compact = compact.to_ascii_lowercase();
+        match compact.as_str() {
+            "odd" => Pseudo::Nth(2, 1),
+            "even" => Pseudo::Nth(2, 0),
+            "n" => Pseudo::Nth(1, 0),
+            "-n" => Pseudo::Nth(-1, 0),
+            _ => {
+                if let Ok(b) = compact.parse::<i32>() {
+                    return Pseudo::Nth(0, b);
+                }
+                parse_an_b(&compact).map(|(a, b)| Pseudo::Nth(a, b)).unwrap_or(Pseudo::Unmatched)
+            }
+        }
+    }
+
+    fn parse_not(&mut self) -> Option<Compound> {
+        self.skip_ws();
+        if self.peek() != Some('(') {
+            return None;
+        }
+        self.bump();
+        self.skip_ws();
+        let compound = self.parse_compound()?;
+        self.skip_ws();
+        if self.peek() == Some(')') {
+            self.bump();
+        }
+        Some(compound)
+    }
+
+    fn skip_function_args(&mut self) {
+        self.skip_ws();
+        if self.peek() == Some('(') {
+            let _ = self.read_function_args();
+        }
+    }
+
+    fn read_function_args(&mut self) -> String {
+        self.skip_ws();
+        if self.peek() != Some('(') {
+            return String::new();
+        }
+        self.bump();
+        let mut depth = 1;
+        let mut text = String::new();
+        while let Some(ch) = self.bump() {
+            match ch {
+                '(' => {
+                    depth += 1;
+                    text.push(ch);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    text.push(ch);
+                }
+                _ => text.push(ch),
+            }
+        }
+        text
+    }
+
+    fn read_string(&mut self) -> String {
+        let quote = self.bump();
+        let mut out = String::new();
+        while let Some(ch) = self.bump() {
+            if Some(ch) == quote {
+                break;
+            }
+            if ch == '\\' {
+                if let Some(escaped) = self.bump() {
+                    out.push(escaped);
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
     }
 
     fn parse_declaration_block(&mut self) -> Vec<Declaration> {
@@ -370,6 +599,27 @@ impl CssParser {
     }
 }
 
+fn parse_an_b(text: &str) -> Option<(i32, i32)> {
+    let (head, tail) = if let Some(index) = text.find('n') {
+        (&text[..index], &text[index + 1..])
+    } else {
+        return None;
+    };
+    let a = if head.is_empty() || head == "+" {
+        1
+    } else if head == "-" {
+        -1
+    } else {
+        head.parse().ok()?
+    };
+    let b = if tail.is_empty() {
+        0
+    } else {
+        tail.parse().ok()?
+    };
+    Some((a, b))
+}
+
 fn is_ident_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
 }
@@ -427,5 +677,19 @@ mod tests {
         assert!(sheet.rules[0].declarations[0].important);
         assert_eq!(sheet.rules[0].declarations[0].value, "#abc");
         assert_eq!(sheet.rules[0].declarations[1].name, "margin");
+    }
+
+    #[test]
+    fn parses_attribute_sibling_and_nth_selectors() {
+        let sheet = parse_css(r#"a[href] + p[class~="note"]:nth-child(2n+1) { color: teal }"#);
+        let selector = &sheet.rules[0].selectors[0];
+        assert_eq!(
+            selector.combinators,
+            vec![Combinator::NextSibling]
+        );
+        assert_eq!(selector.compounds[0].attrs[0].name, "href");
+        assert_eq!(selector.compounds[1].attrs[0].op, Some(AttrOp::Includes));
+        assert_eq!(selector.compounds[1].pseudos, vec![Pseudo::Nth(2, 1)]);
+        assert!(selector.specificity() >= 30);
     }
 }

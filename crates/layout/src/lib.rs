@@ -6,7 +6,10 @@
 
 use mithu_base::{Edges, Rect};
 use mithu_dom::{Document, NodeData, NodeId};
-use mithu_style::{ComputedStyle, Display, Length, LineHeight, TextAlign, WhiteSpace};
+use mithu_style::{
+    AlignItems, BoxSizing, ComputedStyle, Display, FlexDirection, Justify, Length, LineHeight, Position,
+    TextAlign, WhiteSpace,
+};
 use mithu_text::MeasureText;
 
 #[derive(Clone, Debug)]
@@ -39,6 +42,9 @@ pub struct LayoutBox {
     pub marker: Option<String>,
     pub children: Vec<LayoutBox>,
     pub lines: Vec<LineBox>,
+    pub opacity: f32,
+    pub overflow_hidden: bool,
+    pub border_radius: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -69,7 +75,7 @@ pub fn layout_tree(
     measure: &dyn MeasureText,
 ) -> LayoutTree {
     let root_id = document_element(doc).unwrap_or(doc.root);
-    let root = layout_node(doc, styles, measure, root_id, 0.0, 0.0, viewport_width.max(1.0), None)
+    let root = layout_node(doc, styles, measure, root_id, 0.0, 0.0, viewport_width.max(1.0), None, false)
         .unwrap_or_else(|| empty_box(root_id));
     let content_height = root.rect.bottom() + root.margin.bottom;
     let mut links = Vec::new();
@@ -91,6 +97,7 @@ fn layout_node(
     margin_y: f32,
     containing_width: f32,
     inherited_href: Option<String>,
+    shrink_to_fit: bool,
 ) -> Option<LayoutBox> {
     let style = style_of(styles, id);
     let display = effective_display(doc, styles, id);
@@ -102,7 +109,13 @@ fn layout_node(
     let border = style.border_width.max(0.0);
     let padding = resolve_edges(&style.padding, font, containing_width, false);
     let width_is_auto = matches!(style.width, Length::Auto);
-    let width_opt = resolve_length(style.width, font, containing_width);
+    let width_opt = resolve_length(style.width, font, containing_width).map(|width| {
+        if style.box_sizing == BoxSizing::BorderBox {
+            (width - padding.left - padding.right - border * 2.0).max(0.0)
+        } else {
+            width.max(0.0)
+        }
+    });
     let margin_top = resolve_length(style.margin[0], font, containing_width).unwrap_or(0.0).max(0.0);
     let margin_bottom = resolve_length(style.margin[2], font, containing_width).unwrap_or(0.0).max(0.0);
     let margin_left_opt = resolve_length(style.margin[3], font, containing_width);
@@ -125,15 +138,28 @@ fn layout_node(
         (left, right, content)
     };
 
-    let shrink = display == Display::InlineBlock && width_is_auto;
+    let shrink = width_is_auto && (display == Display::InlineBlock || shrink_to_fit);
     let border_x = containing_x + margin_left;
     let border_y = margin_y + margin_top;
     let content_x = border_x + border + padding.left;
     let content_y = border_y + border + padding.top;
 
+    content_w = limit_content(&style, content_w, font, containing_width, padding.left + padding.right, border);
     let synthetic = synthetic_text(doc, id);
     let blockish = synthetic.is_none() && has_block_child(doc, styles, id);
-    let (lines, children, flowed) = if blockish {
+    let (lines, mut children, flowed) = if display == Display::Flex {
+        layout_flex(
+            doc,
+            styles,
+            measure,
+            id,
+            &style,
+            content_x,
+            content_y,
+            content_w,
+            href.clone(),
+        )
+    } else if blockish {
         layout_blocks(
             doc,
             styles,
@@ -153,6 +179,7 @@ fn layout_node(
         };
         if shrink && !items.is_empty() {
             content_w = preferred_width(&items, content_w);
+            content_w = limit_content(&style, content_w, font, containing_width, padding.left + padding.right, border);
         }
         if is_blank(&items) {
             (Vec::new(), Vec::new(), 0.0)
@@ -161,8 +188,30 @@ fn layout_node(
         }
     };
 
-    let specified_height = resolve_height(style.height, font);
-    let content_h = flowed.max(specified_height.unwrap_or(0.0));
+    let mut specified_height = resolve_height(style.height, font);
+    if style.box_sizing == BoxSizing::BorderBox
+        && let Some(height) = specified_height
+    {
+        specified_height = Some((height - padding.top - padding.bottom - border * 2.0).max(0.0));
+    }
+    let mut content_h = flowed.max(specified_height.unwrap_or(0.0));
+    if let Some(max) = resolve_height(style.max_height, font) {
+        content_h = content_h.min(max);
+    }
+    if let Some(min) = resolve_height(style.min_height, font) {
+        content_h = content_h.max(min);
+    }
+    children.extend(layout_absolute_children(
+        doc,
+        styles,
+        measure,
+        id,
+        content_x,
+        content_y,
+        content_w,
+        content_h,
+        href.clone(),
+    ));
     let rect = Rect::new(
         border_x,
         border_y,
@@ -170,7 +219,7 @@ fn layout_node(
         content_h + padding.top + padding.bottom + border * 2.0,
     );
     let marker = (display == Display::ListItem).then(|| list_marker(doc, id));
-    Some(LayoutBox {
+    let mut laid_out = LayoutBox {
         node: id,
         rect,
         margin: Edges::new(margin_top, margin_right, margin_bottom, margin_left),
@@ -185,7 +234,38 @@ fn layout_node(
         marker,
         children,
         lines,
-    })
+        opacity: style.opacity.clamp(0.0, 1.0),
+        overflow_hidden: style.overflow_hidden,
+        border_radius: style.border_radius,
+    };
+    if style.position == Position::Relative {
+        let dx = resolve_length(style.insets[3], font, containing_width)
+            .or_else(|| resolve_length(style.insets[1], font, containing_width).map(|right| -right))
+            .unwrap_or(0.0);
+        let dy = resolve_length(style.insets[0], font, containing_width)
+            .or_else(|| resolve_length(style.insets[2], font, containing_width).map(|bottom| -bottom))
+            .unwrap_or(0.0);
+        translate(&mut laid_out, dx, dy);
+    }
+    Some(laid_out)
+}
+
+fn limit_content(style: &ComputedStyle, content_w: f32, font: f32, containing: f32, padding_x: f32, border: f32) -> f32 {
+    let adjust = |length: f32| {
+        if style.box_sizing == BoxSizing::BorderBox {
+            (length - padding_x - border * 2.0).max(0.0)
+        } else {
+            length.max(0.0)
+        }
+    };
+    let mut width = content_w;
+    if let Some(max) = resolve_length(style.max_width, font, containing) {
+        width = width.min(adjust(max));
+    }
+    if let Some(min) = resolve_length(style.min_width, font, containing) {
+        width = width.max(adjust(min));
+    }
+    width.max(0.0)
 }
 
 fn layout_blocks(
@@ -222,7 +302,7 @@ fn layout_blocks(
     for child in doc.node(id).children.clone() {
         if is_block_child(doc, styles, child) {
             flush(&mut group, &mut y, &mut lines, &mut children);
-            if let Some(child_box) = layout_node(doc, styles, measure, child, content_x, y, content_w, href.clone()) {
+            if let Some(child_box) = layout_node(doc, styles, measure, child, content_x, y, content_w, href.clone(), false) {
                 y = child_box.rect.bottom() + child_box.margin.bottom;
                 children.push(child_box);
             }
@@ -272,8 +352,10 @@ fn collect_node(
             let style = style_of(styles, id);
             let href = own_href(doc, id).or(href);
             let display = effective_display(doc, styles, id);
-            if matches!(display, Display::Block | Display::ListItem | Display::InlineBlock) || synthetic_text(doc, id).is_some() {
-                let Some(layout) = layout_node(doc, styles, measure, id, 0.0, 0.0, available, href) else {
+            if matches!(display, Display::Block | Display::ListItem | Display::InlineBlock | Display::Flex)
+                || synthetic_text(doc, id).is_some()
+            {
+                let Some(layout) = layout_node(doc, styles, measure, id, 0.0, 0.0, available, href, false) else {
                     return Vec::new();
                 };
                 let width = layout.margin.left + layout.rect.width + layout.margin.right;
@@ -624,7 +706,7 @@ fn contains_block(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool 
         if display == Display::None {
             continue;
         }
-        if matches!(display, Display::Block | Display::ListItem) || contains_block(doc, styles, *child) {
+        if matches!(display, Display::Block | Display::ListItem | Display::Flex) || contains_block(doc, styles, *child) {
             return true;
         }
     }
@@ -636,10 +718,22 @@ fn has_block_child(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool
 }
 
 fn is_block_child(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool {
-    doc.element_name(id).is_some_and(|_| matches!(effective_display(doc, styles, id), Display::Block | Display::ListItem))
+    if is_absolute(doc, styles, id) {
+        return false;
+    }
+    doc.element_name(id).is_some_and(|_| {
+        matches!(effective_display(doc, styles, id), Display::Block | Display::ListItem | Display::Flex)
+    })
+}
+
+fn is_absolute(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool {
+    doc.element_name(id).is_some() && style_of(styles, id).position == Position::Absolute
 }
 
 fn is_skipped(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool {
+    if is_absolute(doc, styles, id) {
+        return true;
+    }
     match &doc.node(id).data {
         NodeData::Comment(_) => true,
         NodeData::Element(_) => effective_display(doc, styles, id) == Display::None,
@@ -761,6 +855,202 @@ fn is_ascii_space(ch: char) -> bool {
     matches!(ch, ' ' | '\n' | '\r' | '\t' | '\u{000C}')
 }
 
+fn layout_flex(
+    doc: &Document,
+    styles: &[ComputedStyle],
+    measure: &dyn MeasureText,
+    id: NodeId,
+    style: &ComputedStyle,
+    content_x: f32,
+    content_y: f32,
+    content_w: f32,
+    href: Option<String>,
+) -> (Vec<LineBox>, Vec<LayoutBox>, f32) {
+    let row = style.flex_direction == FlexDirection::Row;
+    let mut items = Vec::new();
+    for child in doc.node(id).children.clone() {
+        if let NodeData::Text(text) = &doc.node(child).data {
+            if text.trim().is_empty() {
+                continue;
+            }
+            items.push((text_flex_item(child, text, style, measure, href.clone(), content_w), 0.0));
+            continue;
+        }
+        if is_skipped(doc, styles, child) {
+            continue;
+        }
+        let child_style = style_of(styles, child);
+        let shrink = if row {
+            matches!(child_style.width, Length::Auto)
+        } else {
+            matches!(child_style.width, Length::Auto) && style.align_items != AlignItems::Stretch
+        };
+        if let Some(layout) = layout_node(doc, styles, measure, child, 0.0, 0.0, content_w, href.clone(), shrink) {
+            items.push((layout, child_style.flex_grow.max(0.0)));
+        }
+    }
+    if style.flex_reverse {
+        items.reverse();
+    }
+    if items.is_empty() {
+        return (Vec::new(), Vec::new(), 0.0);
+    }
+    let gap = style.gap.max(0.0);
+    let count = items.len();
+    let outer = |layout: &LayoutBox, main: bool| -> f32 {
+        if main == row {
+            layout.margin.left + layout.rect.width + layout.margin.right
+        } else {
+            layout.margin.top + layout.rect.height + layout.margin.bottom
+        }
+    };
+    let bases: Vec<f32> = items.iter().map(|(layout, _)| outer(layout, true)).collect();
+    let gap_total = gap * (count.saturating_sub(1)) as f32;
+    let used: f32 = bases.iter().sum::<f32>() + gap_total;
+    let free = if row { content_w - used } else { 0.0 };
+    let grow_sum: f32 = items.iter().map(|(_, grow)| *grow).sum();
+    let mut extra = vec![0.0; count];
+    if row && free > 0.0 && grow_sum > 0.0 {
+        for (index, (_, grow)) in items.iter().enumerate() {
+            extra[index] = free * grow / grow_sum;
+        }
+    }
+    let leftover = if row && free > 0.0 && grow_sum == 0.0 { free } else { 0.0 };
+    let between = if style.justify == Justify::SpaceBetween && count > 1 {
+        leftover / (count - 1) as f32
+    } else {
+        0.0
+    };
+    let start = match style.justify {
+        Justify::End => leftover,
+        Justify::Center => leftover / 2.0,
+        Justify::Start | Justify::SpaceBetween => 0.0,
+    };
+    let cross: Vec<f32> = items.iter().map(|(layout, _)| outer(layout, false)).collect();
+    let line = cross.iter().copied().fold(0.0_f32, f32::max);
+    let mut cursor = if row { content_x + start } else { content_y + start };
+    let mut placed = Vec::new();
+    for (index, (mut layout, _)) in items.into_iter().enumerate() {
+        if row && extra[index] > 0.0 {
+            layout.rect.width += extra[index];
+        }
+        let main = bases[index] + extra[index];
+        let cross_size = cross[index];
+        let shift = match style.align_items {
+            AlignItems::End => (line - cross_size).max(0.0),
+            AlignItems::Center => (line - cross_size).max(0.0) / 2.0,
+            AlignItems::Stretch | AlignItems::Start => 0.0,
+        };
+        if style.align_items == AlignItems::Stretch && row && matches!(style_of(styles, layout.node).height, Length::Auto) {
+            layout.rect.height = (line - layout.margin.top - layout.margin.bottom).max(layout.rect.height);
+        }
+        if style.align_items == AlignItems::Stretch && !row && matches!(style_of(styles, layout.node).width, Length::Auto) {
+            layout.rect.width = (content_w - layout.margin.left - layout.margin.right).max(layout.rect.width);
+        }
+        let (x, y) = if row {
+            (cursor, content_y + shift)
+        } else {
+            (content_x + shift, cursor)
+        };
+        translate(&mut layout, x, y);
+        cursor += main + gap + between;
+        placed.push(layout);
+    }
+    let height = if row {
+        line
+    } else {
+        (cursor - content_y - gap).max(0.0)
+    };
+    (Vec::new(), placed, height)
+}
+
+fn text_flex_item(
+    node: NodeId,
+    text: &str,
+    style: &ComputedStyle,
+    measure: &dyn MeasureText,
+    href: Option<String>,
+    content_w: f32,
+) -> LayoutBox {
+    let items = items_from_text(text, style, measure, href.clone());
+    let width = preferred_width(&items, content_w).min(content_w).max(0.0);
+    let (lines, children, height) = if is_blank(&items) {
+        (Vec::new(), Vec::new(), 0.0)
+    } else {
+        place_items(&items, 0.0, 0.0, width, style.text_align)
+    };
+    LayoutBox {
+        node,
+        rect: Rect::new(0.0, 0.0, width, height),
+        margin: Edges::ZERO,
+        background: mithu_base::Color::TRANSPARENT,
+        border_color: style.color,
+        border_width: 0.0,
+        color: style.color,
+        font_size: style.font_size,
+        bold: style.bold,
+        mono: style.mono,
+        href,
+        marker: None,
+        children,
+        lines,
+        opacity: 1.0,
+        overflow_hidden: false,
+        border_radius: 0.0,
+    }
+}
+
+fn layout_absolute_children(
+    doc: &Document,
+    styles: &[ComputedStyle],
+    measure: &dyn MeasureText,
+    id: NodeId,
+    content_x: f32,
+    content_y: f32,
+    content_w: f32,
+    content_h: f32,
+    href: Option<String>,
+) -> Vec<LayoutBox> {
+    let mut placed = Vec::new();
+    for child in doc.node(id).children.clone() {
+        if !is_absolute(doc, styles, child) {
+            continue;
+        }
+        let Some(mut layout) = layout_node(
+            doc,
+            styles,
+            measure,
+            child,
+            content_x,
+            content_y,
+            content_w,
+            href.clone(),
+            false,
+        ) else {
+            continue;
+        };
+        let style = style_of(styles, child);
+        let font = style.font_size;
+        let dx = if let Some(left) = resolve_length(style.insets[3], font, content_w) {
+            content_x + left - layout.rect.x
+        } else if let Some(right) = resolve_length(style.insets[1], font, content_w) {
+            content_x + content_w - layout.rect.width - right - layout.rect.x
+        } else {
+            0.0
+        };
+        let dy = if let Some(top) = resolve_length(style.insets[0], font, content_w) {
+            content_y + top - layout.rect.y
+        } else if let Some(bottom) = resolve_length(style.insets[2], font, content_w) {
+            content_y + content_h - layout.rect.height - bottom - layout.rect.y
+        } else {
+            0.0
+        };
+        translate(&mut layout, dx, dy);
+        placed.push(layout);
+    }
+    placed
+}
+
 fn empty_box(node: NodeId) -> LayoutBox {
     LayoutBox {
         node,
@@ -777,6 +1067,9 @@ fn empty_box(node: NodeId) -> LayoutBox {
         marker: None,
         children: Vec::new(),
         lines: Vec::new(),
+        opacity: 1.0,
+        overflow_hidden: false,
+        border_radius: 0.0,
     }
 }
 
@@ -805,5 +1098,28 @@ mod tests {
         assert!((found.rect.y - 8.0).abs() < 0.5, "y {}", found.rect.y);
         assert!((found.rect.width - 100.0).abs() < 0.5, "w {}", found.rect.width);
         assert!((found.rect.height - 50.0).abs() < 0.5, "h {}", found.rect.height);
+    }
+
+    #[test]
+    fn flex_row_and_absolute_child() {
+        let doc = parse_html(
+            r#"<div id="row" style="display:flex;gap:10px">
+                <div id="a" style="width:40px;height:20px"></div>
+                <div id="b" style="width:60px;height:20px"></div>
+            </div>
+            <div id="host" style="position:relative;width:200px;height:80px">
+                <div id="pin" style="position:absolute;top:12px;left:30px;width:10px;height:10px"></div>
+            </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics);
+        let row = find(&tree.root, doc.get_element_by_id("row").unwrap()).unwrap();
+        let a = find(row, doc.get_element_by_id("a").unwrap()).unwrap();
+        let b = find(row, doc.get_element_by_id("b").unwrap()).unwrap();
+        assert!((b.rect.x - (a.rect.x + 40.0 + 10.0)).abs() < 0.5, "gap {}", b.rect.x - a.rect.x);
+        let host = find(&tree.root, doc.get_element_by_id("host").unwrap()).unwrap();
+        let pin = find(host, doc.get_element_by_id("pin").unwrap()).unwrap();
+        assert!((pin.rect.x - (host.rect.x + 30.0)).abs() < 0.5, "x {}", pin.rect.x);
+        assert!((pin.rect.y - (host.rect.y + 12.0)).abs() < 0.5, "y {}", pin.rect.y);
     }
 }

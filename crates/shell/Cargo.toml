@@ -10,6 +10,7 @@ description = "Navigation, history, and the browser frame"
 mithu-base = { path = "../base" }
 mithu-dom = { path = "../dom" }
 mithu-html = { path = "../html" }
+mithu-js = { path = "../js" }
 mithu-layout = { path = "../layout" }
 mithu-net = { path = "../net" }
 mithu-paint = { path = "../paint" }

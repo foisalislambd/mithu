@@ -12,9 +12,14 @@ pub struct Canvas<'a> {
 
 impl Canvas<'_> {
     pub fn fill(&mut self, rect: Rect, color: Color, clip: Rect) {
+        self.fill_round(rect, color, 0.0, clip);
+    }
+
+    pub fn fill_round(&mut self, rect: Rect, color: Color, radius: f32, clip: Rect) {
         if color.a == 0 || rect.width <= 0.0 || rect.height <= 0.0 {
             return;
         }
+        let source = rect;
         let Some(rect) = intersect(rect, clip) else {
             return;
         };
@@ -26,7 +31,7 @@ impl Canvas<'_> {
             return;
         }
         let stride = self.width as usize;
-        if color.a == 255 {
+        if color.a == 255 && radius <= 0.0 {
             let packed = color.to_u32();
             for y in y0..y1 {
                 let row = y as usize * stride;
@@ -39,8 +44,15 @@ impl Canvas<'_> {
         for y in y0..y1 {
             let row = y as usize * stride;
             for x in x0..x1 {
+                if radius > 0.0 && !inside_round(x, y, source, radius) {
+                    continue;
+                }
                 let index = row + x as usize;
-                self.pixels[index] = blend(self.pixels[index], color, 255);
+                if color.a == 255 {
+                    self.pixels[index] = color.to_u32();
+                } else {
+                    self.pixels[index] = blend(self.pixels[index], color, 255);
+                }
             }
         }
     }
@@ -106,30 +118,53 @@ pub fn paint_layout(
 }
 
 fn paint_box(canvas: &mut Canvas<'_>, box_: &LayoutBox, fonts: &FontBook, clip: Rect, scroll: f32, origin_y: f32) {
+    paint_box_with_opacity(canvas, box_, fonts, clip, scroll, origin_y, 1.0);
+}
+
+fn paint_box_with_opacity(
+    canvas: &mut Canvas<'_>,
+    box_: &LayoutBox,
+    fonts: &FontBook,
+    clip: Rect,
+    scroll: f32,
+    origin_y: f32,
+    opacity: f32,
+) {
+    let opacity = (opacity * box_.opacity).clamp(0.0, 1.0);
     let screen = Rect::new(
         box_.rect.x,
         box_.rect.y - scroll + origin_y,
         box_.rect.width,
         box_.rect.height,
     );
-    if box_.background.a > 0 {
-        canvas.fill(screen, box_.background, clip);
+    let background = scale_alpha(box_.background, opacity);
+    if background.a > 0 {
+        canvas.fill_round(screen, background, box_.border_radius, clip);
     }
     let border = box_.border_width;
-    if border > 0.0 && box_.border_color.a > 0 {
-        canvas.fill(Rect::new(screen.x, screen.y, screen.width, border), box_.border_color, clip);
+    let border_color = scale_alpha(box_.border_color, opacity);
+    if border > 0.0 && border_color.a > 0 {
+        canvas.fill(Rect::new(screen.x, screen.y, screen.width, border), border_color, clip);
         canvas.fill(
             Rect::new(screen.x, screen.bottom() - border, screen.width, border),
-            box_.border_color,
+            border_color,
             clip,
         );
-        canvas.fill(Rect::new(screen.x, screen.y, border, screen.height), box_.border_color, clip);
+        canvas.fill(Rect::new(screen.x, screen.y, border, screen.height), border_color, clip);
         canvas.fill(
             Rect::new(screen.right() - border, screen.y, border, screen.height),
-            box_.border_color,
+            border_color,
             clip,
         );
     }
+    let child_clip = if box_.overflow_hidden {
+        match intersect(clip, screen) {
+            Some(next) => next,
+            None => return,
+        }
+    } else {
+        clip
+    };
     if let Some(marker) = &box_.marker {
         let baseline = box_
             .lines
@@ -142,11 +177,11 @@ fn paint_box(canvas: &mut Canvas<'_>, box_: &LayoutBox, fonts: &FontBook, clip: 
             baseline,
             marker,
             box_.font_size,
-            box_.color,
+            scale_alpha(box_.color, opacity),
             box_.bold,
             box_.mono,
             false,
-            clip,
+            child_clip,
         );
     }
     for line in &box_.lines {
@@ -158,17 +193,56 @@ fn paint_box(canvas: &mut Canvas<'_>, box_: &LayoutBox, fonts: &FontBook, clip: 
                 baseline,
                 &fragment.text,
                 fragment.size,
-                fragment.color,
+                scale_alpha(fragment.color, opacity),
                 fragment.bold,
                 fragment.mono,
                 fragment.underline,
-                clip,
+                child_clip,
             );
         }
     }
     for child in &box_.children {
-        paint_box(canvas, child, fonts, clip, scroll, origin_y);
+        paint_box_with_opacity(canvas, child, fonts, child_clip, scroll, origin_y, opacity);
     }
+}
+
+fn scale_alpha(color: Color, opacity: f32) -> Color {
+    Color {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+        a: (f32::from(color.a) * opacity).round().clamp(0.0, 255.0) as u8,
+    }
+}
+
+fn inside_round(x: i32, y: i32, rect: Rect, radius: f32) -> bool {
+    let radius = radius.min(rect.width / 2.0).min(rect.height / 2.0);
+    if radius <= 0.0 {
+        return true;
+    }
+    let px = x as f32 + 0.5;
+    let py = y as f32 + 0.5;
+    let inner_left = rect.x + radius;
+    let inner_right = rect.right() - radius;
+    let inner_top = rect.y + radius;
+    let inner_bottom = rect.bottom() - radius;
+    let cx = if px < inner_left {
+        inner_left
+    } else if px > inner_right {
+        inner_right
+    } else {
+        return true;
+    };
+    let cy = if py < inner_top {
+        inner_top
+    } else if py > inner_bottom {
+        inner_bottom
+    } else {
+        return true;
+    };
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy <= radius * radius
 }
 
 fn intersect(rect: Rect, clip: Rect) -> Option<Rect> {

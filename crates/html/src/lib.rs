@@ -669,7 +669,17 @@ impl Parser {
                     self.doc.stylesheets.push(text);
                 }
             }
-            "script" => self.doc.scripts.push(text),
+            "script" => {
+                let src = self.doc.attr(id, "src").map(str::to_string);
+                let kind = self.doc.attr(id, "type").unwrap_or("").to_ascii_lowercase();
+                if src.is_some() || !text.trim().is_empty() {
+                    self.doc.scripts.push(mithu_dom::Script {
+                        src,
+                        code: text,
+                        module: kind == "module",
+                    });
+                }
+            }
             _ => {}
         }
     }

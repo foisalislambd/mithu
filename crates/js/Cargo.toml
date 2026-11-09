@@ -1,0 +1,18 @@
+[package]
+name = "mithu-js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "JavaScript virtual machine and DOM bindings"
+
+[dependencies]
+boa_engine = "0.22.0"
+boa_gc = "0.22.0"
+mithu-css = { path = "../css" }
+mithu-dom = { path = "../dom" }
+mithu-html = { path = "../html" }
+mithu-style = { path = "../style" }
+
+[lints]
+workspace = true

@@ -1,7 +1,9 @@
 //! Cascade computed styles from the user-agent sheet, author CSS, and `style` attributes.
 
 use mithu_base::Color;
-use mithu_css::{parse_css, parse_declarations, Combinator, Declaration, Stylesheet};
+use mithu_css::{
+    parse_css, parse_declarations, AttrOp, Combinator, Declaration, Pseudo, Selector, Stylesheet,
+};
 use mithu_dom::{Document, NodeId};
 
 pub const USER_AGENT_CSS: &str = r#"
@@ -39,7 +41,43 @@ pub enum Display {
     Block,
     InlineBlock,
     ListItem,
+    Flex,
     None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlexDirection {
+    Row,
+    Column,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Justify {
+    Start,
+    End,
+    Center,
+    SpaceBetween,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignItems {
+    Stretch,
+    Start,
+    Center,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoxSizing {
+    ContentBox,
+    BorderBox,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,6 +127,22 @@ pub struct ComputedStyle {
     pub border_width: f32,
     pub border_color: Color,
     pub line_height: LineHeight,
+    pub position: Position,
+    pub insets: [Length; 4],
+    pub min_width: Length,
+    pub max_width: Length,
+    pub min_height: Length,
+    pub max_height: Length,
+    pub opacity: f32,
+    pub flex_direction: FlexDirection,
+    pub flex_reverse: bool,
+    pub gap: f32,
+    pub justify: Justify,
+    pub align_items: AlignItems,
+    pub flex_grow: f32,
+    pub box_sizing: BoxSizing,
+    pub overflow_hidden: bool,
+    pub border_radius: f32,
 }
 
 impl ComputedStyle {
@@ -110,6 +164,22 @@ impl ComputedStyle {
             border_width: 0.0,
             border_color: Color::BLACK,
             line_height: LineHeight::Normal,
+            position: Position::Static,
+            insets: [Length::Auto; 4],
+            min_width: Length::Auto,
+            max_width: Length::Auto,
+            min_height: Length::Auto,
+            max_height: Length::Auto,
+            opacity: 1.0,
+            flex_direction: FlexDirection::Row,
+            flex_reverse: false,
+            gap: 0.0,
+            justify: Justify::Start,
+            align_items: AlignItems::Stretch,
+            flex_grow: 0.0,
+            box_sizing: BoxSizing::ContentBox,
+            overflow_hidden: false,
+            border_radius: 0.0,
         }
     }
 }
@@ -138,6 +208,21 @@ struct Specified {
     border_width: Option<Ranked<f32>>,
     border_color: Option<Ranked<Color>>,
     line_height: Option<Ranked<LineHeight>>,
+    position: Option<Ranked<Position>>,
+    insets: [Option<Ranked<Length>>; 4],
+    min_width: Option<Ranked<Length>>,
+    max_width: Option<Ranked<Length>>,
+    min_height: Option<Ranked<Length>>,
+    max_height: Option<Ranked<Length>>,
+    opacity: Option<Ranked<f32>>,
+    flex_direction: Option<Ranked<(FlexDirection, bool)>>,
+    gap: Option<Ranked<f32>>,
+    justify: Option<Ranked<Justify>>,
+    align_items: Option<Ranked<AlignItems>>,
+    flex_grow: Option<Ranked<f32>>,
+    box_sizing: Option<Ranked<BoxSizing>>,
+    overflow_hidden: Option<Ranked<bool>>,
+    border_radius: Option<Ranked<f32>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -145,6 +230,10 @@ enum FontSize {
     Px(f32),
     Em(f32),
     Percent(f32),
+}
+
+pub fn matches_element(doc: &Document, id: NodeId, selector: &Selector) -> bool {
+    matches_selector(doc, id, selector)
 }
 
 pub fn style_document(doc: &Document, author_css: &str) -> Vec<ComputedStyle> {
@@ -224,6 +313,30 @@ fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector) 
                 }
                 current = parent;
             }
+            Some(Combinator::NextSibling) => {
+                let Some(previous) = doc.previous_element_sibling(current) else {
+                    return false;
+                };
+                if !matches_compound(doc, previous, compound) {
+                    return false;
+                }
+                current = previous;
+            }
+            Some(Combinator::SubsequentSibling) => {
+                let mut previous = doc.previous_element_sibling(current);
+                let mut found = false;
+                while let Some(candidate) = previous {
+                    if matches_compound(doc, candidate, compound) {
+                        current = candidate;
+                        found = true;
+                        break;
+                    }
+                    previous = doc.previous_element_sibling(candidate);
+                }
+                if !found {
+                    return false;
+                }
+            }
             Some(Combinator::Descendant) | None => {
                 let mut parent = doc.parent_element(current);
                 let mut found = false;
@@ -258,10 +371,70 @@ fn matches_compound(doc: &Document, id: NodeId, compound: &mithu_css::Compound) 
     {
         return false;
     }
-    compound
+    if !compound
         .classes
         .iter()
         .all(|class| element.classes.iter().any(|have| have == class))
+    {
+        return false;
+    }
+    if !compound
+        .attrs
+        .iter()
+        .all(|attr| matches_attr(doc, id, attr))
+    {
+        return false;
+    }
+    compound.pseudos.iter().all(|pseudo| matches_pseudo(doc, id, pseudo))
+}
+
+fn matches_attr(doc: &Document, id: NodeId, attr: &mithu_css::AttrSelector) -> bool {
+    let Some(value) = doc.attr(id, &attr.name) else {
+        return false;
+    };
+    let Some(op) = attr.op else {
+        return true;
+    };
+    let expected = attr.value.as_deref().unwrap_or("");
+    match op {
+        AttrOp::Exact => value == expected,
+        AttrOp::Includes => value.split_whitespace().any(|part| part == expected),
+        AttrOp::Dash => value == expected || value.strip_prefix(expected).is_some_and(|rest| rest.starts_with('-')),
+        AttrOp::Prefix => value.starts_with(expected),
+        AttrOp::Suffix => value.ends_with(expected),
+        AttrOp::Substring => value.contains(expected),
+    }
+}
+
+fn matches_pseudo(doc: &Document, id: NodeId, pseudo: &Pseudo) -> bool {
+    match pseudo {
+        Pseudo::FirstChild => doc.previous_element_sibling(id).is_none(),
+        Pseudo::LastChild => doc.next_element_sibling(id).is_none(),
+        Pseudo::Nth(a, b) => doc
+            .element_child_index(id)
+            .is_some_and(|index| nth_matches(*a, *b, index)),
+        Pseudo::Link => doc.element_name(id) == Some("a") && doc.attr(id, "href").is_some(),
+        Pseudo::Empty => is_empty(doc, id),
+        Pseudo::Not(inner) => !matches_compound(doc, id, inner),
+        Pseudo::Unmatched => false,
+    }
+}
+
+fn nth_matches(a: i32, b: i32, index: usize) -> bool {
+    let index = index as i32;
+    if a == 0 {
+        return index == b;
+    }
+    let delta = index - b;
+    delta % a == 0 && delta / a >= 0
+}
+
+fn is_empty(doc: &Document, id: NodeId) -> bool {
+    doc.node(id).children.iter().all(|child| match &doc.node(*child).data {
+        mithu_dom::NodeData::Comment(_) => true,
+        mithu_dom::NodeData::Text(text) => text.trim().is_empty(),
+        _ => false,
+    })
 }
 
 fn apply_declaration(declaration: &Declaration, spec: u32, specified: &mut Specified) {
@@ -359,6 +532,63 @@ fn apply_declaration(declaration: &Declaration, spec: u32, specified: &mut Speci
                 rank(&mut specified.line_height, height, spec);
             }
         }
+        "position" => {
+            if let Some(position) = parse_position(value) {
+                rank(&mut specified.position, position, spec);
+            }
+        }
+        "top" => set_side(&mut specified.insets, 0, value, spec),
+        "right" => set_side(&mut specified.insets, 1, value, spec),
+        "bottom" => set_side(&mut specified.insets, 2, value, spec),
+        "left" => set_side(&mut specified.insets, 3, value, spec),
+        "min-width" => set_optional_length(&mut specified.min_width, value, spec),
+        "max-width" => set_optional_length(&mut specified.max_width, value, spec),
+        "min-height" => set_optional_length(&mut specified.min_height, value, spec),
+        "max-height" => set_optional_length(&mut specified.max_height, value, spec),
+        "opacity" => {
+            if let Some(opacity) = parse_opacity(value) {
+                rank(&mut specified.opacity, opacity, spec);
+            }
+        }
+        "flex-direction" => {
+            if let Some(direction) = parse_flex_direction(value) {
+                rank(&mut specified.flex_direction, direction, spec);
+            }
+        }
+        "gap" | "row-gap" | "column-gap" => {
+            if let Some(Length::Px(px)) = parse_length(value) {
+                rank(&mut specified.gap, px.max(0.0), spec);
+            }
+        }
+        "justify-content" => {
+            if let Some(justify) = parse_justify(value) {
+                rank(&mut specified.justify, justify, spec);
+            }
+        }
+        "align-items" => {
+            if let Some(align) = parse_align_items(value) {
+                rank(&mut specified.align_items, align, spec);
+            }
+        }
+        "flex-grow" => {
+            if let Some(grow) = value.trim().parse::<f32>().ok() {
+                rank(&mut specified.flex_grow, grow.max(0.0), spec);
+            }
+        }
+        "box-sizing" => {
+            if let Some(sizing) = parse_box_sizing(value) {
+                rank(&mut specified.box_sizing, sizing, spec);
+            }
+        }
+        "overflow" | "overflow-x" | "overflow-y" => {
+            let hidden = matches!(value.trim().to_ascii_lowercase().as_str(), "hidden" | "clip" | "scroll");
+            rank(&mut specified.overflow_hidden, hidden, spec);
+        }
+        "border-radius" => {
+            if let Some(Length::Px(px)) = parse_length(value.split_whitespace().next().unwrap_or(value)) {
+                rank(&mut specified.border_radius, px.max(0.0), spec);
+            }
+        }
         _ => {}
     }
 }
@@ -372,6 +602,16 @@ fn rank<T>(slot: &mut Option<Ranked<T>>, value: T, spec: u32) {
 fn set_side(sides: &mut [Option<Ranked<Length>>; 4], index: usize, value: &str, spec: u32) {
     if let Some(length) = parse_length(value) {
         rank(&mut sides[index], length, spec);
+    }
+}
+
+fn set_optional_length(slot: &mut Option<Ranked<Length>>, value: &str, spec: u32) {
+    if value.trim().eq_ignore_ascii_case("none") {
+        rank(slot, Length::Auto, spec);
+        return;
+    }
+    if let Some(length) = parse_length(value) {
+        rank(slot, length, spec);
     }
 }
 
@@ -442,6 +682,38 @@ fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &Comput
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(parent.line_height),
+        position: specified
+            .position
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Position::Static),
+        insets: take_sides(&specified.insets, Length::Auto),
+        min_width: specified.min_width.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
+        max_width: specified.max_width.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
+        min_height: specified.min_height.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
+        max_height: specified.max_height.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
+        opacity: specified.opacity.as_ref().map(|item| item.value).unwrap_or(1.0).clamp(0.0, 1.0),
+        flex_direction: specified
+            .flex_direction
+            .as_ref()
+            .map(|item| item.value.0)
+            .unwrap_or(FlexDirection::Row),
+        flex_reverse: specified.flex_direction.as_ref().is_some_and(|item| item.value.1),
+        gap: specified.gap.as_ref().map(|item| item.value).unwrap_or(0.0),
+        justify: specified.justify.as_ref().map(|item| item.value).unwrap_or(Justify::Start),
+        align_items: specified
+            .align_items
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(AlignItems::Stretch),
+        flex_grow: specified.flex_grow.as_ref().map(|item| item.value).unwrap_or(0.0),
+        box_sizing: specified
+            .box_sizing
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(BoxSizing::ContentBox),
+        overflow_hidden: specified.overflow_hidden.as_ref().is_some_and(|item| item.value),
+        border_radius: specified.border_radius.as_ref().map(|item| item.value).unwrap_or(0.0),
     };
     apply_presentational_hints(doc, id, &mut computed);
     computed
@@ -525,6 +797,7 @@ fn parse_display(value: &str) -> Option<Display> {
         "inline" => Display::Inline,
         "inline-block" => Display::InlineBlock,
         "list-item" => Display::ListItem,
+        "flex" | "inline-flex" => Display::Flex,
         "none" => Display::None,
         _ => return None,
     })
@@ -553,6 +826,62 @@ fn parse_font_size(value: &str) -> Option<FontSize> {
         Length::Percent(percent) => Some(FontSize::Percent(percent)),
         Length::Auto => None,
     }
+}
+
+fn parse_position(value: &str) -> Option<Position> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "static" => Position::Static,
+        "relative" => Position::Relative,
+        "absolute" | "fixed" | "sticky" => Position::Absolute,
+        _ => return None,
+    })
+}
+
+fn parse_flex_direction(value: &str) -> Option<(FlexDirection, bool)> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "row" => (FlexDirection::Row, false),
+        "row-reverse" => (FlexDirection::Row, true),
+        "column" => (FlexDirection::Column, false),
+        "column-reverse" => (FlexDirection::Column, true),
+        _ => return None,
+    })
+}
+
+fn parse_justify(value: &str) -> Option<Justify> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "flex-start" | "start" | "left" => Justify::Start,
+        "flex-end" | "end" | "right" => Justify::End,
+        "center" => Justify::Center,
+        "space-between" => Justify::SpaceBetween,
+        "space-around" | "space-evenly" => Justify::Center,
+        _ => return None,
+    })
+}
+
+fn parse_align_items(value: &str) -> Option<AlignItems> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "stretch" => AlignItems::Stretch,
+        "flex-start" | "start" => AlignItems::Start,
+        "center" => AlignItems::Center,
+        "flex-end" | "end" => AlignItems::End,
+        _ => return None,
+    })
+}
+
+fn parse_box_sizing(value: &str) -> Option<BoxSizing> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "border-box" => BoxSizing::BorderBox,
+        "content-box" => BoxSizing::ContentBox,
+        _ => return None,
+    })
+}
+
+fn parse_opacity(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(percent) = value.strip_suffix('%') {
+        return percent.trim().parse::<f32>().ok().map(|number| number / 100.0);
+    }
+    value.parse().ok()
 }
 
 fn parse_bold(value: &str) -> Option<bool> {
@@ -787,6 +1116,28 @@ mod tests {
         let p = p.expect("p");
         assert_eq!(styles[p.0].color, Color::rgb(1, 2, 3));
         assert_eq!(styles[p.0].display, Display::Block);
+    }
+
+    #[test]
+    fn flex_position_and_attribute_selector() {
+        let doc = parse_html(r#"<div id="row" class="row"><b id="one">A</b><i id="two">B</i></div>"#);
+        let styles = style_document(
+            &doc,
+            r#"
+            .row { display: flex; gap: 8px; opacity: 0.5; position: relative; }
+            .row > :first-child { color: navy }
+            b[id=one] + i { color: teal }
+            "#,
+        );
+        let row = doc.get_element_by_id("row").unwrap();
+        assert_eq!(styles[row.0].display, Display::Flex);
+        assert_eq!(styles[row.0].gap, 8.0);
+        assert_eq!(styles[row.0].opacity, 0.5);
+        assert_eq!(styles[row.0].position, Position::Relative);
+        let one = doc.get_element_by_id("one").unwrap();
+        let two = doc.get_element_by_id("two").unwrap();
+        assert_eq!(styles[one.0].color, Color::rgb(0, 0, 128));
+        assert_eq!(styles[two.0].color, Color::rgb(0, 128, 128));
     }
 
     #[test]

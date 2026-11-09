@@ -6,6 +6,7 @@
 use mithu_base::{Color, Rect};
 use mithu_dom::Document;
 use mithu_html::parse_html;
+use mithu_js::run_scripts;
 use mithu_layout::{layout_tree, LayoutTree};
 use mithu_net::get;
 use mithu_paint::{paint_layout, Canvas};
@@ -255,11 +256,13 @@ impl Browser {
     }
 
     fn install(&mut self, fetched: Fetched) {
-        let document = parse_html(&fetched.html);
+        let mut document = parse_html(&fetched.html);
         let base = match &document.base_href {
             Some(href) => fetched.url.resolve(href).unwrap_or_else(|_| fetched.url.clone()),
             None => fetched.url.clone(),
         };
+        let logs = run_scripts(&mut document, |src| fetch_text(&base, src));
+        document.refresh_metadata();
         let mut author = String::new();
         for sheet in &document.stylesheets {
             author.push_str(sheet);
@@ -280,7 +283,11 @@ impl Browser {
         } else {
             document.title.clone()
         };
-        self.status = fetched.status;
+        self.status = if logs.is_empty() {
+            fetched.status
+        } else {
+            logs.last().cloned().unwrap_or(fetched.status)
+        };
         self.current = fetched.url.clone();
         self.base = base;
         self.omnibox = fetched.url.to_display();

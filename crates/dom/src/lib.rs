@@ -15,7 +15,7 @@ pub struct Document {
     pub title: String,
     pub stylesheets: Vec<String>,
     pub stylesheet_links: Vec<String>,
-    pub scripts: Vec<String>,
+    pub scripts: Vec<Script>,
     pub base_href: Option<String>,
 }
 
@@ -32,6 +32,13 @@ pub enum NodeData {
     Element(ElementData),
     Text(String),
     Comment(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct Script {
+    pub src: Option<String>,
+    pub code: String,
+    pub module: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -169,11 +176,160 @@ impl Document {
         } else {
             element.attrs.push((name.clone(), value.to_string()));
         }
-        if name == "id" && element.id.is_none() {
-            element.id = Some(value.to_string());
+        if name == "id" {
+            element.id = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            };
         }
         if name == "class" {
             element.classes = value.split_whitespace().map(str::to_string).collect();
+        }
+    }
+
+    pub fn create_element_detached(&mut self, name: &str) -> NodeId {
+        let id = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            parent: None,
+            children: Vec::new(),
+            data: NodeData::Element(ElementData {
+                name: name.to_ascii_lowercase(),
+                attrs: Vec::new(),
+                id: None,
+                classes: Vec::new(),
+            }),
+        });
+        id
+    }
+
+    pub fn clear_children(&mut self, id: NodeId) {
+        if self.nodes.get(id.0).is_none() {
+            return;
+        }
+        let children = std::mem::take(&mut self.nodes[id.0].children);
+        for child in children {
+            if let Some(node) = self.nodes.get_mut(child.0) {
+                node.parent = None;
+            }
+        }
+    }
+
+    pub fn set_text_content(&mut self, id: NodeId, text: &str) {
+        if self.nodes.get(id.0).is_none() {
+            return;
+        }
+        if let NodeData::Text(existing) = &mut self.nodes[id.0].data {
+            *existing = text.to_string();
+            return;
+        }
+        self.clear_children(id);
+        if !text.is_empty() {
+            self.append_text(id, text);
+        }
+    }
+
+    pub fn detach(&mut self, id: NodeId) {
+        let Some(node) = self.nodes.get(id.0) else {
+            return;
+        };
+        if let Some(parent) = node.parent
+            && let Some(parent_node) = self.nodes.get_mut(parent.0)
+        {
+            parent_node.children.retain(|child| *child != id);
+        }
+        if let Some(node) = self.nodes.get_mut(id.0) {
+            node.parent = None;
+        }
+    }
+
+    pub fn contains_node(&self, ancestor: NodeId, node: NodeId) -> bool {
+        let mut current = Some(node);
+        while let Some(id) = current {
+            if id == ancestor {
+                return true;
+            }
+            current = self.nodes.get(id.0).and_then(|item| item.parent);
+        }
+        false
+    }
+
+    pub fn append_child(&mut self, parent: NodeId, child: NodeId) -> bool {
+        if self.nodes.get(parent.0).is_none() || self.nodes.get(child.0).is_none() {
+            return false;
+        }
+        if parent == child || self.contains_node(child, parent) {
+            return false;
+        }
+        self.detach(child);
+        self.nodes[child.0].parent = Some(parent);
+        self.nodes[parent.0].children.push(child);
+        true
+    }
+
+    pub fn element_child_index(&self, id: NodeId) -> Option<usize> {
+        let parent = self.nodes.get(id.0)?.parent?;
+        let mut count = 0;
+        for child in &self.nodes.get(parent.0)?.children {
+            if self.element_name(*child).is_some() {
+                count += 1;
+                if *child == id {
+                    return Some(count);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn previous_element_sibling(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.nodes.get(id.0)?.parent?;
+        let children = &self.nodes.get(parent.0)?.children;
+        let index = children.iter().position(|child| *child == id)?;
+        children[..index]
+            .iter()
+            .rev()
+            .copied()
+            .find(|child| self.element_name(*child).is_some())
+    }
+
+    pub fn next_element_sibling(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.nodes.get(id.0)?.parent?;
+        let children = &self.nodes.get(parent.0)?.children;
+        let index = children.iter().position(|child| *child == id)?;
+        children[index + 1..]
+            .iter()
+            .copied()
+            .find(|child| self.element_name(*child).is_some())
+    }
+
+    pub fn refresh_metadata(&mut self) {
+        self.stylesheets.clear();
+        self.stylesheet_links.clear();
+        let mut title = None;
+        let ids: Vec<NodeId> = (0..self.nodes.len()).map(NodeId).collect();
+        for id in ids {
+            match self.element_name(id) {
+                Some("title") if title.is_none() => {
+                    title = Some(self.text_content(id).split_whitespace().collect::<Vec<_>>().join(" "));
+                }
+                Some("style") => {
+                    let text = self.text_content(id);
+                    if !text.trim().is_empty() {
+                        self.stylesheets.push(text);
+                    }
+                }
+                Some("link") => {
+                    let rel = self.attr(id, "rel").unwrap_or("").to_ascii_lowercase();
+                    let stylesheet = rel.split_whitespace().any(|part| part == "stylesheet");
+                    if stylesheet && let Some(href) = self.attr(id, "href") {
+                        self.stylesheet_links.push(href.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(title) = title {
+            self.title = title;
         }
     }
 
