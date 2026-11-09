@@ -9,6 +9,7 @@ description = "Block and inline layout"
 [dependencies]
 mithu-base = { path = "../base" }
 mithu-dom = { path = "../dom" }
+mithu-image = { path = "../image" }
 mithu-style = { path = "../style" }
 mithu-text = { path = "../text" }
 

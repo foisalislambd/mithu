@@ -79,10 +79,20 @@ impl Response {
 }
 
 pub fn get(url: &Url) -> Result<Response, NetError> {
-    get_redirecting(url, 0)
+    fetch("GET", url, None, &[], 0)
 }
 
-fn get_redirecting(url: &Url, redirects: u8) -> Result<Response, NetError> {
+pub fn post(url: &Url, content_type: &str, body: &[u8]) -> Result<Response, NetError> {
+    fetch("POST", url, Some(content_type), body, 0)
+}
+
+fn fetch(
+    method: &str,
+    url: &Url,
+    content_type: Option<&str>,
+    body: &[u8],
+    redirects: u8,
+) -> Result<Response, NetError> {
     if redirects > 8 {
         return Err(NetError::TooManyRedirects);
     }
@@ -93,7 +103,7 @@ fn get_redirecting(url: &Url, redirects: u8) -> Result<Response, NetError> {
         return Err(NetError::InvalidUrl);
     }
     let port = url.effective_port().unwrap_or(80);
-    let request = build_request(url);
+    let request = build_request(method, url, content_type, body);
     let raw = if url.scheme == "https" {
         https_exchange(&url.host, port, &request)?
     } else {
@@ -104,7 +114,11 @@ fn get_redirecting(url: &Url, redirects: u8) -> Result<Response, NetError> {
         && let Some(location) = header(&parsed.headers, "location")
     {
         let next = url.resolve(location).map_err(|_| NetError::InvalidRedirect)?;
-        return get_redirecting(&next, redirects + 1);
+        let switch_to_get = matches!(parsed.status, 301 | 302 | 303);
+        if switch_to_get {
+            return fetch("GET", &next, None, &[], redirects + 1);
+        }
+        return fetch(method, &next, content_type, body, redirects + 1);
     }
     Ok(Response {
         status: parsed.status,
@@ -114,26 +128,33 @@ fn get_redirecting(url: &Url, redirects: u8) -> Result<Response, NetError> {
     })
 }
 
-fn build_request(url: &Url) -> String {
+fn build_request(method: &str, url: &Url, content_type: Option<&str>, body: &[u8]) -> Vec<u8> {
     let host = match url.port {
         Some(port) if Url::default_port(&url.scheme) != Some(port) => {
             format!("{}:{port}", url.host)
         }
         _ => url.host.clone(),
     };
-    format!(
-        "GET {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mithu/0.1 (Rust)\r\nAccept: text/html,application/xhtml+xml,text/css,*/*;q=0.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+    let mut head = format!(
+        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mithu/0.1 (Rust)\r\nAccept: text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
         url.request_target()
-    )
+    );
+    if let Some(content_type) = content_type {
+        head.push_str(&format!("Content-Type: {content_type}\r\nContent-Length: {}\r\n", body.len()));
+    }
+    head.push_str("\r\n");
+    let mut request = head.into_bytes();
+    request.extend_from_slice(body);
+    request
 }
 
-fn tcp_exchange(host: &str, port: u16, request: &str) -> Result<Vec<u8>, NetError> {
+fn tcp_exchange(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetError> {
     let mut stream = TcpStream::connect((host, port))?;
     prepare_socket(&stream);
     exchange(&mut stream, request)
 }
 
-fn https_exchange(host: &str, port: u16, request: &str) -> Result<Vec<u8>, NetError> {
+fn https_exchange(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetError> {
     let mut socket = TcpStream::connect((host, port))?;
     prepare_socket(&socket);
     let config = tls_config()?;
@@ -168,8 +189,8 @@ fn tls_config() -> Result<Arc<ClientConfig>, NetError> {
     Ok(config)
 }
 
-fn exchange(stream: &mut (impl Read + Write), request: &str) -> Result<Vec<u8>, NetError> {
-    stream.write_all(request.as_bytes())?;
+fn exchange(stream: &mut (impl Read + Write), request: &[u8]) -> Result<Vec<u8>, NetError> {
+    stream.write_all(request)?;
     stream.flush()?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];

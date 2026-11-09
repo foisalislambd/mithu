@@ -188,6 +188,20 @@ impl Document {
         }
     }
 
+    pub fn remove_attr(&mut self, id: NodeId, name: &str) {
+        let NodeData::Element(element) = &mut self.nodes[id.0].data else {
+            return;
+        };
+        let name = name.to_ascii_lowercase();
+        element.attrs.retain(|(key, _)| key != &name);
+        if name == "id" {
+            element.id = None;
+        }
+        if name == "class" {
+            element.classes.clear();
+        }
+    }
+
     pub fn create_element_detached(&mut self, name: &str) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node {

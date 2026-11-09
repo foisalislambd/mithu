@@ -4,8 +4,12 @@
 //! boxes. Inline-block and replaced elements (images, inputs, frames) become
 //! atomic boxes. Margin collapsing and floats are not implemented.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use mithu_base::{Edges, Rect};
 use mithu_dom::{Document, NodeData, NodeId};
+use mithu_image::Bitmap;
 use mithu_style::{
     AlignItems, BoxSizing, ComputedStyle, Display, FlexDirection, Justify, Length, LineHeight, Position,
     TextAlign, WhiteSpace,
@@ -45,6 +49,7 @@ pub struct LayoutBox {
     pub opacity: f32,
     pub overflow_hidden: bool,
     pub border_radius: f32,
+    pub image: Option<Arc<Bitmap>>,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +71,7 @@ pub struct TextFragment {
     pub underline: bool,
     pub href: Option<String>,
     pub width: f32,
+    pub node: NodeId,
 }
 
 pub fn layout_tree(
@@ -73,9 +79,21 @@ pub fn layout_tree(
     styles: &[ComputedStyle],
     viewport_width: f32,
     measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
 ) -> LayoutTree {
     let root_id = document_element(doc).unwrap_or(doc.root);
-    let root = layout_node(doc, styles, measure, root_id, 0.0, 0.0, viewport_width.max(1.0), None, false)
+    let root = layout_node(
+        doc,
+        styles,
+        measure,
+        images,
+        root_id,
+        0.0,
+        0.0,
+        viewport_width.max(1.0),
+        None,
+        false,
+    )
         .unwrap_or_else(|| empty_box(root_id));
     let content_height = root.rect.bottom() + root.margin.bottom;
     let mut links = Vec::new();
@@ -92,6 +110,7 @@ fn layout_node(
     doc: &Document,
     styles: &[ComputedStyle],
     measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
     id: NodeId,
     containing_x: f32,
     margin_y: f32,
@@ -99,7 +118,22 @@ fn layout_node(
     inherited_href: Option<String>,
     shrink_to_fit: bool,
 ) -> Option<LayoutBox> {
-    let style = style_of(styles, id);
+    let mut style = style_of(styles, id);
+    let image = (doc.element_name(id) == Some("img"))
+        .then(|| images.get(&id).cloned())
+        .flatten();
+    if doc.element_name(id) == Some("img") {
+        if let Some(bitmap) = &image {
+            apply_intrinsic(&mut style, bitmap);
+        } else if matches!(style.width, Length::Auto) && matches!(style.height, Length::Auto) {
+            style.width = Length::Px(300.0);
+            style.height = Length::Px(150.0);
+        } else if matches!(style.width, Length::Auto) {
+            style.width = Length::Px(300.0);
+        } else if matches!(style.height, Length::Auto) {
+            style.height = Length::Px(150.0);
+        }
+    }
     let display = effective_display(doc, styles, id);
     if display == Display::None {
         return None;
@@ -145,13 +179,18 @@ fn layout_node(
     let content_y = border_y + border + padding.top;
 
     content_w = limit_content(&style, content_w, font, containing_width, padding.left + padding.right, border);
-    let synthetic = synthetic_text(doc, id);
+    let synthetic = if image.is_some() {
+        None
+    } else {
+        synthetic_text(doc, id)
+    };
     let blockish = synthetic.is_none() && has_block_child(doc, styles, id);
     let (lines, mut children, flowed) = if display == Display::Flex {
         layout_flex(
             doc,
             styles,
             measure,
+            images,
             id,
             &style,
             content_x,
@@ -164,6 +203,7 @@ fn layout_node(
             doc,
             styles,
             measure,
+            images,
             id,
             &style,
             content_x,
@@ -173,9 +213,9 @@ fn layout_node(
         )
     } else {
         let items = if let Some(text) = &synthetic {
-            items_from_text(text, &style, measure, href.clone())
+            items_from_text(text, &style, measure, href.clone(), id)
         } else {
-            collect_children(doc, styles, measure, id, &style, content_w, href.clone())
+            collect_children(doc, styles, measure, images, id, &style, content_w, href.clone())
         };
         if shrink && !items.is_empty() {
             content_w = preferred_width(&items, content_w);
@@ -205,6 +245,7 @@ fn layout_node(
         doc,
         styles,
         measure,
+        images,
         id,
         content_x,
         content_y,
@@ -237,6 +278,7 @@ fn layout_node(
         opacity: style.opacity.clamp(0.0, 1.0),
         overflow_hidden: style.overflow_hidden,
         border_radius: style.border_radius,
+        image,
     };
     if style.position == Position::Relative {
         let dx = resolve_length(style.insets[3], font, containing_width)
@@ -272,6 +314,7 @@ fn layout_blocks(
     doc: &Document,
     styles: &[ComputedStyle],
     measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
     id: NodeId,
     style: &ComputedStyle,
     content_x: f32,
@@ -289,7 +332,7 @@ fn layout_blocks(
         }
         let mut items = Vec::new();
         for child in group.drain(..) {
-            items.extend(collect_node(doc, styles, measure, child, style, content_w, href.clone()));
+            items.extend(collect_node(doc, styles, measure, images, child, style, content_w, href.clone()));
         }
         if is_blank(&items) {
             return;
@@ -302,7 +345,7 @@ fn layout_blocks(
     for child in doc.node(id).children.clone() {
         if is_block_child(doc, styles, child) {
             flush(&mut group, &mut y, &mut lines, &mut children);
-            if let Some(child_box) = layout_node(doc, styles, measure, child, content_x, y, content_w, href.clone(), false) {
+            if let Some(child_box) = layout_node(doc, styles, measure, images, child, content_x, y, content_w, href.clone(), false) {
                 y = child_box.rect.bottom() + child_box.margin.bottom;
                 children.push(child_box);
             }
@@ -318,6 +361,7 @@ fn collect_children(
     doc: &Document,
     styles: &[ComputedStyle],
     measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
     id: NodeId,
     style: &ComputedStyle,
     available: f32,
@@ -325,7 +369,7 @@ fn collect_children(
 ) -> Vec<Item> {
     let mut items = Vec::new();
     for child in doc.node(id).children.clone() {
-        items.extend(collect_node(doc, styles, measure, child, style, available, href.clone()));
+        items.extend(collect_node(doc, styles, measure, images, child, style, available, href.clone()));
     }
     items
 }
@@ -334,13 +378,14 @@ fn collect_node(
     doc: &Document,
     styles: &[ComputedStyle],
     measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
     id: NodeId,
     parent_style: &ComputedStyle,
     available: f32,
     href: Option<String>,
 ) -> Vec<Item> {
     match &doc.node(id).data {
-        NodeData::Text(text) => items_from_text(text, parent_style, measure, href),
+        NodeData::Text(text) => items_from_text(text, parent_style, measure, href, id),
         NodeData::Comment(_) | NodeData::Document => Vec::new(),
         NodeData::Element(_) => {
             if is_skipped(doc, styles, id) {
@@ -355,14 +400,14 @@ fn collect_node(
             if matches!(display, Display::Block | Display::ListItem | Display::InlineBlock | Display::Flex)
                 || synthetic_text(doc, id).is_some()
             {
-                let Some(layout) = layout_node(doc, styles, measure, id, 0.0, 0.0, available, href, false) else {
+                let Some(layout) = layout_node(doc, styles, measure, images, id, 0.0, 0.0, available, href, false) else {
                     return Vec::new();
                 };
                 let width = layout.margin.left + layout.rect.width + layout.margin.right;
                 let height = layout.margin.top + layout.rect.height + layout.margin.bottom;
                 return vec![Item::Atomic { layout, width, height }];
             }
-            collect_children(doc, styles, measure, id, &style, available, href)
+            collect_children(doc, styles, measure, images, id, &style, available, href)
         }
     }
 }
@@ -456,6 +501,7 @@ fn place_items(items: &[Item], content_x: f32, y: f32, content_w: f32, align: Te
                         underline: word.underline,
                         href: word.href.clone(),
                         width: word.width,
+                        node: word.node,
                     });
                     x += word.width;
                 }
@@ -517,7 +563,13 @@ fn preferred_width(items: &[Item], available: f32) -> f32 {
     max_line.max(line).min(available).max(0.0)
 }
 
-fn items_from_text(text: &str, style: &ComputedStyle, measure: &dyn MeasureText, href: Option<String>) -> Vec<Item> {
+fn items_from_text(
+    text: &str,
+    style: &ComputedStyle,
+    measure: &dyn MeasureText,
+    href: Option<String>,
+    node: NodeId,
+) -> Vec<Item> {
     let pre = style.white_space == WhiteSpace::Pre;
     let normalized = if pre {
         text.replace("\r\n", "\n").replace('\r', "\n")
@@ -534,10 +586,10 @@ fn items_from_text(text: &str, style: &ComputedStyle, measure: &dyn MeasureText,
             if index > 0 {
                 items.push(Item::Break);
             }
-            push_runs(&mut items, line, style, measure, href.clone(), ascent, line_height, true);
+            push_runs(&mut items, line, style, measure, href.clone(), node, ascent, line_height, true);
         }
     } else {
-        push_runs(&mut items, &normalized, style, measure, href, ascent, line_height, false);
+        push_runs(&mut items, &normalized, style, measure, href, node, ascent, line_height, false);
     }
     items
 }
@@ -548,6 +600,7 @@ fn push_runs(
     style: &ComputedStyle,
     measure: &dyn MeasureText,
     href: Option<String>,
+    node: NodeId,
     ascent: f32,
     line_height: f32,
     sticky: bool,
@@ -575,6 +628,7 @@ fn push_runs(
                 width,
                 ascent,
                 line_height,
+                node,
             }));
         }
     };
@@ -617,6 +671,7 @@ struct Word {
     width: f32,
     ascent: f32,
     line_height: f32,
+    node: NodeId,
 }
 
 enum Item {
@@ -762,7 +817,11 @@ fn synthetic_text(doc: &Document, id: NodeId) -> Option<String> {
                 let fallback = if kind == "submit" { "Submit" } else { "Button" };
                 return Some(doc.attr(id, "value").unwrap_or(fallback).to_string());
             }
-            Some(doc.attr(id, "value").or_else(|| doc.attr(id, "placeholder")).unwrap_or("").to_string())
+            let value = doc.attr(id, "value").or_else(|| doc.attr(id, "placeholder")).unwrap_or("").to_string();
+            if kind == "password" {
+                return Some("•".repeat(value.chars().count()));
+            }
+            Some(value)
         }
         "img" | "iframe" | "video" | "canvas" | "svg" | "audio" => {
             Some(doc.attr(id, "alt").unwrap_or(name).to_string())
@@ -859,6 +918,7 @@ fn layout_flex(
     doc: &Document,
     styles: &[ComputedStyle],
     measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
     id: NodeId,
     style: &ComputedStyle,
     content_x: f32,
@@ -885,7 +945,7 @@ fn layout_flex(
         } else {
             matches!(child_style.width, Length::Auto) && style.align_items != AlignItems::Stretch
         };
-        if let Some(layout) = layout_node(doc, styles, measure, child, 0.0, 0.0, content_w, href.clone(), shrink) {
+        if let Some(layout) = layout_node(doc, styles, measure, images, child, 0.0, 0.0, content_w, href.clone(), shrink) {
             items.push((layout, child_style.flex_grow.max(0.0)));
         }
     }
@@ -972,7 +1032,7 @@ fn text_flex_item(
     href: Option<String>,
     content_w: f32,
 ) -> LayoutBox {
-    let items = items_from_text(text, style, measure, href.clone());
+    let items = items_from_text(text, style, measure, href.clone(), node);
     let width = preferred_width(&items, content_w).min(content_w).max(0.0);
     let (lines, children, height) = if is_blank(&items) {
         (Vec::new(), Vec::new(), 0.0)
@@ -997,6 +1057,7 @@ fn text_flex_item(
         opacity: 1.0,
         overflow_hidden: false,
         border_radius: 0.0,
+        image: None,
     }
 }
 
@@ -1004,6 +1065,7 @@ fn layout_absolute_children(
     doc: &Document,
     styles: &[ComputedStyle],
     measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
     id: NodeId,
     content_x: f32,
     content_y: f32,
@@ -1020,6 +1082,7 @@ fn layout_absolute_children(
             doc,
             styles,
             measure,
+            images,
             child,
             content_x,
             content_y,
@@ -1070,15 +1133,66 @@ fn empty_box(node: NodeId) -> LayoutBox {
         opacity: 1.0,
         overflow_hidden: false,
         border_radius: 0.0,
+        image: None,
     }
+}
+
+fn apply_intrinsic(style: &mut ComputedStyle, bitmap: &Bitmap) {
+    let width = bitmap.width.max(1) as f32;
+    let height = bitmap.height.max(1) as f32;
+    match (style.width, style.height) {
+        (Length::Auto, Length::Auto) => {
+            style.width = Length::Px(width);
+            style.height = Length::Px(height);
+        }
+        (Length::Auto, Length::Px(used_height)) => {
+            style.width = Length::Px(width * used_height / height);
+        }
+        (Length::Px(used_width), Length::Auto) => {
+            style.height = Length::Px(height * used_width / width);
+        }
+        _ => {}
+    }
+}
+
+pub fn hit_test(tree: &LayoutTree, x: f32, y: f32) -> Option<NodeId> {
+    hit_box(&tree.root, x, y)
+}
+
+fn hit_box(box_: &LayoutBox, x: f32, y: f32) -> Option<NodeId> {
+    for child in box_.children.iter().rev() {
+        if let Some(id) = hit_box(child, x, y) {
+            return Some(id);
+        }
+    }
+    for line in &box_.lines {
+        for fragment in &line.fragments {
+            let rect = Rect::new(
+                fragment.x,
+                line.baseline - line.ascent,
+                fragment.width.max(1.0),
+                line.height.max(1.0),
+            );
+            if rect.contains(x, y) {
+                return Some(fragment.node);
+            }
+        }
+    }
+    if box_.rect.contains(x, y) {
+        return Some(box_.node);
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use mithu_html::parse_html;
     use mithu_style::style_document;
     use mithu_text::NaiveMetrics;
+    use std::sync::Arc;
 
     fn find<'a>(box_: &'a LayoutBox, id: NodeId) -> Option<&'a LayoutBox> {
         if box_.node == id {
@@ -1091,7 +1205,7 @@ mod tests {
     fn sizes_an_explicit_block() {
         let doc = parse_html(r#"<div id="box" style="width:100px;height:50px"></div>"#);
         let styles = style_document(&doc, "");
-        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics);
+        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics, &HashMap::new());
         let id = doc.get_element_by_id("box").unwrap();
         let found = find(&tree.root, id).unwrap();
         assert!((found.rect.x - 8.0).abs() < 0.5, "x {}", found.rect.x);
@@ -1112,7 +1226,7 @@ mod tests {
             </div>"#,
         );
         let styles = style_document(&doc, "");
-        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics);
+        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics, &HashMap::new());
         let row = find(&tree.root, doc.get_element_by_id("row").unwrap()).unwrap();
         let a = find(row, doc.get_element_by_id("a").unwrap()).unwrap();
         let b = find(row, doc.get_element_by_id("b").unwrap()).unwrap();
@@ -1121,5 +1235,24 @@ mod tests {
         let pin = find(host, doc.get_element_by_id("pin").unwrap()).unwrap();
         assert!((pin.rect.x - (host.rect.x + 30.0)).abs() < 0.5, "x {}", pin.rect.x);
         assert!((pin.rect.y - (host.rect.y + 12.0)).abs() < 0.5, "y {}", pin.rect.y);
+    }
+
+    #[test]
+    fn image_uses_its_pixel_size() {
+        let doc = parse_html(r#"<img id="pic" src="pixel.png">"#);
+        let styles = style_document(&doc, "");
+        let id = doc.get_element_by_id("pic").unwrap();
+        let bitmap = Arc::new(mithu_image::Bitmap {
+            width: 20,
+            height: 10,
+            pixels: vec![0xFFFF0000; 200],
+        });
+        let mut images = HashMap::new();
+        images.insert(id, bitmap);
+        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics, &images);
+        let found = find(&tree.root, id).unwrap();
+        assert!((found.rect.width - 20.0).abs() < 0.5, "w {}", found.rect.width);
+        assert!((found.rect.height - 10.0).abs() < 0.5, "h {}", found.rect.height);
+        assert!(found.image.is_some());
     }
 }

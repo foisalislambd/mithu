@@ -165,8 +165,10 @@ impl ApplicationHandler for App {
                 let focused = self.browser.omnibox_focused;
                 match event.logical_key {
                     Key::Named(NamedKey::Enter) if focused => self.browser.submit_omnibox(),
-                    Key::Named(NamedKey::Escape) => self.browser.blur_omnibox(),
+                    Key::Named(NamedKey::Enter) if self.browser.field_focused() => self.browser.submit_field(),
+                    Key::Named(NamedKey::Escape) => self.browser.blur_page(),
                     Key::Named(NamedKey::Backspace) if focused => self.browser.backspace(),
+                    Key::Named(NamedKey::Backspace) if self.browser.field_focused() => self.browser.field_backspace(),
                     Key::Named(NamedKey::ArrowLeft) if focused && !alt => self.browser.move_cursor(-1),
                     Key::Named(NamedKey::ArrowRight) if focused && !alt => self.browser.move_cursor(1),
                     Key::Named(NamedKey::ArrowLeft) if alt => self.browser.back(),
@@ -187,6 +189,12 @@ impl ApplicationHandler for App {
                             self.browser.insert_char(ch);
                         }
                     }
+                    Key::Character(text) if self.browser.field_focused() && !ctrl && !alt => {
+                        for ch in text.chars() {
+                            self.browser.field_insert(ch);
+                        }
+                    }
+                    Key::Named(NamedKey::Space) if self.browser.field_focused() => self.browser.field_insert(' '),
                     Key::Named(NamedKey::Space) if !focused => self.browser.scroll_page(1.0),
                     _ => return,
                 }

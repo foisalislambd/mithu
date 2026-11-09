@@ -8,6 +8,7 @@ description = "Software rasterizer for layout trees"
 
 [dependencies]
 mithu-base = { path = "../base" }
+mithu-image = { path = "../image" }
 mithu-layout = { path = "../layout" }
 mithu-text = { path = "../text" }
 

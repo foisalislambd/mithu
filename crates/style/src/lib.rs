@@ -745,7 +745,19 @@ fn apply_presentational_hints(doc: &Document, id: NodeId, style: &mut ComputedSt
         attr.unwrap_or(Length::Px(fallback))
     };
     match name {
-        "img" | "iframe" | "video" | "canvas" | "svg" => {
+        "img" => {
+            if let Some(width) = width_attr
+                && matches!(style.width, Length::Auto)
+            {
+                style.width = width;
+            }
+            if let Some(height) = height_attr
+                && matches!(style.height, Length::Auto)
+            {
+                style.height = height;
+            }
+        }
+        "iframe" | "video" | "canvas" | "svg" => {
             style.width = fill(style.width, width_attr, 300.0);
             style.height = fill(style.height, height_attr, 150.0);
         }

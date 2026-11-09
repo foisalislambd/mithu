@@ -4,7 +4,7 @@ Mithu is a lightweight browser written in Rust, in this repository, from scratch
 
 The license is MIT. Anyone can use it, read it, and build on it.
 
-HTML, CSS, the DOM, JavaScript, layout, paint, URLs, and HTTP are implemented here. JavaScript runs in this process on the [Boa](https://github.com/boa-dev/boa) virtual machine and can change the document before layout. There is no WASM runtime and no imported browser engine. The other outside crates are the operating-system edges: a window (`winit`, `softbuffer`), TLS (`rustls`), and TrueType rasterization (`fontdue`). Rewriting those would not make the browser stronger.
+HTML, CSS, the DOM, JavaScript, layout, paint, URLs, and HTTP are implemented here. JavaScript runs in this process on the [Boa](https://github.com/boa-dev/boa) virtual machine. Scripts can change the document, and click, input, and submit events reach those scripts before the browser follows a link or sends a form. PNG, JPEG, GIF, and WebP images are decoded and painted. There is no WASM runtime and no imported browser engine. The other outside crates are the operating-system edges: a window (`winit`, `softbuffer`), TLS (`rustls`), TrueType rasterization (`fontdue`), and image decoders (`image`). Rewriting those would not make the browser stronger.
 
 CSS covers the box model, type, class, id, attribute, and structural selectors, sibling combinators, flex layout, and relative and absolute positioning. The engine keeps growing from this code.
 
@@ -33,6 +33,7 @@ Folders are the browser layers. Package names keep a `mithu-` prefix so they sta
 | `crates/js` | `mithu-js` | In-process JavaScript machine and DOM bindings |
 | `crates/css` | `mithu-css` | Selector and declaration parser |
 | `crates/style` | `mithu-style` | Cascade and computed style |
+| `crates/image` | `mithu-image` | PNG, JPEG, GIF, and WebP decoding |
 | `crates/text` | `mithu-text` | Font measurement and glyphs |
 | `crates/layout` | `mithu-layout` | Block, inline, and flex layout |
 | `crates/paint` | `mithu-paint` | Software framebuffer |

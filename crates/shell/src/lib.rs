@@ -3,12 +3,16 @@
 //! The window crate only forwards input. Loading, layout, and painting live here
 //! so the engine can be tested without a display server.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use mithu_base::{Color, Rect};
-use mithu_dom::Document;
+use mithu_dom::{Document, NodeId};
 use mithu_html::parse_html;
-use mithu_js::run_scripts;
-use mithu_layout::{layout_tree, LayoutTree};
-use mithu_net::get;
+use mithu_image::Bitmap;
+use mithu_js::{Session, Submission};
+use mithu_layout::{hit_test, layout_tree, LayoutTree};
+use mithu_net::{get, post};
 use mithu_paint::{paint_layout, Canvas};
 use mithu_style::{style_document, ComputedStyle};
 use mithu_text::{FontBook, MeasureText};
@@ -46,6 +50,9 @@ pub struct Browser {
     document: Document,
     styles: Vec<ComputedStyle>,
     layout: LayoutTree,
+    images: HashMap<NodeId, Arc<Bitmap>>,
+    session: Option<Session>,
+    focused: Option<NodeId>,
 }
 
 struct Fetched {
@@ -73,7 +80,10 @@ impl Browser {
             status: String::new(),
             document: Document::new(),
             styles: Vec::new(),
-            layout: layout_tree(&Document::new(), &[], 1200.0, &mithu_text::NaiveMetrics),
+            layout: layout_tree(&Document::new(), &[], 1200.0, &mithu_text::NaiveMetrics, &HashMap::new()),
+            images: HashMap::new(),
+            session: None,
+            focused: None,
         };
         browser.navigate("about:mithu");
         browser
@@ -141,9 +151,58 @@ impl Browser {
         self.omnibox_focused = false;
         self.select_all = false;
         let doc_y = y - TOOLBAR_H + self.scroll;
-        if let Some(href) = self.hit_link(x, doc_y) {
-            self.follow(href);
+        self.activate(x, doc_y);
+    }
+
+    pub fn field_focused(&self) -> bool {
+        self.focused.is_some() && !self.omnibox_focused
+    }
+
+    pub fn field_insert(&mut self, ch: char) {
+        let Some(id) = self.focused else {
+            return;
+        };
+        if let Some(session) = self.session.as_mut() {
+            session.edit(|doc| {
+                let mut text = field_text(doc, id);
+                text.push(ch);
+                set_field_text(doc, id, &text);
+            });
+            session.dispatch(id, "input");
         }
+        self.pull_page();
+    }
+
+    pub fn field_backspace(&mut self) {
+        let Some(id) = self.focused else {
+            return;
+        };
+        if let Some(session) = self.session.as_mut() {
+            session.edit(|doc| {
+                let mut text = field_text(doc, id);
+                text.pop();
+                set_field_text(doc, id, &text);
+            });
+            session.dispatch(id, "input");
+        }
+        self.pull_page();
+    }
+
+    pub fn submit_field(&mut self) {
+        let Some(id) = self.focused else {
+            return;
+        };
+        let submission = self.session.as_mut().and_then(|session| session.submission(id));
+        self.pull_page();
+        if let Some(submission) = submission {
+            self.send_form(submission);
+        }
+    }
+
+    pub fn blur_page(&mut self) {
+        self.omnibox_focused = false;
+        self.select_all = false;
+        self.focused = None;
     }
 
     pub fn focus_omnibox(&mut self) {
@@ -256,13 +315,15 @@ impl Browser {
     }
 
     fn install(&mut self, fetched: Fetched) {
-        let mut document = parse_html(&fetched.html);
+        let document = parse_html(&fetched.html);
         let base = match &document.base_href {
             Some(href) => fetched.url.resolve(href).unwrap_or_else(|_| fetched.url.clone()),
             None => fetched.url.clone(),
         };
-        let logs = run_scripts(&mut document, |src| fetch_text(&base, src));
-        document.refresh_metadata();
+        let mut session = Session::open(document, |src| fetch_text(&base, src));
+        let logs = session.logs();
+        session.edit(|doc| doc.refresh_metadata());
+        let document = session.document();
         let mut author = String::new();
         for sheet in &document.stylesheets {
             author.push_str(sheet);
@@ -277,7 +338,8 @@ impl Browser {
             }
         }
         let styles = style_document(&document, &author);
-        let layout = layout_tree(&document, &styles, self.viewport_w, &self.fonts);
+        let images = load_images(&document, &base);
+        let layout = layout_tree(&document, &styles, self.viewport_w, &self.fonts, &images);
         self.title = if document.title.is_empty() {
             fetched.url.to_display()
         } else {
@@ -297,11 +359,108 @@ impl Browser {
         self.scroll = 0.0;
         self.document = document;
         self.styles = styles;
+        self.images = images;
         self.layout = layout;
+        self.session = Some(session);
+        self.focused = None;
     }
 
     fn relayout(&mut self) {
-        self.layout = layout_tree(&self.document, &self.styles, self.viewport_w, &self.fonts);
+        self.layout = layout_tree(
+            &self.document,
+            &self.styles,
+            self.viewport_w,
+            &self.fonts,
+            &self.images,
+        );
+    }
+
+    fn activate(&mut self, x: f32, y: f32) {
+        let hit = hit_test(&self.layout, x, y);
+        let mut allow_default = true;
+        let mut focus_field = None;
+        let mut submission = None;
+        if let Some(node) = hit
+            && let Some(session) = self.session.as_mut()
+        {
+            allow_default = session.dispatch(node, "click");
+            let document = session.document();
+            if allow_default && is_text_field(&document, node) {
+                focus_field = Some(node);
+            } else if allow_default && is_checkbox(&document, node) {
+                session.edit(|doc| toggle_checked(doc, node));
+                session.dispatch(node, "change");
+            } else if allow_default && is_submit(&document, node) {
+                submission = session.submission(node);
+            }
+        }
+        self.pull_page();
+        self.focused = focus_field;
+        if let Some(submission) = submission {
+            self.send_form(submission);
+            return;
+        }
+        if allow_default && focus_field.is_none()
+            && let Some(href) = self.hit_link(x, y)
+        {
+            self.follow(href);
+        }
+    }
+
+    fn pull_page(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        session.edit(|doc| doc.refresh_metadata());
+        let document = session.document();
+        let logs = session.logs();
+        let author = author_css(&document, &self.base);
+        self.styles = style_document(&document, &author);
+        self.images = load_images(&document, &self.base);
+        if let Some(log) = logs.last() {
+            self.status = log.clone();
+        }
+        if !document.title.is_empty() {
+            self.title = document.title.clone();
+        }
+        self.document = document;
+        self.relayout();
+    }
+
+    fn send_form(&mut self, submission: Submission) {
+        let mut url = if submission.action.is_empty() {
+            self.current.clone()
+        } else {
+            self.base
+                .resolve(&submission.action)
+                .unwrap_or_else(|_| interpret(&submission.action))
+        };
+        if submission.method == "post" && url.is_network() {
+            match post(&url, "application/x-www-form-urlencoded", submission.query.as_bytes()) {
+                Ok(response) => {
+                    let status = format!("{} {}", response.status, response.url.to_display());
+                    let html = bytes_to_html(&response.url, response.content_type(), &response.body);
+                    self.install(Fetched {
+                        url: response.url,
+                        html,
+                        status,
+                    });
+                }
+                Err(error) => self.install(Fetched {
+                    html: error_page(&url, &error.to_string()),
+                    status: error.to_string(),
+                    url,
+                }),
+            }
+            return;
+        }
+        if !submission.query.is_empty() {
+            url.query = Some(match url.query.as_deref() {
+                Some(existing) if !existing.is_empty() => format!("{existing}&{}", submission.query),
+                _ => submission.query,
+            });
+        }
+        self.navigate_url(url);
     }
 
     fn follow(&mut self, href: String) {
@@ -485,6 +644,114 @@ fn retrieve(url: &Url) -> Result<Fetched, String> {
             })
         }
         other => Err(format!("Mithu cannot open {other} URLs")),
+    }
+}
+
+fn author_css(document: &Document, base: &Url) -> String {
+    let mut author = String::new();
+    for sheet in &document.stylesheets {
+        author.push_str(sheet);
+        author.push('\n');
+    }
+    for href in document.stylesheet_links.iter().take(6) {
+        if let Some(css) = fetch_text(base, href)
+            && css.len() <= 500_000
+        {
+            author.push_str(&css);
+            author.push('\n');
+        }
+    }
+    author
+}
+
+fn load_images(document: &Document, base: &Url) -> HashMap<NodeId, Arc<Bitmap>> {
+    let mut images = HashMap::new();
+    for id in (0..document.nodes.len()).map(NodeId) {
+        if images.len() >= 16 || document.element_name(id) != Some("img") {
+            continue;
+        }
+        let Some(src) = document.attr(id, "src") else {
+            continue;
+        };
+        let bitmap = if src.starts_with("data:") {
+            mithu_image::decode_data_url(src)
+        } else {
+            fetch_bytes(base, src).and_then(|bytes| mithu_image::decode(&bytes))
+        };
+        if let Some(bitmap) = bitmap {
+            images.insert(id, Arc::new(bitmap));
+        }
+    }
+    images
+}
+
+fn is_text_field(document: &Document, id: NodeId) -> bool {
+    match document.element_name(id) {
+        Some("textarea") => true,
+        Some("input") => {
+            let kind = document.attr(id, "type").unwrap_or("text").to_ascii_lowercase();
+            matches!(kind.as_str(), "text" | "search" | "email" | "password" | "url" | "tel" | "number")
+        }
+        _ => false,
+    }
+}
+
+fn is_checkbox(document: &Document, id: NodeId) -> bool {
+    document.element_name(id) == Some("input")
+        && document
+            .attr(id, "type")
+            .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "checkbox" | "radio"))
+}
+
+fn is_submit(document: &Document, id: NodeId) -> bool {
+    match document.element_name(id) {
+        Some("button") => document.attr(id, "type").unwrap_or("submit").eq_ignore_ascii_case("submit"),
+        Some("input") => document
+            .attr(id, "type")
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("submit")),
+        _ => false,
+    }
+}
+
+fn toggle_checked(document: &mut Document, id: NodeId) {
+    if document.attr(id, "checked").is_some() {
+        document.remove_attr(id, "checked");
+    } else {
+        document.set_attr(id, "checked", "");
+    }
+}
+
+fn field_text(document: &Document, id: NodeId) -> String {
+    if document.element_name(id) == Some("textarea") {
+        document.text_content(id)
+    } else {
+        document.attr(id, "value").unwrap_or("").to_string()
+    }
+}
+
+fn set_field_text(document: &mut Document, id: NodeId, text: &str) {
+    if document.element_name(id) == Some("textarea") {
+        document.set_text_content(id, text);
+    } else {
+        document.set_attr(id, "value", text);
+    }
+}
+
+fn fetch_bytes(base: &Url, href: &str) -> Option<Vec<u8>> {
+    let url = base.resolve(href).ok()?;
+    match url.scheme.as_str() {
+        "http" | "https" => {
+            let response = get(&url).ok()?;
+            if response.status >= 400 || response.body.len() > 4_000_000 {
+                return None;
+            }
+            Some(response.body)
+        }
+        "file" => {
+            let bytes = std::fs::read(&url.path).ok()?;
+            (bytes.len() <= 4_000_000).then_some(bytes)
+        }
+        _ => None,
     }
 }
 

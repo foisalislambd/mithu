@@ -1,6 +1,7 @@
 //! Software rasterizer. Pixels are packed `0x00RRGGBB`.
 
 use mithu_base::{Color, Rect};
+use mithu_image::Bitmap;
 use mithu_layout::{LayoutBox, LayoutTree};
 use mithu_text::{glyph_top, FontBook, MeasureText};
 
@@ -53,6 +54,38 @@ impl Canvas<'_> {
                 } else {
                     self.pixels[index] = blend(self.pixels[index], color, 255);
                 }
+            }
+        }
+    }
+
+    pub fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect) {
+        if dest.width <= 0.0 || dest.height <= 0.0 || bitmap.width == 0 || bitmap.height == 0 {
+            return;
+        }
+        let Some(visible) = intersect(dest, clip) else {
+            return;
+        };
+        let x0 = visible.x.floor().max(0.0) as i32;
+        let y0 = visible.y.floor().max(0.0) as i32;
+        let x1 = visible.right().ceil().min(self.width as f32) as i32;
+        let y1 = visible.bottom().ceil().min(self.height as f32) as i32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let u = ((x as f32 + 0.5 - dest.x) / dest.width * bitmap.width as f32).floor();
+                let v = ((y as f32 + 0.5 - dest.y) / dest.height * bitmap.height as f32).floor();
+                let u = (u as i64).clamp(0, bitmap.width as i64 - 1) as u32;
+                let v = (v as i64).clamp(0, bitmap.height as i64 - 1) as u32;
+                let packed = bitmap.pixels[(v * bitmap.width + u) as usize];
+                let color = Color::rgba((packed >> 16) as u8, (packed >> 8) as u8, packed as u8, (packed >> 24) as u8);
+                if color.a == 0 {
+                    continue;
+                }
+                let index = y as usize * self.width as usize + x as usize;
+                self.pixels[index] = if color.a == 255 {
+                    color.to_u32()
+                } else {
+                    blend(self.pixels[index], color, 255)
+                };
             }
         }
     }
@@ -140,6 +173,19 @@ fn paint_box_with_opacity(
     let background = scale_alpha(box_.background, opacity);
     if background.a > 0 {
         canvas.fill_round(screen, background, box_.border_radius, clip);
+    }
+    if let Some(bitmap) = &box_.image {
+        let inset = box_.border_width.max(0.0);
+        canvas.image(
+            Rect::new(
+                screen.x + inset,
+                screen.y + inset,
+                (screen.width - inset * 2.0).max(0.0),
+                (screen.height - inset * 2.0).max(0.0),
+            ),
+            bitmap,
+            clip,
+        );
     }
     let border = box_.border_width;
     let border_color = scale_alpha(box_.border_color, opacity);

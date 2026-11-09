@@ -9,6 +9,7 @@ members = [
     "crates/js",
     "crates/css",
     "crates/style",
+    "crates/image",
     "crates/text",
     "crates/layout",
     "crates/paint",
