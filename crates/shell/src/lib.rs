@@ -14,7 +14,7 @@ use mithu_js::{Session, Submission};
 use mithu_layout::{hit_test, layout_tree, LayoutTree};
 use mithu_net::{get, post};
 use mithu_paint::{paint_layout, Canvas};
-use mithu_style::{style_document, ComputedStyle};
+use mithu_style::{style_with, ComputedStyle, StyleState};
 use mithu_text::{FontBook, MeasureText};
 use mithu_url::{Url, UrlError};
 
@@ -61,6 +61,8 @@ struct Page {
     find_open: bool,
     find_at: usize,
     zoom: f32,
+    author_css: String,
+    hover: Option<NodeId>,
 }
 
 struct Tabs {
@@ -94,7 +96,7 @@ impl Page {
             status: String::new(),
             document: Document::new(),
             styles: Vec::new(),
-            layout: layout_tree(&Document::new(), &[], width, &mithu_text::NaiveMetrics, &HashMap::new()),
+            layout: layout_tree(&Document::new(), &[], width, 600.0, &mithu_text::NaiveMetrics, &HashMap::new()),
             images: HashMap::new(),
             session: None,
             focused: None,
@@ -102,6 +104,8 @@ impl Page {
             find_open: false,
             find_at: 0,
             zoom: 1.0,
+            author_css: String::new(),
+            hover: None,
         }
     }
 }
@@ -842,9 +846,17 @@ impl Browser {
                 author.push('\n');
             }
         }
-        let styles = style_document(&document, &author);
+        let styles = style_with(
+            &document,
+            &author,
+            StyleState {
+                hover: None,
+                viewport_width: layout_width,
+            },
+        );
         let images = load_images(&document, &base);
-        let layout = layout_tree(&document, &styles, layout_width, &self.fonts, &images);
+        let layout_height = self.layout_height();
+        let layout = layout_tree(&document, &styles, layout_width, layout_height, &self.fonts, &images);
         self.omnibox_focused = false;
         let page = self.page_mut();
         page.title = if document.title.is_empty() {
@@ -873,6 +885,8 @@ impl Browser {
         page.find_open = find_open;
         page.find_at = 0;
         page.zoom = zoom;
+        page.author_css = author;
+        page.hover = None;
         let reopen = page.find_open && !page.find_query.is_empty();
         let _ = page;
         if reopen {
@@ -884,13 +898,47 @@ impl Browser {
         (self.viewport_w / self.page().zoom.max(0.01)).max(1.0)
     }
 
+    fn layout_height(&self) -> f32 {
+        let find = if self.page().find_open { FIND_H } else { 0.0 };
+        ((self.viewport_h - CONTENT_TOP - STATUS_H - find) / self.page().zoom.max(0.01)).max(1.0)
+    }
+
     fn relayout(&mut self) {
         let width = self.layout_width();
+        let height = self.layout_height();
         let layout = {
             let page = self.tabs.page();
-            layout_tree(&page.document, &page.styles, width, &self.fonts, &page.images)
+            layout_tree(&page.document, &page.styles, width, height, &self.fonts, &page.images)
         };
         self.page_mut().layout = layout;
+    }
+
+    pub fn pointer_move(&mut self, x: f32, y: f32) {
+        if self.menu.is_some() || y < CONTENT_TOP || y >= self.viewport_h - STATUS_H {
+            self.set_hover(None);
+            return;
+        }
+        let scroll = self.page().scroll;
+        let zoom = self.page().zoom.max(0.01);
+        let doc_x = x / zoom;
+        let doc_y = (y - CONTENT_TOP) / zoom + scroll;
+        let hit = hit_test(&self.page().layout, doc_x, doc_y);
+        self.set_hover(hit);
+    }
+
+    fn set_hover(&mut self, hit: Option<NodeId>) {
+        if self.page().hover == hit {
+            return;
+        }
+        self.page_mut().hover = hit;
+        let hover = hit;
+        let viewport_width = self.layout_width();
+        let styles = {
+            let page = self.tabs.page();
+            style_with(&page.document, &page.author_css, StyleState { hover, viewport_width })
+        };
+        self.page_mut().styles = styles;
+        self.relayout();
     }
 
     fn activate(&mut self, x: f32, y: f32) {
@@ -941,7 +989,9 @@ impl Browser {
             (session.document(), session.logs())
         };
         let author = author_css(&document, &base);
-        let styles = style_document(&document, &author);
+        let hover = self.page().hover;
+        let viewport_width = self.layout_width();
+        let styles = style_with(&document, &author, StyleState { hover, viewport_width });
         let images = load_images(&document, &base);
         {
             let page = self.page_mut();
@@ -954,6 +1004,7 @@ impl Browser {
             page.styles = styles;
             page.images = images;
             page.document = document;
+            page.author_css = author;
         }
         self.relayout();
     }

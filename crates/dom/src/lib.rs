@@ -281,6 +281,49 @@ impl Document {
         true
     }
 
+    pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) -> bool {
+        if self.nodes.get(parent.0).is_none() || self.nodes.get(child.0).is_none() {
+            return false;
+        }
+        if parent == child || self.contains_node(child, parent) {
+            return false;
+        }
+        self.detach(child);
+        self.nodes[child.0].parent = Some(parent);
+        if let Some(before) = before
+            && let Some(index) = self.nodes[parent.0].children.iter().position(|id| *id == before)
+        {
+            self.nodes[parent.0].children.insert(index, child);
+            return true;
+        }
+        self.nodes[parent.0].children.push(child);
+        true
+    }
+
+    pub fn insert_text_before(&mut self, parent: NodeId, before: NodeId, text: &str) {
+        if text.is_empty() || self.nodes.get(parent.0).is_none() {
+            return;
+        }
+        let Some(index) = self.nodes[parent.0].children.iter().position(|id| *id == before) else {
+            self.append_text(parent, text);
+            return;
+        };
+        if index > 0 {
+            let previous = self.nodes[parent.0].children[index - 1];
+            if let NodeData::Text(existing) = &mut self.nodes[previous.0].data {
+                existing.push_str(text);
+                return;
+            }
+        }
+        let id = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            parent: Some(parent),
+            children: Vec::new(),
+            data: NodeData::Text(text.to_string()),
+        });
+        self.nodes[parent.0].children.insert(index, id);
+    }
+
     pub fn element_child_index(&self, id: NodeId) -> Option<usize> {
         let parent = self.nodes.get(id.0)?.parent?;
         let mut count = 0;

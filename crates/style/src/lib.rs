@@ -1,5 +1,7 @@
 //! Cascade computed styles from the user-agent sheet, author CSS, and `style` attributes.
 
+use std::collections::HashMap;
+
 use mithu_base::Color;
 use mithu_css::{
     parse_css, parse_declarations, AttrOp, Combinator, Declaration, Pseudo, Selector, Stylesheet,
@@ -86,6 +88,17 @@ pub enum Length {
     Px(f32),
     Percent(f32),
     Em(f32),
+    Rem(f32),
+    Vw(f32),
+    Vh(f32),
+    Calc {
+        percent: f32,
+        px: f32,
+        em: f32,
+        rem: f32,
+        vw: f32,
+        vh: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,6 +120,14 @@ pub enum TextAlign {
 pub enum WhiteSpace {
     Normal,
     Pre,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextTransform {
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -137,12 +158,20 @@ pub struct ComputedStyle {
     pub flex_direction: FlexDirection,
     pub flex_reverse: bool,
     pub gap: f32,
+    pub row_gap: f32,
+    pub flex_wrap: bool,
+    pub flex_wrap_reverse: bool,
     pub justify: Justify,
     pub align_items: AlignItems,
+    pub align_self: Option<AlignItems>,
     pub flex_grow: f32,
+    pub flex_basis: Length,
     pub box_sizing: BoxSizing,
     pub overflow_hidden: bool,
     pub border_radius: f32,
+    pub visible: bool,
+    pub z_index: i32,
+    pub text_transform: TextTransform,
 }
 
 impl ComputedStyle {
@@ -174,12 +203,35 @@ impl ComputedStyle {
             flex_direction: FlexDirection::Row,
             flex_reverse: false,
             gap: 0.0,
+            row_gap: 0.0,
+            flex_wrap: false,
+            flex_wrap_reverse: false,
             justify: Justify::Start,
             align_items: AlignItems::Stretch,
+            align_self: None,
             flex_grow: 0.0,
+            flex_basis: Length::Auto,
             box_sizing: BoxSizing::ContentBox,
             overflow_hidden: false,
             border_radius: 0.0,
+            visible: true,
+            z_index: 0,
+            text_transform: TextTransform::None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct StyleState {
+    pub hover: Option<NodeId>,
+    pub viewport_width: f32,
+}
+
+impl Default for StyleState {
+    fn default() -> Self {
+        Self {
+            hover: None,
+            viewport_width: 1280.0,
         }
     }
 }
@@ -217,12 +269,20 @@ struct Specified {
     opacity: Option<Ranked<f32>>,
     flex_direction: Option<Ranked<(FlexDirection, bool)>>,
     gap: Option<Ranked<f32>>,
+    row_gap: Option<Ranked<f32>>,
+    flex_wrap: Option<Ranked<(bool, bool)>>,
     justify: Option<Ranked<Justify>>,
     align_items: Option<Ranked<AlignItems>>,
+    align_self: Option<Ranked<AlignItems>>,
     flex_grow: Option<Ranked<f32>>,
+    flex_basis: Option<Ranked<Length>>,
     box_sizing: Option<Ranked<BoxSizing>>,
     overflow_hidden: Option<Ranked<bool>>,
     border_radius: Option<Ranked<f32>>,
+    visible: Option<Ranked<bool>>,
+    z_index: Option<Ranked<i32>>,
+    text_transform: Option<Ranked<TextTransform>>,
+    custom: HashMap<String, Ranked<String>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -233,16 +293,21 @@ enum FontSize {
 }
 
 pub fn matches_element(doc: &Document, id: NodeId, selector: &Selector) -> bool {
-    matches_selector(doc, id, selector)
+    matches_selector(doc, id, selector, StyleState::default())
 }
 
 pub fn style_document(doc: &Document, author_css: &str) -> Vec<ComputedStyle> {
+    style_with(doc, author_css, StyleState::default())
+}
+
+pub fn style_with(doc: &Document, author_css: &str, state: StyleState) -> Vec<ComputedStyle> {
     let ua = parse_css(USER_AGENT_CSS);
     let author = parse_css(author_css);
     let mut styles = vec![ComputedStyle::initial(); doc.nodes.len()];
     let initial = ComputedStyle::initial();
+    let vars = HashMap::new();
     for child in doc.node(doc.root).children.clone() {
-        compute(doc, child, &initial, &ua, &author, &mut styles);
+        compute(doc, child, &initial, &ua, &author, state, &vars, &mut styles);
     }
     styles
 }
@@ -253,50 +318,182 @@ fn compute(
     parent: &ComputedStyle,
     ua: &Stylesheet,
     author: &Stylesheet,
+    state: StyleState,
+    parent_vars: &HashMap<String, String>,
     styles: &mut [ComputedStyle],
 ) {
     if doc.element_name(id).is_none() {
         return;
     }
-    let computed = concretize(doc, id, &cascade(doc, id, ua, author), parent);
+    let (specified, vars) = cascade(doc, id, ua, author, state, parent_vars);
+    let computed = concretize(doc, id, &specified, parent);
     styles[id.0] = computed.clone();
     for child in doc.node(id).children.clone() {
-        compute(doc, child, &computed, ua, author, styles);
+        compute(doc, child, &computed, ua, author, state, &vars, styles);
     }
 }
 
-fn cascade(doc: &Document, id: NodeId, ua: &Stylesheet, author: &Stylesheet) -> Specified {
+fn cascade(
+    doc: &Document,
+    id: NodeId,
+    ua: &Stylesheet,
+    author: &Stylesheet,
+    state: StyleState,
+    parent_vars: &HashMap<String, String>,
+) -> (Specified, HashMap<String, String>) {
     let mut specified = Specified::default();
-    apply_sheet(doc, id, ua, &mut specified);
-    apply_sheet(doc, id, author, &mut specified);
+    collect_custom(doc, id, ua, state, &mut specified);
+    collect_custom(doc, id, author, state, &mut specified);
+    if let Some(inline) = doc.attr(id, "style") {
+        for declaration in parse_declarations(inline) {
+            if declaration.name.starts_with("--") {
+                let spec = 1_000 + if declaration.important { 100_000 } else { 0 };
+                rank_custom(&mut specified.custom, &declaration.name, declaration.value, spec);
+            }
+        }
+    }
+    let vars = resolve_custom(&specified.custom, parent_vars);
+    apply_sheet(doc, id, ua, state, &vars, &mut specified);
+    apply_sheet(doc, id, author, state, &vars, &mut specified);
     if let Some(inline) = doc.attr(id, "style") {
         for declaration in parse_declarations(inline) {
             let spec = 1_000 + if declaration.important { 100_000 } else { 0 };
-            apply_declaration(&declaration, spec, &mut specified);
+            apply_declaration(&declaration, spec, &vars, &mut specified);
         }
     }
-    specified
+    (specified, vars)
 }
 
-fn apply_sheet(doc: &Document, id: NodeId, sheet: &Stylesheet, specified: &mut Specified) {
-    for rule in &sheet.rules {
+fn collect_custom(doc: &Document, id: NodeId, sheet: &Stylesheet, state: StyleState, specified: &mut Specified) {
+        for rule in &sheet.rules {
+        if !media_applies(rule.media.as_ref(), state.viewport_width) {
+            continue;
+        }
         for selector in &rule.selectors {
-            if !matches_selector(doc, id, selector) {
+            if !matches_selector(doc, id, selector, state) {
+                continue;
+            }
+            for declaration in &rule.declarations {
+                if declaration.name.starts_with("--") {
+                    let spec = selector.specificity() + if declaration.important { 100_000 } else { 0 };
+                    rank_custom(&mut specified.custom, &declaration.name, declaration.value.clone(), spec);
+                }
+            }
+        }
+    }
+}
+
+fn rank_custom(map: &mut HashMap<String, Ranked<String>>, name: &str, value: String, spec: u32) {
+    let name = name.to_ascii_lowercase();
+    match map.get(&name) {
+        Some(existing) if existing.spec > spec => {}
+        _ => {
+            map.insert(name, Ranked { value, spec });
+        }
+    }
+}
+
+fn resolve_custom(own: &HashMap<String, Ranked<String>>, parent: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut resolved = parent.clone();
+    for (name, ranked) in own {
+        resolved.insert(name.clone(), ranked.value.clone());
+    }
+    for _ in 0..8 {
+        let snapshot = resolved.clone();
+        for value in resolved.values_mut() {
+            *value = expand_vars(value, &snapshot);
+        }
+    }
+    resolved
+}
+
+fn expand_vars(input: &str, vars: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut rest = input;
+    while let Some(start) = rest.to_ascii_lowercase().find("var(") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 4..];
+        let Some(end) = matching_paren(after) else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let inner = &after[..end];
+        let (name, fallback) = split_var(inner);
+        let name = name.trim().to_ascii_lowercase();
+        if let Some(value) = vars.get(&name) {
+            if value.to_ascii_lowercase().contains("var(") {
+                out.push_str(&expand_vars(value, vars));
+            } else {
+                out.push_str(value);
+            }
+        } else if let Some(fallback) = fallback {
+            out.push_str(&expand_vars(fallback.trim(), vars));
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn matching_paren(input: &str) -> Option<usize> {
+    let mut depth = 1;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_var(input: &str) -> (&str, Option<&str>) {
+    let mut depth = 0;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => return (&input[..index], Some(&input[index + 1..])),
+            _ => {}
+        }
+    }
+    (input, None)
+}
+
+fn apply_sheet(
+    doc: &Document,
+    id: NodeId,
+    sheet: &Stylesheet,
+    state: StyleState,
+    vars: &HashMap<String, String>,
+    specified: &mut Specified,
+) {
+    for rule in &sheet.rules {
+        if !media_applies(rule.media.as_ref(), state.viewport_width) {
+            continue;
+        }
+        for selector in &rule.selectors {
+            if !matches_selector(doc, id, selector, state) {
                 continue;
             }
             for declaration in &rule.declarations {
                 let spec = selector.specificity() + if declaration.important { 100_000 } else { 0 };
-                apply_declaration(declaration, spec, specified);
+                apply_declaration(declaration, spec, vars, specified);
             }
         }
     }
 }
 
-fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector) -> bool {
+fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector, state: StyleState) -> bool {
     let Some(last) = selector.compounds.last() else {
         return false;
     };
-    if !matches_compound(doc, id, last) {
+    if !matches_compound(doc, id, last, state) {
         return false;
     }
     let mut current = id;
@@ -308,7 +505,7 @@ fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector) 
                 let Some(parent) = doc.parent_element(current) else {
                     return false;
                 };
-                if !matches_compound(doc, parent, compound) {
+                if !matches_compound(doc, parent, compound, state) {
                     return false;
                 }
                 current = parent;
@@ -317,7 +514,7 @@ fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector) 
                 let Some(previous) = doc.previous_element_sibling(current) else {
                     return false;
                 };
-                if !matches_compound(doc, previous, compound) {
+                if !matches_compound(doc, previous, compound, state) {
                     return false;
                 }
                 current = previous;
@@ -326,7 +523,7 @@ fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector) 
                 let mut previous = doc.previous_element_sibling(current);
                 let mut found = false;
                 while let Some(candidate) = previous {
-                    if matches_compound(doc, candidate, compound) {
+                    if matches_compound(doc, candidate, compound, state) {
                         current = candidate;
                         found = true;
                         break;
@@ -341,7 +538,7 @@ fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector) 
                 let mut parent = doc.parent_element(current);
                 let mut found = false;
                 while let Some(candidate) = parent {
-                    if matches_compound(doc, candidate, compound) {
+                    if matches_compound(doc, candidate, compound, state) {
                         current = candidate;
                         found = true;
                         break;
@@ -357,7 +554,7 @@ fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector) 
     true
 }
 
-fn matches_compound(doc: &Document, id: NodeId, compound: &mithu_css::Compound) -> bool {
+fn matches_compound(doc: &Document, id: NodeId, compound: &mithu_css::Compound, state: StyleState) -> bool {
     let Some(element) = doc.element(id) else {
         return false;
     };
@@ -385,7 +582,7 @@ fn matches_compound(doc: &Document, id: NodeId, compound: &mithu_css::Compound) 
     {
         return false;
     }
-    compound.pseudos.iter().all(|pseudo| matches_pseudo(doc, id, pseudo))
+    compound.pseudos.iter().all(|pseudo| matches_pseudo(doc, id, pseudo, state))
 }
 
 fn matches_attr(doc: &Document, id: NodeId, attr: &mithu_css::AttrSelector) -> bool {
@@ -406,7 +603,7 @@ fn matches_attr(doc: &Document, id: NodeId, attr: &mithu_css::AttrSelector) -> b
     }
 }
 
-fn matches_pseudo(doc: &Document, id: NodeId, pseudo: &Pseudo) -> bool {
+fn matches_pseudo(doc: &Document, id: NodeId, pseudo: &Pseudo, state: StyleState) -> bool {
     match pseudo {
         Pseudo::FirstChild => doc.previous_element_sibling(id).is_none(),
         Pseudo::LastChild => doc.next_element_sibling(id).is_none(),
@@ -415,8 +612,24 @@ fn matches_pseudo(doc: &Document, id: NodeId, pseudo: &Pseudo) -> bool {
             .is_some_and(|index| nth_matches(*a, *b, index)),
         Pseudo::Link => doc.element_name(id) == Some("a") && doc.attr(id, "href").is_some(),
         Pseudo::Empty => is_empty(doc, id),
-        Pseudo::Not(inner) => !matches_compound(doc, id, inner),
+        Pseudo::Hover => is_hovered(doc, id, state.hover),
+        Pseudo::Not(inner) => !matches_compound(doc, id, inner, state),
         Pseudo::Unmatched => false,
+    }
+}
+
+fn is_hovered(doc: &Document, id: NodeId, hover: Option<NodeId>) -> bool {
+    let Some(mut current) = hover else {
+        return false;
+    };
+    loop {
+        if current == id {
+            return true;
+        }
+        match doc.parent_element(current) {
+            Some(parent) => current = parent,
+            None => return false,
+        }
     }
 }
 
@@ -437,8 +650,17 @@ fn is_empty(doc: &Document, id: NodeId) -> bool {
     })
 }
 
-fn apply_declaration(declaration: &Declaration, spec: u32, specified: &mut Specified) {
-    let value = declaration.value.as_str();
+fn apply_declaration(
+    declaration: &Declaration,
+    spec: u32,
+    vars: &HashMap<String, String>,
+    specified: &mut Specified,
+) {
+    if declaration.name.starts_with("--") {
+        return;
+    }
+    let expanded = expand_vars(&declaration.value, vars);
+    let value = expanded.as_str();
     match declaration.name.as_str() {
         "display" => {
             if let Some(display) = parse_display(value) {
@@ -555,9 +777,55 @@ fn apply_declaration(declaration: &Declaration, spec: u32, specified: &mut Speci
                 rank(&mut specified.flex_direction, direction, spec);
             }
         }
-        "gap" | "row-gap" | "column-gap" => {
-            if let Some(Length::Px(px)) = parse_length(value) {
-                rank(&mut specified.gap, px.max(0.0), spec);
+        "gap" => {
+            if let Some((row, column)) = parse_gap(value) {
+                rank(&mut specified.row_gap, row, spec);
+                rank(&mut specified.gap, column, spec);
+            }
+        }
+        "row-gap" => {
+            if let Some(px) = px_length(value) {
+                rank(&mut specified.row_gap, px, spec);
+            }
+        }
+        "column-gap" => {
+            if let Some(px) = px_length(value) {
+                rank(&mut specified.gap, px, spec);
+            }
+        }
+        "flex-wrap" => {
+            if let Some(wrap) = parse_flex_wrap(value) {
+                rank(&mut specified.flex_wrap, wrap, spec);
+            }
+        }
+        "align-self" => {
+            if value.trim().eq_ignore_ascii_case("auto") {
+                if specified.align_self.as_ref().is_none_or(|item| spec >= item.spec) {
+                    specified.align_self = None;
+                }
+            } else if let Some(align) = parse_align_items(value) {
+                rank(&mut specified.align_self, align, spec);
+            }
+        }
+        "flex-basis" => {
+            if let Some(length) = parse_length(value) {
+                rank(&mut specified.flex_basis, length, spec);
+            }
+        }
+        "visibility" => {
+            let visible = !matches!(value.trim().to_ascii_lowercase().as_str(), "hidden" | "collapse");
+            rank(&mut specified.visible, visible, spec);
+        }
+        "z-index" => {
+            if value.trim().eq_ignore_ascii_case("auto") {
+                rank(&mut specified.z_index, 0, spec);
+            } else if let Some(index) = value.trim().parse::<i32>().ok() {
+                rank(&mut specified.z_index, index, spec);
+            }
+        }
+        "text-transform" => {
+            if let Some(transform) = parse_text_transform(value) {
+                rank(&mut specified.text_transform, transform, spec);
             }
         }
         "justify-content" => {
@@ -700,13 +968,18 @@ fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &Comput
             .unwrap_or(FlexDirection::Row),
         flex_reverse: specified.flex_direction.as_ref().is_some_and(|item| item.value.1),
         gap: specified.gap.as_ref().map(|item| item.value).unwrap_or(0.0),
+        row_gap: specified.row_gap.as_ref().map(|item| item.value).unwrap_or(0.0),
+        flex_wrap: specified.flex_wrap.as_ref().is_some_and(|item| item.value.0),
+        flex_wrap_reverse: specified.flex_wrap.as_ref().is_some_and(|item| item.value.1),
         justify: specified.justify.as_ref().map(|item| item.value).unwrap_or(Justify::Start),
         align_items: specified
             .align_items
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(AlignItems::Stretch),
+        align_self: specified.align_self.as_ref().map(|item| item.value),
         flex_grow: specified.flex_grow.as_ref().map(|item| item.value).unwrap_or(0.0),
+        flex_basis: specified.flex_basis.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
         box_sizing: specified
             .box_sizing
             .as_ref()
@@ -714,6 +987,13 @@ fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &Comput
             .unwrap_or(BoxSizing::ContentBox),
         overflow_hidden: specified.overflow_hidden.as_ref().is_some_and(|item| item.value),
         border_radius: specified.border_radius.as_ref().map(|item| item.value).unwrap_or(0.0),
+        visible: specified.visible.as_ref().map(|item| item.value).unwrap_or(true),
+        z_index: specified.z_index.as_ref().map(|item| item.value).unwrap_or(0),
+        text_transform: specified
+            .text_transform
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(parent.text_transform),
     };
     apply_presentational_hints(doc, id, &mut computed);
     computed
@@ -835,8 +1115,9 @@ fn parse_font_size(value: &str) -> Option<FontSize> {
     match parse_length(&value)? {
         Length::Px(px) => Some(FontSize::Px(px)),
         Length::Em(em) => Some(FontSize::Em(em)),
+        Length::Rem(rem) => Some(FontSize::Px(rem * 16.0)),
         Length::Percent(percent) => Some(FontSize::Percent(percent)),
-        Length::Auto => None,
+        Length::Auto | Length::Vw(_) | Length::Vh(_) | Length::Calc { .. } => None,
     }
 }
 
@@ -947,7 +1228,8 @@ fn parse_line_height(value: &str) -> Option<LineHeight> {
             Length::Px(px) => LineHeight::Px(px),
             Length::Percent(percent) => LineHeight::Percent(percent),
             Length::Em(em) => LineHeight::Number(em),
-            Length::Auto => return None,
+            Length::Rem(rem) => LineHeight::Px(rem * 16.0),
+            Length::Auto | Length::Vw(_) | Length::Vh(_) | Length::Calc { .. } => return None,
         });
     }
     value.parse::<f32>().ok().map(LineHeight::Number)
@@ -967,13 +1249,195 @@ pub fn parse_length(value: &str) -> Option<Length> {
     if let Some(number) = value.strip_suffix('%') {
         return number.trim().parse().ok().map(Length::Percent);
     }
+    if let Some(length) = parse_calc(value) {
+        return Some(length);
+    }
+    if let Some(number) = value.strip_suffix("rem") {
+        return number.trim().parse().ok().map(Length::Rem);
+    }
     if let Some(number) = value.strip_suffix("em") {
         return number.trim().parse().ok().map(Length::Em);
     }
-    if let Some(number) = value.strip_suffix("rem") {
-        return number.trim().parse::<f32>().ok().map(|em| Length::Px(em * 16.0));
+    if let Some(number) = value.strip_suffix("vw") {
+        return number.trim().parse().ok().map(Length::Vw);
+    }
+    if let Some(number) = value.strip_suffix("vh") {
+        return number.trim().parse().ok().map(Length::Vh);
     }
     None
+}
+
+fn parse_calc(value: &str) -> Option<Length> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("calc(") || !lower.ends_with(')') {
+        return None;
+    }
+    let inner = &trimmed[5..trimmed.len() - 1];
+    let mut parts = Vec::new();
+    let mut sign = 1.0;
+    let mut current = String::new();
+    let mut depth = 0;
+    for ch in inner.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            '+' if depth == 0 => {
+                parts.push((sign, std::mem::take(&mut current)));
+                sign = 1.0;
+            }
+            '-' if depth == 0 && !current.trim().is_empty() => {
+                parts.push((sign, std::mem::take(&mut current)));
+                sign = -1.0;
+            }
+            _ => current.push(ch),
+        }
+    }
+    parts.push((sign, current));
+    let mut percent = 0.0;
+    let mut px = 0.0;
+    let mut em = 0.0;
+    let mut rem = 0.0;
+    let mut vw = 0.0;
+    let mut vh = 0.0;
+    for (sign, term) in parts {
+        let term = term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        let (factor, length) = term_length(term)?;
+        add_calc(&mut percent, &mut px, &mut em, &mut rem, &mut vw, &mut vh, length, sign * factor);
+    }
+    Some(simplify_calc(percent, px, em, rem, vw, vh))
+}
+
+fn term_length(term: &str) -> Option<(f32, Length)> {
+    if let Some((left, right)) = split_top(term, '*') {
+        let (number, expr) = if let Some(number) = left.trim().parse::<f32>().ok() {
+            (number, right.trim())
+        } else {
+            (right.trim().parse::<f32>().ok()?, left.trim())
+        };
+        return Some((number, parse_length(expr)?));
+    }
+    if let Some((left, right)) = split_top(term, '/') {
+        let number = right.trim().parse::<f32>().ok()?;
+        if number == 0.0 {
+            return None;
+        }
+        return Some((1.0 / number, parse_length(left.trim())?));
+    }
+    Some((1.0, parse_length(term)?))
+}
+
+fn split_top<'a>(input: &'a str, op: char) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ if ch == op && depth == 0 => return Some((&input[..index], &input[index + ch.len_utf8()..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn add_calc(percent: &mut f32, px: &mut f32, em: &mut f32, rem: &mut f32, vw: &mut f32, vh: &mut f32, length: Length, factor: f32) {
+    match length {
+        Length::Px(value) => *px += value * factor,
+        Length::Percent(value) => *percent += value * factor,
+        Length::Em(value) => *em += value * factor,
+        Length::Rem(value) => *rem += value * factor,
+        Length::Vw(value) => *vw += value * factor,
+        Length::Vh(value) => *vh += value * factor,
+        Length::Calc {
+            percent: more_percent,
+            px: more_px,
+            em: more_em,
+            rem: more_rem,
+            vw: more_vw,
+            vh: more_vh,
+        } => {
+            *percent += more_percent * factor;
+            *px += more_px * factor;
+            *em += more_em * factor;
+            *rem += more_rem * factor;
+            *vw += more_vw * factor;
+            *vh += more_vh * factor;
+        }
+        Length::Auto => {}
+    }
+}
+
+fn simplify_calc(percent: f32, px: f32, em: f32, rem: f32, vw: f32, vh: f32) -> Length {
+    if percent == 0.0 && em == 0.0 && rem == 0.0 && vw == 0.0 && vh == 0.0 {
+        Length::Px(px)
+    } else if px == 0.0 && em == 0.0 && rem == 0.0 && vw == 0.0 && vh == 0.0 {
+        Length::Percent(percent)
+    } else if percent == 0.0 && px == 0.0 && rem == 0.0 && vw == 0.0 && vh == 0.0 {
+        Length::Em(em)
+    } else if percent == 0.0 && px == 0.0 && em == 0.0 && vw == 0.0 && vh == 0.0 {
+        Length::Rem(rem)
+    } else if percent == 0.0 && px == 0.0 && em == 0.0 && rem == 0.0 && vh == 0.0 {
+        Length::Vw(vw)
+    } else if percent == 0.0 && px == 0.0 && em == 0.0 && rem == 0.0 && vw == 0.0 {
+        Length::Vh(vh)
+    } else {
+        Length::Calc { percent, px, em, rem, vw, vh }
+    }
+}
+
+fn px_length(value: &str) -> Option<f32> {
+    match parse_length(value)? {
+        Length::Px(px) => Some(px.max(0.0)),
+        Length::Em(em) => Some((em * 16.0).max(0.0)),
+        Length::Rem(rem) => Some((rem * 16.0).max(0.0)),
+        Length::Percent(_) | Length::Vw(_) | Length::Vh(_) | Length::Calc { .. } | Length::Auto => None,
+    }
+}
+
+fn parse_gap(value: &str) -> Option<(f32, f32)> {
+    let sides: Vec<f32> = value.split_whitespace().filter_map(px_length).collect();
+    match sides.as_slice() {
+        [one] => Some((*one, *one)),
+        [row, column, ..] => Some((*row, *column)),
+        _ => None,
+    }
+}
+
+fn media_applies(media: Option<&mithu_css::Media>, width: f32) -> bool {
+    let Some(media) = media else {
+        return true;
+    };
+    media.alternatives.iter().any(|bound| {
+        bound.min_width.is_none_or(|min| width + 0.01 >= min) && bound.max_width.is_none_or(|max| width <= max + 0.01)
+    })
+}
+
+fn parse_text_transform(value: &str) -> Option<TextTransform> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "none" => TextTransform::None,
+        "uppercase" => TextTransform::Uppercase,
+        "lowercase" => TextTransform::Lowercase,
+        "capitalize" => TextTransform::Capitalize,
+        _ => return None,
+    })
+}
+
+fn parse_flex_wrap(value: &str) -> Option<(bool, bool)> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "nowrap" => (false, false),
+        "wrap" => (true, false),
+        "wrap-reverse" => (true, true),
+        _ => return None,
+    })
 }
 
 fn parse_sides(value: &str) -> Option<[Length; 4]> {
@@ -1022,7 +1486,8 @@ fn parse_border_width(value: &str) -> Option<f32> {
         _ => match parse_length(value)? {
             Length::Px(px) => Some(px),
             Length::Em(em) => Some(em * 16.0),
-            _ => None,
+            Length::Rem(rem) => Some(rem * 16.0),
+            Length::Percent(_) | Length::Vw(_) | Length::Vh(_) | Length::Calc { .. } | Length::Auto => None,
         },
     }
 }
@@ -1033,6 +1498,9 @@ fn parse_color(value: &str) -> Option<Color> {
         return Some(color);
     }
     if let Some(color) = parse_rgb(value) {
+        return Some(color);
+    }
+    if let Some(color) = parse_hsl(value) {
         return Some(color);
     }
     value.split_whitespace().find_map(parse_color_token)
@@ -1066,6 +1534,43 @@ fn parse_color_token(value: &str) -> Option<Color> {
         "aqua" => Color::rgb(0, 255, 255),
         "fuchsia" => Color::rgb(255, 0, 255),
         "whitesmoke" => Color::rgb(245, 245, 245),
+        "pink" => Color::rgb(255, 192, 203),
+        "brown" => Color::rgb(165, 42, 42),
+        "gold" => Color::rgb(255, 215, 0),
+        "coral" => Color::rgb(255, 127, 80),
+        "crimson" => Color::rgb(220, 20, 60),
+        "indigo" => Color::rgb(75, 0, 130),
+        "violet" => Color::rgb(238, 130, 238),
+        "cyan" => Color::rgb(0, 255, 255),
+        "magenta" => Color::rgb(255, 0, 255),
+        "beige" => Color::rgb(245, 245, 220),
+        "khaki" => Color::rgb(240, 230, 140),
+        "tomato" => Color::rgb(255, 99, 71),
+        "chocolate" => Color::rgb(210, 105, 30),
+        "darkgray" | "darkgrey" => Color::rgb(169, 169, 169),
+        "lightgray" | "lightgrey" => Color::rgb(211, 211, 211),
+        "dimgray" | "dimgrey" => Color::rgb(105, 105, 105),
+        "darkred" => Color::rgb(139, 0, 0),
+        "darkgreen" => Color::rgb(0, 100, 0),
+        "darkblue" => Color::rgb(0, 0, 139),
+        "lightblue" => Color::rgb(173, 216, 230),
+        "skyblue" => Color::rgb(135, 206, 235),
+        "royalblue" => Color::rgb(65, 105, 225),
+        "steelblue" => Color::rgb(70, 130, 180),
+        "forestgreen" => Color::rgb(34, 139, 34),
+        "seagreen" => Color::rgb(46, 139, 87),
+        "limegreen" => Color::rgb(50, 205, 50),
+        "orangered" => Color::rgb(255, 69, 0),
+        "darkorange" => Color::rgb(255, 140, 0),
+        "salmon" => Color::rgb(250, 128, 114),
+        "tan" => Color::rgb(210, 180, 140),
+        "wheat" => Color::rgb(245, 222, 179),
+        "ivory" => Color::rgb(255, 255, 240),
+        "azure" => Color::rgb(240, 255, 255),
+        "lavender" => Color::rgb(230, 230, 250),
+        "plum" => Color::rgb(221, 160, 221),
+        "turquoise" => Color::rgb(64, 224, 208),
+        "rebeccapurple" => Color::rgb(102, 51, 153),
         _ => return None,
     })
 }
@@ -1108,7 +1613,62 @@ fn parse_rgb(value: &str) -> Option<Color> {
         let value = token.parse::<f32>().ok()?;
         Some(value.round().clamp(0.0, 255.0) as u8)
     };
-    Some(Color::rgb(channel(numbers[0])?, channel(numbers[1])?, channel(numbers[2])?))
+    let alpha = match numbers.get(3) {
+        Some(token) => parse_alpha(token)?,
+        None => 255,
+    };
+    Some(Color::rgba(channel(numbers[0])?, channel(numbers[1])?, channel(numbers[2])?, alpha))
+}
+
+fn parse_alpha(token: &str) -> Option<u8> {
+    if let Some(percent) = token.strip_suffix('%') {
+        let value = percent.trim().parse::<f32>().ok()?;
+        return Some((value / 100.0 * 255.0).round().clamp(0.0, 255.0) as u8);
+    }
+    let value = token.parse::<f32>().ok()?;
+    Some((value * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
+fn parse_hsl(value: &str) -> Option<Color> {
+    let lower = value.trim().to_ascii_lowercase();
+    let inner = lower
+        .strip_prefix("hsla(")
+        .or_else(|| lower.strip_prefix("hsl("))?
+        .strip_suffix(')')?;
+    let inner = inner.replace('/', " ").replace(',', " ");
+    let numbers: Vec<&str> = inner.split_whitespace().take(4).collect();
+    if numbers.len() < 3 {
+        return None;
+    }
+    let hue = numbers[0].trim_end_matches("deg").parse::<f32>().ok()?;
+    let saturation = numbers[1].strip_suffix('%')?.trim().parse::<f32>().ok()? / 100.0;
+    let lightness = numbers[2].strip_suffix('%')?.trim().parse::<f32>().ok()? / 100.0;
+    let alpha = match numbers.get(3) {
+        Some(token) => parse_alpha(token)?,
+        None => 255,
+    };
+    let (red, green, blue) = hsl_channels(hue, saturation, lightness);
+    Some(Color::rgba(red, green, blue, alpha))
+}
+
+fn hsl_channels(hue: f32, saturation: f32, lightness: f32) -> (u8, u8, u8) {
+    let hue = hue.rem_euclid(360.0);
+    let saturation = saturation.clamp(0.0, 1.0);
+    let lightness = lightness.clamp(0.0, 1.0);
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let section = hue / 60.0;
+    let x = chroma * (1.0 - (section.rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match section as i32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let match_light = lightness - chroma / 2.0;
+    let channel = |value: f32| ((value + match_light) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (channel(red), channel(green), channel(blue))
 }
 
 #[cfg(test)]
@@ -1163,5 +1723,42 @@ mod tests {
             .find_map(|(index, _)| (doc.element_name(NodeId(index)) == Some("p")).then_some(index))
             .unwrap();
         assert_eq!(styles[p].color, Color::rgb(0, 255, 0));
+    }
+
+    #[test]
+    fn custom_properties_calc_and_hover() {
+        let doc = parse_html(r#"<div id="box" style="--ink: hsl(0, 100%, 50%)"><p id="text">Hi</p></div>"#);
+        let styles = style_document(
+            &doc,
+            "p { color: var(--ink); width: calc(100% - 20px) } #text { background: rgba(0, 0, 0, 0.5) }",
+        );
+        let text = doc.get_element_by_id("text").unwrap();
+        assert_eq!(styles[text.0].color, Color::rgb(255, 0, 0));
+        assert_eq!(styles[text.0].background.a, 128);
+        assert_eq!(
+            styles[text.0].width,
+            Length::Calc { percent: 100.0, px: -20.0, em: 0.0, rem: 0.0, vw: 0.0, vh: 0.0 }
+        );
+        let idle = style_document(&doc, "#box:hover { color: tomato }");
+        let box_id = doc.get_element_by_id("box").unwrap();
+        assert_ne!(idle[box_id.0].color, Color::rgb(255, 99, 71));
+        let hovered = style_with(
+            &doc,
+            "#box:hover { color: tomato }",
+            StyleState { hover: Some(text), ..StyleState::default() },
+        );
+        assert_eq!(hovered[box_id.0].color, Color::rgb(255, 99, 71));
+        assert!(style_document(&doc, "#box { flex-wrap: wrap; visibility: hidden; z-index: 2 }")[box_id.0].flex_wrap);
+        assert!(!style_document(&doc, "#box { visibility: hidden }")[box_id.0].visible);
+        let narrow = style_with(
+            &doc,
+            "@media (min-width: 900px) { #text { color: blue } } @media (max-width: 400px) { #text { color: gold } }",
+            StyleState { viewport_width: 320.0, ..StyleState::default() },
+        );
+        assert_eq!(narrow[text.0].color, Color::rgb(255, 215, 0));
+        assert_eq!(
+            style_document(&doc, "#text { text-transform: uppercase }")[text.0].text_transform,
+            TextTransform::Uppercase
+        );
     }
 }

@@ -12,7 +12,7 @@ use mithu_dom::{Document, NodeData, NodeId};
 use mithu_image::Bitmap;
 use mithu_style::{
     AlignItems, BoxSizing, ComputedStyle, Display, FlexDirection, Justify, Length, LineHeight, Position,
-    TextAlign, WhiteSpace,
+    TextAlign, TextTransform, WhiteSpace,
 };
 use mithu_text::MeasureText;
 
@@ -50,6 +50,15 @@ pub struct LayoutBox {
     pub overflow_hidden: bool,
     pub border_radius: f32,
     pub image: Option<Arc<Bitmap>>,
+    pub visible: bool,
+    pub z_index: i32,
+}
+
+#[derive(Clone, Copy)]
+struct View {
+    width: f32,
+    height: f32,
+    root: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -78,10 +87,16 @@ pub fn layout_tree(
     doc: &Document,
     styles: &[ComputedStyle],
     viewport_width: f32,
+    viewport_height: f32,
     measure: &dyn MeasureText,
     images: &HashMap<NodeId, Arc<Bitmap>>,
 ) -> LayoutTree {
     let root_id = document_element(doc).unwrap_or(doc.root);
+    let view = View {
+        width: viewport_width.max(1.0),
+        height: viewport_height.max(1.0),
+        root: styles.get(root_id.0).map(|style| style.font_size).unwrap_or(16.0),
+    };
     let root = layout_node(
         doc,
         styles,
@@ -93,6 +108,7 @@ pub fn layout_tree(
         viewport_width.max(1.0),
         None,
         false,
+        view,
     )
         .unwrap_or_else(|| empty_box(root_id));
     let content_height = root.rect.bottom() + root.margin.bottom;
@@ -117,6 +133,7 @@ fn layout_node(
     containing_width: f32,
     inherited_href: Option<String>,
     shrink_to_fit: bool,
+    view: View,
 ) -> Option<LayoutBox> {
     let mut style = style_of(styles, id);
     let image = (doc.element_name(id) == Some("img"))
@@ -141,19 +158,19 @@ fn layout_node(
     let href = own_href(doc, id).or(inherited_href);
     let font = style.font_size;
     let border = style.border_width.max(0.0);
-    let padding = resolve_edges(&style.padding, font, containing_width, false);
+    let padding = resolve_edges(&style.padding, font, containing_width, view);
     let width_is_auto = matches!(style.width, Length::Auto);
-    let width_opt = resolve_length(style.width, font, containing_width).map(|width| {
+    let width_opt = resolve_length(style.width, font, containing_width, view).map(|width| {
         if style.box_sizing == BoxSizing::BorderBox {
             (width - padding.left - padding.right - border * 2.0).max(0.0)
         } else {
             width.max(0.0)
         }
     });
-    let margin_top = resolve_length(style.margin[0], font, containing_width).unwrap_or(0.0).max(0.0);
-    let margin_bottom = resolve_length(style.margin[2], font, containing_width).unwrap_or(0.0).max(0.0);
-    let margin_left_opt = resolve_length(style.margin[3], font, containing_width);
-    let margin_right_opt = resolve_length(style.margin[1], font, containing_width);
+    let margin_top = resolve_length(style.margin[0], font, containing_width, view).unwrap_or(0.0).max(0.0);
+    let margin_bottom = resolve_length(style.margin[2], font, containing_width, view).unwrap_or(0.0).max(0.0);
+    let margin_left_opt = resolve_length(style.margin[3], font, containing_width, view);
+    let margin_right_opt = resolve_length(style.margin[1], font, containing_width, view);
 
     let (margin_left, margin_right, mut content_w) = if let Some(width) = width_opt {
         let space = containing_width - width - padding.left - padding.right - border * 2.0;
@@ -178,7 +195,7 @@ fn layout_node(
     let content_x = border_x + border + padding.left;
     let content_y = border_y + border + padding.top;
 
-    content_w = limit_content(&style, content_w, font, containing_width, padding.left + padding.right, border);
+    content_w = limit_content(&style, content_w, font, containing_width, padding.left + padding.right, border, view);
     let synthetic = if image.is_some() {
         None
     } else {
@@ -197,6 +214,7 @@ fn layout_node(
             content_y,
             content_w,
             href.clone(),
+            view,
         )
     } else if blockish {
         layout_blocks(
@@ -210,16 +228,17 @@ fn layout_node(
             content_y,
             content_w,
             href.clone(),
+            view,
         )
     } else {
         let items = if let Some(text) = &synthetic {
             items_from_text(text, &style, measure, href.clone(), id)
         } else {
-            collect_children(doc, styles, measure, images, id, &style, content_w, href.clone())
+            collect_children(doc, styles, measure, images, id, &style, content_w, href.clone(), view)
         };
         if shrink && !items.is_empty() {
             content_w = preferred_width(&items, content_w);
-            content_w = limit_content(&style, content_w, font, containing_width, padding.left + padding.right, border);
+            content_w = limit_content(&style, content_w, font, containing_width, padding.left + padding.right, border, view);
         }
         if is_blank(&items) {
             (Vec::new(), Vec::new(), 0.0)
@@ -228,17 +247,17 @@ fn layout_node(
         }
     };
 
-    let mut specified_height = resolve_height(style.height, font);
+    let mut specified_height = resolve_height(style.height, font, view);
     if style.box_sizing == BoxSizing::BorderBox
         && let Some(height) = specified_height
     {
         specified_height = Some((height - padding.top - padding.bottom - border * 2.0).max(0.0));
     }
     let mut content_h = flowed.max(specified_height.unwrap_or(0.0));
-    if let Some(max) = resolve_height(style.max_height, font) {
+    if let Some(max) = resolve_height(style.max_height, font, view) {
         content_h = content_h.min(max);
     }
-    if let Some(min) = resolve_height(style.min_height, font) {
+    if let Some(min) = resolve_height(style.min_height, font, view) {
         content_h = content_h.max(min);
     }
     children.extend(layout_absolute_children(
@@ -252,6 +271,7 @@ fn layout_node(
         content_w,
         content_h,
         href.clone(),
+        view,
     ));
     let rect = Rect::new(
         border_x,
@@ -279,20 +299,22 @@ fn layout_node(
         overflow_hidden: style.overflow_hidden,
         border_radius: style.border_radius,
         image,
+        visible: style.visible,
+        z_index: if style.position == Position::Static { 0 } else { style.z_index },
     };
     if style.position == Position::Relative {
-        let dx = resolve_length(style.insets[3], font, containing_width)
-            .or_else(|| resolve_length(style.insets[1], font, containing_width).map(|right| -right))
+        let dx = resolve_length(style.insets[3], font, containing_width, view)
+            .or_else(|| resolve_length(style.insets[1], font, containing_width, view).map(|right| -right))
             .unwrap_or(0.0);
-        let dy = resolve_length(style.insets[0], font, containing_width)
-            .or_else(|| resolve_length(style.insets[2], font, containing_width).map(|bottom| -bottom))
+        let dy = resolve_length(style.insets[0], font, containing_width, view)
+            .or_else(|| resolve_length(style.insets[2], font, containing_width, view).map(|bottom| -bottom))
             .unwrap_or(0.0);
         translate(&mut laid_out, dx, dy);
     }
     Some(laid_out)
 }
 
-fn limit_content(style: &ComputedStyle, content_w: f32, font: f32, containing: f32, padding_x: f32, border: f32) -> f32 {
+fn limit_content(style: &ComputedStyle, content_w: f32, font: f32, containing: f32, padding_x: f32, border: f32, view: View) -> f32 {
     let adjust = |length: f32| {
         if style.box_sizing == BoxSizing::BorderBox {
             (length - padding_x - border * 2.0).max(0.0)
@@ -301,10 +323,10 @@ fn limit_content(style: &ComputedStyle, content_w: f32, font: f32, containing: f
         }
     };
     let mut width = content_w;
-    if let Some(max) = resolve_length(style.max_width, font, containing) {
+    if let Some(max) = resolve_length(style.max_width, font, containing, view) {
         width = width.min(adjust(max));
     }
-    if let Some(min) = resolve_length(style.min_width, font, containing) {
+    if let Some(min) = resolve_length(style.min_width, font, containing, view) {
         width = width.max(adjust(min));
     }
     width.max(0.0)
@@ -321,6 +343,7 @@ fn layout_blocks(
     content_y: f32,
     content_w: f32,
     href: Option<String>,
+    view: View,
 ) -> (Vec<LineBox>, Vec<LayoutBox>, f32) {
     let mut y = content_y;
     let mut group = Vec::new();
@@ -332,7 +355,7 @@ fn layout_blocks(
         }
         let mut items = Vec::new();
         for child in group.drain(..) {
-            items.extend(collect_node(doc, styles, measure, images, child, style, content_w, href.clone()));
+            items.extend(collect_node(doc, styles, measure, images, child, style, content_w, href.clone(), view));
         }
         if is_blank(&items) {
             return;
@@ -345,7 +368,7 @@ fn layout_blocks(
     for child in doc.node(id).children.clone() {
         if is_block_child(doc, styles, child) {
             flush(&mut group, &mut y, &mut lines, &mut children);
-            if let Some(child_box) = layout_node(doc, styles, measure, images, child, content_x, y, content_w, href.clone(), false) {
+            if let Some(child_box) = layout_node(doc, styles, measure, images, child, content_x, y, content_w, href.clone(), false, view) {
                 y = child_box.rect.bottom() + child_box.margin.bottom;
                 children.push(child_box);
             }
@@ -366,10 +389,11 @@ fn collect_children(
     style: &ComputedStyle,
     available: f32,
     href: Option<String>,
+    view: View,
 ) -> Vec<Item> {
     let mut items = Vec::new();
     for child in doc.node(id).children.clone() {
-        items.extend(collect_node(doc, styles, measure, images, child, style, available, href.clone()));
+        items.extend(collect_node(doc, styles, measure, images, child, style, available, href.clone(), view));
     }
     items
 }
@@ -383,6 +407,7 @@ fn collect_node(
     parent_style: &ComputedStyle,
     available: f32,
     href: Option<String>,
+    view: View,
 ) -> Vec<Item> {
     match &doc.node(id).data {
         NodeData::Text(text) => items_from_text(text, parent_style, measure, href, id),
@@ -400,14 +425,14 @@ fn collect_node(
             if matches!(display, Display::Block | Display::ListItem | Display::InlineBlock | Display::Flex)
                 || synthetic_text(doc, id).is_some()
             {
-                let Some(layout) = layout_node(doc, styles, measure, images, id, 0.0, 0.0, available, href, false) else {
+                let Some(layout) = layout_node(doc, styles, measure, images, id, 0.0, 0.0, available, href, false, view) else {
                     return Vec::new();
                 };
                 let width = layout.margin.left + layout.rect.width + layout.margin.right;
                 let height = layout.margin.top + layout.rect.height + layout.margin.bottom;
                 return vec![Item::Atomic { layout, width, height }];
             }
-            collect_children(doc, styles, measure, images, id, &style, available, href)
+            collect_children(doc, styles, measure, images, id, &style, available, href, view)
         }
     }
 }
@@ -563,6 +588,30 @@ fn preferred_width(items: &[Item], available: f32) -> f32 {
     max_line.max(line).min(available).max(0.0)
 }
 
+fn apply_transform(text: &str, transform: TextTransform) -> String {
+    match transform {
+        TextTransform::None => text.to_string(),
+        TextTransform::Uppercase => text.to_uppercase(),
+        TextTransform::Lowercase => text.to_lowercase(),
+        TextTransform::Capitalize => {
+            let mut out = String::new();
+            let mut boundary = true;
+            for ch in text.chars() {
+                if ch.is_whitespace() {
+                    boundary = true;
+                    out.push(ch);
+                } else if boundary {
+                    out.extend(ch.to_uppercase());
+                    boundary = false;
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        }
+    }
+}
+
 fn items_from_text(
     text: &str,
     style: &ComputedStyle,
@@ -576,6 +625,7 @@ fn items_from_text(
     } else {
         collapse_space(text)
     };
+    let normalized = apply_transform(&normalized, style.text_transform);
     if normalized.is_empty() {
         return Vec::new();
     }
@@ -849,26 +899,36 @@ fn list_marker(doc: &Document, id: NodeId) -> String {
     "•".to_string()
 }
 
-fn resolve_edges(sides: &[Length; 4], font: f32, containing: f32, allow_auto: bool) -> Edges {
-    let side = |length: Length| resolve_length(length, font, containing).unwrap_or(0.0).max(0.0);
-    let _ = allow_auto;
+fn resolve_edges(sides: &[Length; 4], font: f32, containing: f32, view: View) -> Edges {
+    let side = |length: Length| resolve_length(length, font, containing, view).unwrap_or(0.0).max(0.0);
     Edges::new(side(sides[0]), side(sides[1]), side(sides[2]), side(sides[3]))
 }
 
-fn resolve_length(length: Length, font: f32, containing: f32) -> Option<f32> {
+fn resolve_length(length: Length, font: f32, containing: f32, view: View) -> Option<f32> {
     match length {
         Length::Auto => None,
         Length::Px(px) => Some(px),
         Length::Percent(percent) => Some(containing * percent / 100.0),
         Length::Em(em) => Some(font * em),
+        Length::Rem(rem) => Some(view.root * rem),
+        Length::Vw(vw) => Some(view.width * vw / 100.0),
+        Length::Vh(vh) => Some(view.height * vh / 100.0),
+        Length::Calc { percent, px, em, rem, vw, vh } => Some(
+            containing * percent / 100.0
+                + px
+                + font * em
+                + view.root * rem
+                + view.width * vw / 100.0
+                + view.height * vh / 100.0,
+        ),
     }
 }
 
-fn resolve_height(length: Length, font: f32) -> Option<f32> {
+fn resolve_height(length: Length, font: f32, view: View) -> Option<f32> {
     match length {
         Length::Auto | Length::Percent(_) => None,
-        Length::Px(px) => Some(px.max(0.0)),
-        Length::Em(em) => Some((font * em).max(0.0)),
+        Length::Calc { percent, .. } if percent != 0.0 => None,
+        other => resolve_length(other, font, 0.0, view).map(|value| value.max(0.0)),
     }
 }
 
@@ -925,6 +985,7 @@ fn layout_flex(
     content_y: f32,
     content_w: f32,
     href: Option<String>,
+    view: View,
 ) -> (Vec<LineBox>, Vec<LayoutBox>, f32) {
     let row = style.flex_direction == FlexDirection::Row;
     let mut items = Vec::new();
@@ -945,7 +1006,13 @@ fn layout_flex(
         } else {
             matches!(child_style.width, Length::Auto) && style.align_items != AlignItems::Stretch
         };
-        if let Some(layout) = layout_node(doc, styles, measure, images, child, 0.0, 0.0, content_w, href.clone(), shrink) {
+        if let Some(mut layout) = layout_node(doc, styles, measure, images, child, 0.0, 0.0, content_w, href.clone(), shrink, view) {
+            let child_style = style_of(styles, child);
+            if row && !matches!(child_style.flex_basis, Length::Auto)
+                && let Some(basis) = resolve_length(child_style.flex_basis, child_style.font_size, content_w, view)
+            {
+                layout.rect.width = basis.max(0.0);
+            }
             items.push((layout, child_style.flex_grow.max(0.0)));
         }
     }
@@ -955,7 +1022,68 @@ fn layout_flex(
     if items.is_empty() {
         return (Vec::new(), Vec::new(), 0.0);
     }
-    let gap = style.gap.max(0.0);
+    let main_gap = (if row { style.gap } else { style.row_gap }).max(0.0);
+    let cross_gap = (if row { style.row_gap } else { style.gap }).max(0.0);
+    let mut lines = if style.flex_wrap && row {
+        let mut lines = Vec::new();
+        let mut line = Vec::new();
+        let mut used = 0.0;
+        for item in items {
+            let width = outer_main(&item.0, true);
+            let next = if line.is_empty() { width } else { used + main_gap + width };
+            if !line.is_empty() && next > content_w && content_w > 0.0 {
+                lines.push(std::mem::take(&mut line));
+                used = 0.0;
+            }
+            used = if line.is_empty() { width } else { used + main_gap + width };
+            line.push(item);
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        lines
+    } else {
+        vec![items]
+    };
+    if style.flex_wrap_reverse {
+        lines.reverse();
+    }
+    let mut placed = Vec::new();
+    let mut cursor_cross = if row { content_y } else { content_x };
+    for line in lines {
+        let (boxes, cross) = place_flex_line(styles, style, line, content_x, content_y, content_w, row, main_gap, cursor_cross);
+        cursor_cross += cross + cross_gap;
+        placed.extend(boxes);
+    }
+    let height = if placed.is_empty() {
+        0.0
+    } else if row {
+        (cursor_cross - content_y - cross_gap).max(0.0)
+    } else {
+        (cursor_cross - content_x - cross_gap).max(0.0)
+    };
+    (Vec::new(), placed, height)
+}
+
+fn outer_main(layout: &LayoutBox, row: bool) -> f32 {
+    if row {
+        layout.margin.left + layout.rect.width + layout.margin.right
+    } else {
+        layout.margin.top + layout.rect.height + layout.margin.bottom
+    }
+}
+
+fn place_flex_line(
+    styles: &[ComputedStyle],
+    style: &ComputedStyle,
+    items: Vec<(LayoutBox, f32)>,
+    content_x: f32,
+    content_y: f32,
+    content_w: f32,
+    row: bool,
+    gap: f32,
+    cross_origin: f32,
+) -> (Vec<LayoutBox>, f32) {
     let count = items.len();
     let outer = |layout: &LayoutBox, main: bool| -> f32 {
         if main == row {
@@ -996,21 +1124,22 @@ fn layout_flex(
         }
         let main = bases[index] + extra[index];
         let cross_size = cross[index];
-        let shift = match style.align_items {
+        let align = style_of(styles, layout.node).align_self.unwrap_or(style.align_items);
+        let shift = match align {
             AlignItems::End => (line - cross_size).max(0.0),
             AlignItems::Center => (line - cross_size).max(0.0) / 2.0,
             AlignItems::Stretch | AlignItems::Start => 0.0,
         };
-        if style.align_items == AlignItems::Stretch && row && matches!(style_of(styles, layout.node).height, Length::Auto) {
+        if align == AlignItems::Stretch && row && matches!(style_of(styles, layout.node).height, Length::Auto) {
             layout.rect.height = (line - layout.margin.top - layout.margin.bottom).max(layout.rect.height);
         }
-        if style.align_items == AlignItems::Stretch && !row && matches!(style_of(styles, layout.node).width, Length::Auto) {
+        if align == AlignItems::Stretch && !row && matches!(style_of(styles, layout.node).width, Length::Auto) {
             layout.rect.width = (content_w - layout.margin.left - layout.margin.right).max(layout.rect.width);
         }
         let (x, y) = if row {
-            (cursor, content_y + shift)
+            (cursor, cross_origin + shift)
         } else {
-            (content_x + shift, cursor)
+            (cross_origin + shift, cursor)
         };
         translate(&mut layout, x, y);
         cursor += main + gap + between;
@@ -1021,7 +1150,7 @@ fn layout_flex(
     } else {
         (cursor - content_y - gap).max(0.0)
     };
-    (Vec::new(), placed, height)
+    (placed, height)
 }
 
 fn text_flex_item(
@@ -1058,6 +1187,8 @@ fn text_flex_item(
         overflow_hidden: false,
         border_radius: 0.0,
         image: None,
+        visible: true,
+        z_index: 0,
     }
 }
 
@@ -1072,6 +1203,7 @@ fn layout_absolute_children(
     content_w: f32,
     content_h: f32,
     href: Option<String>,
+    view: View,
 ) -> Vec<LayoutBox> {
     let mut placed = Vec::new();
     for child in doc.node(id).children.clone() {
@@ -1089,21 +1221,22 @@ fn layout_absolute_children(
             content_w,
             href.clone(),
             false,
+            view,
         ) else {
             continue;
         };
         let style = style_of(styles, child);
         let font = style.font_size;
-        let dx = if let Some(left) = resolve_length(style.insets[3], font, content_w) {
+        let dx = if let Some(left) = resolve_length(style.insets[3], font, content_w, view) {
             content_x + left - layout.rect.x
-        } else if let Some(right) = resolve_length(style.insets[1], font, content_w) {
+        } else if let Some(right) = resolve_length(style.insets[1], font, content_w, view) {
             content_x + content_w - layout.rect.width - right - layout.rect.x
         } else {
             0.0
         };
-        let dy = if let Some(top) = resolve_length(style.insets[0], font, content_w) {
+        let dy = if let Some(top) = resolve_length(style.insets[0], font, content_w, view) {
             content_y + top - layout.rect.y
-        } else if let Some(bottom) = resolve_length(style.insets[2], font, content_w) {
+        } else if let Some(bottom) = resolve_length(style.insets[2], font, content_w, view) {
             content_y + content_h - layout.rect.height - bottom - layout.rect.y
         } else {
             0.0
@@ -1134,6 +1267,8 @@ fn empty_box(node: NodeId) -> LayoutBox {
         overflow_hidden: false,
         border_radius: 0.0,
         image: None,
+        visible: true,
+        z_index: 0,
     }
 }
 
@@ -1205,7 +1340,7 @@ mod tests {
     fn sizes_an_explicit_block() {
         let doc = parse_html(r#"<div id="box" style="width:100px;height:50px"></div>"#);
         let styles = style_document(&doc, "");
-        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics, &HashMap::new());
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
         let id = doc.get_element_by_id("box").unwrap();
         let found = find(&tree.root, id).unwrap();
         assert!((found.rect.x - 8.0).abs() < 0.5, "x {}", found.rect.x);
@@ -1226,7 +1361,7 @@ mod tests {
             </div>"#,
         );
         let styles = style_document(&doc, "");
-        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics, &HashMap::new());
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
         let row = find(&tree.root, doc.get_element_by_id("row").unwrap()).unwrap();
         let a = find(row, doc.get_element_by_id("a").unwrap()).unwrap();
         let b = find(row, doc.get_element_by_id("b").unwrap()).unwrap();
@@ -1249,10 +1384,41 @@ mod tests {
         });
         let mut images = HashMap::new();
         images.insert(id, bitmap);
-        let tree = layout_tree(&doc, &styles, 400.0, &NaiveMetrics, &images);
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &images);
         let found = find(&tree.root, id).unwrap();
         assert!((found.rect.width - 20.0).abs() < 0.5, "w {}", found.rect.width);
         assert!((found.rect.height - 10.0).abs() < 0.5, "h {}", found.rect.height);
         assert!(found.image.is_some());
+    }
+
+    #[test]
+    fn flex_wraps_and_viewport_units_resolve() {
+        let doc = parse_html(
+            r#"<div id="row" style="display:flex;flex-wrap:wrap;width:100px;gap:0">
+                <div id="a" style="width:60px;height:10px"></div>
+                <div id="b" style="width:60px;height:10px"></div>
+            </div>
+            <div id="wide" style="width:50vw;height:10vh"></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 200.0, 100.0, &NaiveMetrics, &HashMap::new());
+        let row = find(&tree.root, doc.get_element_by_id("row").unwrap()).unwrap();
+        let a = find(row, doc.get_element_by_id("a").unwrap()).unwrap();
+        let b = find(row, doc.get_element_by_id("b").unwrap()).unwrap();
+        assert!(b.rect.y > a.rect.y, "wrapped y {} then {}", a.rect.y, b.rect.y);
+        assert!((row.rect.width - 100.0).abs() < 1.0);
+        let wide = find(&tree.root, doc.get_element_by_id("wide").unwrap()).unwrap();
+        assert!((wide.rect.width - 100.0).abs() < 1.0, "vw {}", wide.rect.width);
+        assert!((wide.rect.height - 10.0).abs() < 1.0, "vh {}", wide.rect.height);
+    }
+
+    #[test]
+    fn uppercase_changes_the_painted_text() {
+        let doc = parse_html(r#"<p id="p" style="text-transform:uppercase">ab cd</p>"#);
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let p = find(&tree.root, doc.get_element_by_id("p").unwrap()).unwrap();
+        let text: String = p.lines.iter().flat_map(|line| line.fragments.iter().map(|fragment| fragment.text.clone())).collect();
+        assert_eq!(text, "ABCD");
     }
 }

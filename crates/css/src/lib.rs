@@ -1,8 +1,9 @@
 //! CSS parser for the subset Mithu's style engine understands.
 //!
 //! Selectors support type, class, id, attributes, structural and link
-//! pseudos, and the descendant, child, and sibling combinators. At-rules are
-//! skipped. Declarations stay as strings so the style crate can interpret them.
+//! pseudos, and the descendant, child, and sibling combinators. `@media`
+//! keeps `min-width` and `max-width` queries. Other at-rules are skipped.
+//! Declarations stay as strings so the style crate can interpret them.
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stylesheet {
@@ -13,6 +14,19 @@ pub struct Stylesheet {
 pub struct Rule {
     pub selectors: Vec<Selector>,
     pub declarations: Vec<Declaration>,
+    pub media: Option<Media>,
+}
+
+/// A width media query. An empty bound means that side is unrestricted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Media {
+    pub alternatives: Vec<MediaBound>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaBound {
+    pub min_width: Option<f32>,
+    pub max_width: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,7 +69,8 @@ pub enum Pseudo {
     Link,
     Empty,
     Not(Box<Compound>),
-    /// `:hover`, `:focus`, and `:active` are parsed and do not match a static page.
+    Hover,
+    /// `:focus`, `:active`, and other pseudos that the style engine does not match yet.
     Unmatched,
 }
 
@@ -140,7 +155,11 @@ impl CssParser {
                 break;
             }
             if self.peek() == Some('@') {
-                self.skip_at_rule();
+                if let Some(media) = self.parse_media_rule() {
+                    self.parse_rule_list(&mut rules, Some(media));
+                } else {
+                    self.skip_at_rule();
+                }
                 continue;
             }
             let selectors = self.parse_selector_list();
@@ -155,6 +174,7 @@ impl CssParser {
                 rules.push(Rule {
                     selectors,
                     declarations,
+                    media: None,
                 });
             }
         }
@@ -296,7 +316,8 @@ impl CssParser {
                         "last-child" => compound.pseudos.push(Pseudo::LastChild),
                         "link" | "visited" => compound.pseudos.push(Pseudo::Link),
                         "empty" => compound.pseudos.push(Pseudo::Empty),
-                        "hover" | "focus" | "active" => compound.pseudos.push(Pseudo::Unmatched),
+                        "hover" => compound.pseudos.push(Pseudo::Hover),
+                        "focus" | "active" => compound.pseudos.push(Pseudo::Unmatched),
                         "nth-child" => compound.pseudos.push(self.parse_nth()),
                         "not" => {
                             if let Some(inner) = self.parse_not() {
@@ -531,6 +552,87 @@ impl CssParser {
         })
     }
 
+    fn parse_media_rule(&mut self) -> Option<Media> {
+        let start = self.pos;
+        if self.peek() != Some('@') {
+            return None;
+        }
+        self.bump();
+        let name = self.read_ident().to_ascii_lowercase();
+        if name != "media" {
+            self.pos = start;
+            return None;
+        }
+        self.skip_ws();
+        let mut prelude = String::new();
+        while let Some(ch) = self.peek() {
+            if ch == '{' {
+                break;
+            }
+            prelude.push(ch);
+            self.bump();
+        }
+        let media = media_from_prelude(&prelude);
+        if media.is_none() {
+            self.skip_balanced_block();
+        }
+        media
+    }
+
+    fn parse_rule_list(&mut self, rules: &mut Vec<Rule>, media: Option<Media>) {
+        self.skip_ws();
+        if self.peek() == Some('{') {
+            self.bump();
+        }
+        while self.pos < self.chars.len() {
+            self.skip_ws();
+            if self.peek().is_none() || self.peek() == Some('}') {
+                self.bump();
+                break;
+            }
+            if self.peek() == Some('@') {
+                self.skip_at_rule();
+                continue;
+            }
+            let selectors = self.parse_selector_list();
+            self.skip_ws();
+            if self.peek() != Some('{') {
+                self.skip_until_recovery();
+                continue;
+            }
+            self.bump();
+            let declarations = self.parse_declaration_block();
+            if !selectors.is_empty() && !declarations.is_empty() {
+                rules.push(Rule {
+                    selectors,
+                    declarations,
+                    media: media.clone(),
+                });
+            }
+        }
+    }
+
+    fn skip_balanced_block(&mut self) {
+        self.skip_ws();
+        if self.peek() != Some('{') {
+            return;
+        }
+        self.bump();
+        let mut depth = 1;
+        while let Some(ch) = self.bump() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn skip_at_rule(&mut self) {
         self.bump();
         let mut depth = 0;
@@ -658,6 +760,86 @@ fn strip_comments(input: &str) -> String {
         }
     }
     out
+}
+
+fn media_from_prelude(prelude: &str) -> Option<Media> {
+    let mut alternatives = Vec::new();
+    for part in split_media_list(prelude) {
+        if let Some(bound) = media_bound(&part) {
+            alternatives.push(bound);
+        }
+    }
+    if alternatives.is_empty() {
+        None
+    } else {
+        Some(Media { alternatives })
+    }
+}
+
+fn split_media_list(prelude: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0;
+    for ch in prelude.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+fn media_bound(part: &str) -> Option<MediaBound> {
+    let lower = part.to_ascii_lowercase();
+    if lower.split_whitespace().any(|word| word == "not" || word == "print") {
+        return None;
+    }
+    let mut min_width = None;
+    let mut max_width = None;
+    let mut rest = lower.as_str();
+    while let Some(start) = rest.find('(') {
+        let after = &rest[start + 1..];
+        let end = after.find(')')?;
+        let feature = after[..end].trim();
+        if let Some(value) = feature.strip_prefix("min-width:") {
+            min_width = Some(media_px(value.trim())?);
+        } else if let Some(value) = feature.strip_prefix("max-width:") {
+            max_width = Some(media_px(value.trim())?);
+        } else {
+            return None;
+        }
+        rest = &after[end + 1..];
+    }
+    for word in rest.split_whitespace() {
+        if word != "all" && word != "screen" && word != "only" && word != "and" {
+            return None;
+        }
+    }
+    Some(MediaBound { min_width, max_width })
+}
+
+fn media_px(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(number) = value.strip_suffix("px") {
+        return number.trim().parse().ok();
+    }
+    if let Some(number) = value.strip_suffix("rem").or_else(|| value.strip_suffix("em")) {
+        return number.trim().parse::<f32>().ok().map(|em| em * 16.0);
+    }
+    None
 }
 
 #[cfg(test)]

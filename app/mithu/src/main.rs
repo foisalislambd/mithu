@@ -140,6 +140,8 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
+                self.browser.pointer_move(self.cursor.0, self.cursor.1);
+                self.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed && button == MouseButton::Right {

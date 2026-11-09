@@ -358,6 +358,11 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
     let change_set = native(context, "set onchange", 1, set_onchange);
     let submit_set = native(context, "set onsubmit", 1, set_onsubmit);
     let style = style_object(id, context);
+    let class_list = class_list_object(id, context);
+    let parent_get = native(context, "get parentElement", 0, get_parent);
+    let next_get = native(context, "get nextElementSibling", 0, get_next_sibling);
+    let previous_get = native(context, "get previousElementSibling", 0, get_previous_sibling);
+    let children_get = native(context, "get children", 0, get_children);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(NativeFunction::from_fn_ptr(get_attribute), js_string!("getAttribute"), 1)
@@ -365,6 +370,7 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
         .function(NativeFunction::from_fn_ptr(query_selector), js_string!("querySelector"), 1)
         .function(NativeFunction::from_fn_ptr(query_selector_all), js_string!("querySelectorAll"), 1)
         .function(NativeFunction::from_fn_ptr(append_child), js_string!("appendChild"), 1)
+        .function(NativeFunction::from_fn_ptr(remove_child), js_string!("removeChild"), 1)
         .function(NativeFunction::from_fn_ptr(add_event_listener), js_string!("addEventListener"), 2)
         .accessor(js_string!("onclick"), None, Some(click_set), ATTR)
         .accessor(js_string!("oninput"), None, Some(input_set), ATTR)
@@ -375,6 +381,11 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
         .accessor(js_string!("innerHTML"), Some(html_get), Some(html_set), ATTR)
         .accessor(js_string!("id"), Some(id_get), Some(id_set), ATTR)
         .accessor(js_string!("className"), Some(class_get), Some(class_set), ATTR)
+        .accessor(js_string!("parentElement"), Some(parent_get), None, ATTR)
+        .accessor(js_string!("nextElementSibling"), Some(next_get), None, ATTR)
+        .accessor(js_string!("previousElementSibling"), Some(previous_get), None, ATTR)
+        .accessor(js_string!("children"), Some(children_get), None, ATTR)
+        .property(js_string!("classList"), class_list, ATTR)
         .property(js_string!("style"), style, ATTR);
     object.build().into()
 }
@@ -602,6 +613,135 @@ fn set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let value = arg_string(args, 1, context)?;
     host.doc.borrow_mut().set_attr(id, &name, &value);
     Ok(JsValue::undefined())
+}
+
+fn class_list_object(id: usize, context: &mut Context) -> JsObject {
+    let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
+    object
+        .function(NativeFunction::from_fn_ptr(class_list_add), js_string!("add"), 1)
+        .function(NativeFunction::from_fn_ptr(class_list_remove), js_string!("remove"), 1)
+        .function(NativeFunction::from_fn_ptr(class_list_toggle), js_string!("toggle"), 1)
+        .function(NativeFunction::from_fn_ptr(class_list_contains), js_string!("contains"), 1);
+    object.build()
+}
+
+fn class_tokens(doc: &mithu_dom::Document, id: NodeId) -> Vec<String> {
+    doc.attr(id, "class")
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+fn write_classes(doc: &mut mithu_dom::Document, id: NodeId, classes: &[String]) {
+    doc.set_attr(id, "class", &classes.join(" "));
+}
+
+fn class_list_add(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let mut classes = class_tokens(&host.doc.borrow(), id);
+    for arg in args {
+        let token = arg.to_string(context)?.to_std_string_lossy();
+        if !token.is_empty() && !classes.iter().any(|item| item == &token) {
+            classes.push(token);
+        }
+    }
+    write_classes(&mut host.doc.borrow_mut(), id, &classes);
+    Ok(JsValue::undefined())
+}
+
+fn class_list_remove(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let mut classes = class_tokens(&host.doc.borrow(), id);
+    for arg in args {
+        let token = arg.to_string(context)?.to_std_string_lossy();
+        classes.retain(|item| item != &token);
+    }
+    write_classes(&mut host.doc.borrow_mut(), id, &classes);
+    Ok(JsValue::undefined())
+}
+
+fn class_list_toggle(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let token = arg_string(args, 0, context)?;
+    let mut classes = class_tokens(&host.doc.borrow(), id);
+    let present = classes.iter().any(|item| item == &token);
+    if present {
+        classes.retain(|item| item != &token);
+    } else if !token.is_empty() {
+        classes.push(token);
+    }
+    write_classes(&mut host.doc.borrow_mut(), id, &classes);
+    Ok(JsValue::from(!present))
+}
+
+fn class_list_contains(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let token = arg_string(args, 0, context)?;
+    Ok(JsValue::from(host.doc.borrow().has_class(id, &token)))
+}
+
+fn sibling_value(this: &JsValue, context: &mut Context, next: bool) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let sibling = {
+        let doc = host.doc.borrow();
+        if next { doc.next_element_sibling(id) } else { doc.previous_element_sibling(id) }
+    };
+    match sibling {
+        Some(node) => Ok(element_value(node.0, context)),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn get_parent(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    match host.doc.borrow().parent_element(id) {
+        Some(parent) => Ok(element_value(parent.0, context)),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn get_next_sibling(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    sibling_value(this, context, true)
+}
+
+fn get_previous_sibling(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    sibling_value(this, context, false)
+}
+
+fn get_children(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let ids = {
+        let doc = host.doc.borrow();
+        doc.node(id)
+            .children
+            .iter()
+            .copied()
+            .filter(|child| doc.element_name(*child).is_some())
+            .collect::<Vec<_>>()
+    };
+    let values = ids.into_iter().map(|child| element_value(child.0, context)).collect::<Vec<_>>();
+    Ok(JsObject::from(JsArray::from_iter(values, context)).into())
+}
+
+fn remove_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let parent = node_of(this).ok_or_else(type_error)?;
+    let child_value = args.first().cloned().unwrap_or(JsValue::undefined());
+    let child = node_of(&child_value).ok_or_else(type_error)?;
+    let belongs = host.doc.borrow().parent_element(child) == Some(parent);
+    if !belongs {
+        return Err(type_error());
+    }
+    host.doc.borrow_mut().detach(child);
+    Ok(child_value)
 }
 
 fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -984,5 +1124,25 @@ mod tests {
         assert_eq!(submission.action, "/search");
         assert_eq!(submission.method, "get");
         assert_eq!(submission.query, "q=mithu+browser&show=yes");
+    }
+
+    #[test]
+    fn class_list_and_element_tree() {
+        let mut doc = parse_html(
+            r##"<div id="box"><span id="a"></span><span id="b"></span></div>
+            <script>
+              var box = document.getElementById("box");
+              box.classList.add("one", "two");
+              box.classList.toggle("one");
+              var kids = box.children;
+              kids[1].parentElement.removeChild(kids[1]);
+            </script>"##,
+        );
+        run_scripts(&mut doc, |_| None);
+        let host = doc.get_element_by_id("box").unwrap();
+        assert!(doc.has_class(host, "two"));
+        assert!(!doc.has_class(host, "one"));
+        assert!(doc.parent_element(doc.get_element_by_id("b").unwrap()).is_none());
+        assert_eq!(doc.parent_element(doc.get_element_by_id("a").unwrap()), Some(host));
     }
 }

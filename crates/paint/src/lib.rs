@@ -163,6 +163,9 @@ fn paint_box_with_opacity(
     origin_y: f32,
     opacity: f32,
 ) {
+    if !box_.visible {
+        return;
+    }
     let opacity = (opacity * box_.opacity).clamp(0.0, 1.0);
     let screen = Rect::new(
         box_.rect.x,
@@ -247,8 +250,10 @@ fn paint_box_with_opacity(
             );
         }
     }
-    for child in &box_.children {
-        paint_box_with_opacity(canvas, child, fonts, child_clip, scroll, origin_y, opacity);
+    let mut order: Vec<usize> = (0..box_.children.len()).collect();
+    order.sort_by_key(|index| box_.children[*index].z_index);
+    for index in order {
+        paint_box_with_opacity(canvas, &box_.children[index], fonts, child_clip, scroll, origin_y, opacity);
     }
 }
 
