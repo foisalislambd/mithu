@@ -243,7 +243,7 @@ fn layout_node(
         if is_blank(&items) {
             (Vec::new(), Vec::new(), 0.0)
         } else {
-            place_items(&items, content_x, content_y, content_w, style.text_align)
+            place_items(&items, content_x, content_y, wrap_width(&style, content_w), style.text_align)
         }
     };
 
@@ -360,7 +360,7 @@ fn layout_blocks(
         if is_blank(&items) {
             return;
         }
-        let (new_lines, atoms, height) = place_items(&items, content_x, *y, content_w, style.text_align);
+        let (new_lines, atoms, height) = place_items(&items, content_x, *y, wrap_width(style, content_w), style.text_align);
         lines.extend(new_lines);
         children.extend(atoms);
         *y += height;
@@ -434,6 +434,14 @@ fn collect_node(
             }
             collect_children(doc, styles, measure, images, id, &style, available, href, view)
         }
+    }
+}
+
+fn wrap_width(style: &ComputedStyle, content_w: f32) -> f32 {
+    if style.white_space == WhiteSpace::Nowrap {
+        f32::MAX / 4.0
+    } else {
+        content_w
     }
 }
 

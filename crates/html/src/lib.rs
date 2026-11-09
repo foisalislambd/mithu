@@ -7,8 +7,8 @@
 //! Table tags grow the implied `tbody` / `tr` structure, `select` keeps its
 //! options, and a tag that does not belong inside a table is placed before it.
 //!
-//! Badly mis-nested formatting tags are closed on the stack. The adoption
-//! agency algorithm is still ahead.
+//! Mis-nested formatting tags (`b`, `i`, `a`, and the other phrasing tags)
+//! are repaired with the adoption agency algorithm.
 
 use mithu_dom::{Document, NodeId};
 
@@ -61,6 +61,8 @@ struct Parser {
     pending: Option<Token>,
     doc: Document,
     stack: Vec<NodeId>,
+    /// Active formatting elements. `None` is a marker (table cell or caption).
+    active: Vec<Option<NodeId>>,
 }
 
 pub fn parse_html(input: &str) -> Document {
@@ -74,6 +76,7 @@ pub fn parse_html(input: &str) -> Document {
         pending: None,
         doc: Document::new(),
         stack: Vec::new(),
+        active: Vec::new(),
     };
     parser.run();
     parser.doc
@@ -570,6 +573,7 @@ impl Parser {
         match token {
             Token::Comment | Token::Doctype => {}
             Token::Text(text) => {
+                self.reconstruct();
                 if let Some(parent) = self.current() {
                     self.doc.append_text(parent, &text);
                 }
@@ -590,6 +594,7 @@ impl Parser {
         if name == "head" {
             return;
         }
+        self.reconstruct();
         if matches!(name.as_str(), "title" | "style" | "script" | "textarea") {
             self.start_raw(name, attrs);
             return;
@@ -607,7 +612,7 @@ impl Parser {
             self.stack.pop();
         }
         if name == "a" && self.in_scope("a") {
-            self.pop_until("a");
+            self.adoption_agency("a");
         }
         if name == "button" && self.in_scope("button") {
             self.pop_until("button");
@@ -627,6 +632,9 @@ impl Parser {
         }
         let id = self.insert(&name);
         self.apply_attrs(id, attrs);
+        if is_formatting(&name) {
+            self.active.push(Some(id));
+        }
         if is_void(&name) {
             self.stack.pop();
         }
@@ -639,6 +647,7 @@ impl Parser {
                 self.mode = Mode::AfterBody;
                 self.reconsume(Token::End { name });
             }
+            name if is_formatting(name) => self.adoption_agency(name),
             "p" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "div" | "pre" | "button"
             | "form" | "ul" | "ol" | "section" | "article" | "header" | "footer" | "nav"
             | "main" | "blockquote" | "a" | "b" | "strong" | "i" | "em" | "span" | "code" => {
@@ -873,6 +882,9 @@ impl Parser {
     }
 
     fn open_table_section(&mut self, name: &str, attrs: Vec<(String, String)>, mode: Mode) {
+        if matches!(name, "td" | "th" | "caption") {
+            self.active.push(None);
+        }
         let id = self.insert(name);
         self.apply_attrs(id, attrs);
         self.mode = mode;
@@ -925,6 +937,149 @@ impl Parser {
         let table = self.stack.iter().rev().copied().find(|id| self.doc.element_name(*id) == Some("table"))?;
         let parent = self.doc.nodes.get(table.0).and_then(|node| node.parent)?;
         Some((parent, Some(table)))
+    }
+
+    fn reconstruct(&mut self) {
+        if self.active.is_empty() {
+            return;
+        }
+        let mut entry = self.active.len();
+        loop {
+            if entry == 0 {
+                break;
+            }
+            entry -= 1;
+            match self.active[entry] {
+                None => {
+                    entry += 1;
+                    break;
+                }
+                Some(id) if self.stack.contains(&id) => {
+                    entry += 1;
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        while entry < self.active.len() {
+            let Some(id) = self.active[entry] else {
+                break;
+            };
+            let name = self.doc.element_name(id).unwrap_or("span").to_string();
+            let attrs = self.doc.element(id).map(|element| element.attrs.clone()).unwrap_or_default();
+            let clone = self.insert(&name);
+            self.apply_attrs(clone, attrs);
+            self.active[entry] = Some(clone);
+            entry += 1;
+        }
+    }
+
+    fn adoption_agency(&mut self, subject: &str) {
+        if self.current_name() == Some(subject)
+            && self.current().is_some_and(|id| !self.active.contains(&Some(id)))
+        {
+            self.stack.pop();
+            return;
+        }
+        for _ in 0..8 {
+            let Some(formatting) = self.formatting_element(subject) else {
+                self.pop_until(subject);
+                return;
+            };
+            let Some(fmt_pos) = self.stack.iter().position(|id| *id == formatting) else {
+                self.active.retain(|entry| *entry != Some(formatting));
+                return;
+            };
+            if !self.in_scope(subject) {
+                return;
+            }
+            let Some(block_pos) = ((fmt_pos + 1)..self.stack.len())
+                .find(|index| self.doc.element_name(self.stack[*index]).is_some_and(is_special))
+            else {
+                while let Some(id) = self.stack.pop() {
+                    if id == formatting {
+                        self.active.retain(|entry| *entry != Some(formatting));
+                        break;
+                    }
+                }
+                return;
+            };
+            let block = self.stack[block_pos];
+            let common = if fmt_pos == 0 { self.doc.root } else { self.stack[fmt_pos - 1] };
+            let mut node_pos = block_pos;
+            let mut last = block;
+            let mut inner = 0;
+            loop {
+                inner += 1;
+                if node_pos == 0 {
+                    break;
+                }
+                node_pos -= 1;
+                if node_pos >= self.stack.len() {
+                    break;
+                }
+                let node = self.stack[node_pos];
+                if node == formatting {
+                    break;
+                }
+                let mut listed = self.active.contains(&Some(node));
+                if inner > 3 && listed {
+                    self.active.retain(|entry| *entry != Some(node));
+                    listed = false;
+                }
+                if !listed {
+                    self.stack.remove(node_pos);
+                    continue;
+                }
+                let clone = self.clone_element(node);
+                if let Some(slot) = self.active.iter().position(|entry| *entry == Some(node)) {
+                    self.active[slot] = Some(clone);
+                }
+                self.stack[node_pos] = clone;
+                self.reparent(clone, last);
+                last = clone;
+            }
+            if last != block {
+                self.reparent(common, last);
+            }
+            let formatting = self.formatting_element(subject).unwrap_or(formatting);
+            let new_element = self.clone_element(formatting);
+            let children = std::mem::take(&mut self.doc.nodes[block.0].children);
+            for child in children {
+                self.doc.append_child(new_element, child);
+            }
+            self.doc.append_child(block, new_element);
+            self.active.retain(|entry| *entry != Some(formatting));
+            self.active.push(Some(new_element));
+            self.stack.retain(|id| *id != formatting && *id != new_element);
+            self.stack.push(new_element);
+            return;
+        }
+    }
+
+    fn formatting_element(&self, subject: &str) -> Option<NodeId> {
+        for entry in self.active.iter().rev() {
+            match entry {
+                None => return None,
+                Some(id) if self.doc.element_name(*id) == Some(subject) && self.stack.contains(id) => return Some(*id),
+                Some(_) => {}
+            }
+        }
+        None
+    }
+
+    fn clone_element(&mut self, id: NodeId) -> NodeId {
+        let name = self.doc.element_name(id).unwrap_or("span").to_string();
+        let attrs = self.doc.element(id).map(|element| element.attrs.clone()).unwrap_or_default();
+        let clone = self.doc.create_element_detached(&name);
+        self.apply_attrs(clone, attrs);
+        clone
+    }
+
+    fn reparent(&mut self, parent: NodeId, child: NodeId) {
+        if parent != child {
+            self.doc.append_child(parent, child);
+        }
     }
 
     fn restore_table_mode(&mut self) {
@@ -1076,6 +1231,53 @@ impl Parser {
 
 fn is_void(name: &str) -> bool {
     VOID_ELEMENTS.contains(&name)
+}
+
+fn is_formatting(name: &str) -> bool {
+    matches!(
+        name,
+        "a" | "b" | "big" | "code" | "em" | "font" | "i" | "nobr" | "s" | "small" | "strike" | "strong" | "tt" | "u"
+    )
+}
+
+fn is_special(name: &str) -> bool {
+    matches!(
+        name,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "button"
+            | "caption"
+            | "dd"
+            | "div"
+            | "dl"
+            | "dt"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "li"
+            | "main"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "td"
+            | "th"
+            | "tr"
+            | "ul"
+    )
 }
 
 fn is_heading(name: &str) -> bool {
@@ -1251,5 +1453,39 @@ mod tests {
         assert_eq!(doc.parent_element(one), doc.parent_element(two));
         assert_eq!(doc.text_content(one), "One");
         assert_eq!(doc.text_content(two), "Two");
+    }
+
+    #[test]
+    fn misnested_formatting_is_reopened() {
+        let doc = parse_html("<p id='p'>1<b id='b'>2<i id='i'>3</b>4</i>5</p>");
+        let p = doc.get_element_by_id("p").unwrap();
+        let bold = doc.get_element_by_id("b").unwrap();
+        assert_eq!(doc.parent_element(bold), Some(p));
+        assert!(doc.text_content(bold).contains('2'));
+        assert!(doc.text_content(bold).contains('3'));
+        let italics: Vec<_> = doc
+            .node(p)
+            .children
+            .iter()
+            .copied()
+            .filter(|id| doc.element_name(*id) == Some("i"))
+            .collect();
+        assert_eq!(italics.len(), 1, "the reopened italic is a child of p");
+        assert_eq!(doc.text_content(italics[0]), "4");
+        assert!(doc.text_content(p).contains('5'));
+    }
+
+    #[test]
+    fn a_formatting_tag_closed_inside_a_block_reopens_there() {
+        let doc = parse_html("<b id='b'><div id='d'></b>text</div>");
+        let block = doc.get_element_by_id("d").unwrap();
+        let inside = doc
+            .node(block)
+            .children
+            .iter()
+            .copied()
+            .find(|id| doc.element_name(*id) == Some("b"))
+            .expect("reopened b");
+        assert_eq!(doc.text_content(inside), "text");
     }
 }

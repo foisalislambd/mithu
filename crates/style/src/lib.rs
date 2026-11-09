@@ -119,6 +119,7 @@ pub enum TextAlign {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WhiteSpace {
     Normal,
+    Nowrap,
     Pre,
 }
 
@@ -1213,7 +1214,8 @@ fn parse_underline(value: &str) -> bool {
 fn parse_white_space(value: &str) -> Option<WhiteSpace> {
     Some(match value.trim().to_ascii_lowercase().as_str() {
         "pre" | "pre-wrap" | "break-spaces" => WhiteSpace::Pre,
-        "normal" | "nowrap" => WhiteSpace::Normal,
+        "nowrap" => WhiteSpace::Nowrap,
+        "normal" => WhiteSpace::Normal,
         _ => return None,
     })
 }
