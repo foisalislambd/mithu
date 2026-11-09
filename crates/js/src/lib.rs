@@ -61,12 +61,6 @@ struct NodeKey {
 #[derive(Debug, Trace, Finalize, JsData)]
 struct ResponseKey {
     #[unsafe_ignore_trace]
-    status: u16,
-    #[unsafe_ignore_trace]
-    ok: bool,
-    #[unsafe_ignore_trace]
-    url: String,
-    #[unsafe_ignore_trace]
     body: String,
 }
 
@@ -1226,10 +1220,11 @@ fn reject_promise(context: &mut Context, message: &str) -> JsResult<JsValue> {
 }
 
 fn response_object(status: u16, ok: bool, url: String, body: String, context: &mut Context) -> JsValue {
-    let mut object = ObjectInitializer::with_native_data(ResponseKey { status, ok, url, body }, context);
+    let mut object = ObjectInitializer::with_native_data(ResponseKey { body }, context);
     object
         .property(js_string!("status"), JsValue::from(i32::from(status)), ATTR)
         .property(js_string!("ok"), JsValue::from(ok), ATTR)
+        .property(js_string!("url"), js_string!(url), ATTR)
         .function(NativeFunction::from_fn_ptr(response_text), js_string!("text"), 0);
     object.build().into()
 }

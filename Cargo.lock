@@ -1398,7 +1398,9 @@ dependencies = [
  "mithu-css",
  "mithu-dom",
  "mithu-html",
+ "mithu-net",
  "mithu-style",
+ "mithu-url",
 ]
 
 [[package]]
