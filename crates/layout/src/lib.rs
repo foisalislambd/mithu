@@ -1249,19 +1249,20 @@ fn layout_absolute_children(
         }
         let style = style_of(styles, child);
         let fixed = style.position == Position::Fixed;
-        let (origin_x, origin_y, box_w, box_h) = if fixed {
-            (0.0, 0.0, view.width, view.height)
+        let (box_w, box_h) = if fixed {
+            (view.width, view.height)
         } else {
-            (content_x, content_y, content_w, content_h)
+            (content_w, content_h)
         };
+        let (inset_x, inset_y) = if fixed { (0.0, 0.0) } else { (content_x, content_y) };
         let Some(mut layout) = layout_node(
             doc,
             styles,
             measure,
             images,
             child,
-            origin_x,
-            origin_y,
+            content_x,
+            content_y,
             box_w,
             href.clone(),
             false,
@@ -1272,16 +1273,16 @@ fn layout_absolute_children(
         let style = style_of(styles, child);
         let font = style.font_size;
         let dx = if let Some(left) = resolve_length(style.insets[3], font, box_w, view) {
-            origin_x + left - layout.rect.x
+            inset_x + left - layout.rect.x
         } else if let Some(right) = resolve_length(style.insets[1], font, box_w, view) {
-            origin_x + box_w - layout.rect.width - right - layout.rect.x
+            inset_x + box_w - layout.rect.width - right - layout.rect.x
         } else {
             0.0
         };
-        let dy = if let Some(top) = resolve_length(style.insets[0], font, box_w, view) {
-            origin_y + top - layout.rect.y
-        } else if let Some(bottom) = resolve_length(style.insets[2], font, box_w, view) {
-            origin_y + box_h - layout.rect.height - bottom - layout.rect.y
+        let dy = if let Some(top) = resolve_length(style.insets[0], font, box_h, view) {
+            inset_y + top - layout.rect.y
+        } else if let Some(bottom) = resolve_length(style.insets[2], font, box_h, view) {
+            inset_y + box_h - layout.rect.height - bottom - layout.rect.y
         } else {
             0.0
         };
@@ -1587,13 +1588,16 @@ mod tests {
 
     #[test]
     fn fixed_box_uses_the_viewport() {
-        let doc = parse_html(r#"<div style="height:2000px"></div><div id="pin" style="position:fixed;top:0;left:0;width:10px;height:10px"></div>"#);
+        let doc = parse_html(r#"<div style="height:2000px"></div><div id="pin" style="position:fixed;top:0;left:0;width:10px;height:10px"></div><div id="held" style="position:fixed;top:50%;width:10px;height:10px"></div>"#);
         let styles = style_document(&doc, "");
         let tree = layout_tree(&doc, &styles, 400.0, 300.0, &NaiveMetrics, &HashMap::new());
         let pin = find(&tree.root, doc.get_element_by_id("pin").unwrap()).unwrap();
         assert!(pin.fixed);
         assert!((pin.rect.y - 0.0).abs() < 0.5, "y {}", pin.rect.y);
         assert!((pin.rect.x - 0.0).abs() < 0.5, "x {}", pin.rect.x);
+        let held = find(&tree.root, doc.get_element_by_id("held").unwrap()).unwrap();
+        assert!((held.rect.y - 150.0).abs() < 0.5, "percent y {}", held.rect.y);
+        assert!((held.rect.x - 8.0).abs() < 0.5, "static x {}", held.rect.x);
     }
 
     #[test]
