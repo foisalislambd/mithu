@@ -37,6 +37,7 @@ const SELECTION: Color = Color::rgb(196, 220, 246);
 const FIND_HIT: Color = Color::rgb(255, 214, 64);
 const FIND_ACTIVE: Color = Color::rgb(255, 140, 40);
 const FIND_BAR: Color = Color::rgb(255, 248, 220);
+const STAR: Color = Color::rgb(244, 196, 64);
 const ZOOMS: [f32; 17] = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0];
 
 struct Page {
@@ -105,12 +106,20 @@ impl Page {
     }
 }
 
+struct Bookmark {
+    url: Url,
+    title: String,
+}
+
 pub struct Browser {
     fonts: FontBook,
     viewport_w: f32,
     viewport_h: f32,
     pub omnibox_focused: bool,
     pub find_focused: bool,
+    bookmarks: Vec<Bookmark>,
+    bookmarks_open: bool,
+    suggestion: Option<usize>,
     tabs: Tabs,
 }
 
@@ -136,6 +145,9 @@ impl Browser {
             viewport_h: 800.0,
             omnibox_focused: false,
             find_focused: false,
+            bookmarks: Vec::new(),
+            bookmarks_open: false,
+            suggestion: None,
             tabs: Tabs {
                 pages: vec![Page::blank(1200.0)],
                 active: 0,
@@ -176,6 +188,43 @@ impl Browser {
         }
         let next = (self.tabs.active + 1) % self.tabs.pages.len();
         self.select_tab(next);
+    }
+
+    pub fn toggle_bookmark(&mut self) {
+        let url = self.page().current.clone();
+        let key = url.to_display();
+        if let Some(index) = self.bookmarks.iter().position(|item| item.url.to_display() == key) {
+            self.bookmarks.remove(index);
+            return;
+        }
+        let title = self.page().title.clone();
+        let title = if title.is_empty() { key } else { title };
+        self.bookmarks.push(Bookmark { url, title });
+    }
+
+    pub fn toggle_bookmark_list(&mut self) {
+        self.bookmarks_open = !self.bookmarks_open;
+        if self.bookmarks_open {
+            self.omnibox_focused = false;
+            self.suggestion = None;
+        }
+    }
+
+    pub fn close_bookmarks(&mut self) {
+        self.bookmarks_open = false;
+    }
+
+    pub fn bookmarks_open(&self) -> bool {
+        self.bookmarks_open
+    }
+
+    pub fn bookmark_count(&self) -> usize {
+        self.bookmarks.len()
+    }
+
+    pub fn is_bookmarked(&self) -> bool {
+        let key = self.page().current.to_display();
+        self.bookmarks.iter().any(|item| item.url.to_display() == key)
     }
 
     pub fn zoom(&self) -> f32 {
@@ -310,11 +359,46 @@ impl Browser {
                 self.reload();
             } else if address.contains(x, y) {
                 self.focus_omnibox();
+            } else {
+                let (star, list) = bookmark_buttons(self.viewport_w);
+                if star.contains(x, y) {
+                    self.toggle_bookmark();
+                } else if list.contains(x, y) {
+                    self.toggle_bookmark_list();
+                }
             }
             return;
         }
+        if self.omnibox_focused {
+            let items = self.suggestions();
+            let panel = suggestion_panel(self.viewport_w, items.len());
+            if !items.is_empty() && panel.contains(x, y) {
+                let index = ((y - panel.y) / 32.0).floor() as usize;
+                if let Some(item) = items.get(index) {
+                    let url = item.url.clone();
+                    self.omnibox_focused = false;
+                    self.suggestion = None;
+                    self.navigate_url(url);
+                }
+                return;
+            }
+        }
+        if self.bookmarks_open {
+            let panel = bookmark_panel(self.viewport_w, self.bookmarks.len());
+            if panel.contains(x, y) {
+                let index = ((y - panel.y) / 32.0).floor() as usize;
+                if let Some(bookmark) = self.bookmarks.get(index) {
+                    let url = bookmark.url.clone();
+                    self.bookmarks_open = false;
+                    self.navigate_url(url);
+                }
+                return;
+            }
+            self.bookmarks_open = false;
+        }
         self.omnibox_focused = false;
         self.find_focused = false;
+        self.suggestion = None;
         let scroll = self.page().scroll;
         let zoom = self.page().zoom.max(0.01);
         self.page_mut().select_all = false;
@@ -370,6 +454,7 @@ impl Browser {
 
     pub fn blur_page(&mut self) {
         self.omnibox_focused = false;
+        self.suggestion = None;
         let page = self.page_mut();
         page.select_all = false;
         page.focused = None;
@@ -476,11 +561,14 @@ impl Browser {
     pub fn focus_omnibox(&mut self) {
         self.omnibox_focused = true;
         self.find_focused = false;
+        self.bookmarks_open = false;
+        self.suggestion = None;
         self.page_mut().select_all = true;
     }
 
     pub fn blur_omnibox(&mut self) {
         self.omnibox_focused = false;
+        self.suggestion = None;
         self.page_mut().select_all = false;
     }
 
@@ -488,6 +576,7 @@ impl Browser {
         if ch.is_control() {
             return;
         }
+        self.suggestion = None;
         let page = self.page_mut();
         if page.select_all {
             page.omnibox.clear();
@@ -502,6 +591,7 @@ impl Browser {
     }
 
     pub fn backspace(&mut self) {
+        self.suggestion = None;
         let page = self.page_mut();
         if page.select_all {
             page.omnibox.clear();
@@ -537,11 +627,73 @@ impl Browser {
         self.page_mut().select_all = true;
     }
 
+    pub fn move_suggestion(&mut self, delta: i32) {
+        let count = self.suggestions().len() as i32;
+        if count == 0 {
+            return;
+        }
+        let current = self.suggestion.map(|index| index as i32).unwrap_or(-1);
+        let next = (current + delta).clamp(0, count - 1) as usize;
+        self.suggestion = Some(next);
+    }
+
     pub fn submit_omnibox(&mut self) {
+        if let Some(index) = self.suggestion
+            && let Some(url) = self.suggestions().get(index).map(|item| item.url.clone())
+        {
+            self.omnibox_focused = false;
+            self.suggestion = None;
+            self.page_mut().select_all = false;
+            self.navigate_url(url);
+            return;
+        }
         let text = self.page().omnibox.clone();
         self.omnibox_focused = false;
+        self.suggestion = None;
         self.page_mut().select_all = false;
         self.navigate(&text);
+    }
+
+    fn suggestions(&self) -> Vec<Suggestion> {
+        if !self.omnibox_focused {
+            return Vec::new();
+        }
+        let query = self.page().omnibox.trim().to_string();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut items = Vec::new();
+        let typed = interpret(&query);
+        let typed_label = self
+            .bookmarks
+            .iter()
+            .find(|item| item.url.to_display() == typed.to_display())
+            .map(|item| item.title.clone())
+            .unwrap_or_else(|| typed.to_display());
+        items.push(Suggestion { label: typed_label, url: typed });
+        let needle = query.to_ascii_lowercase();
+        for bookmark in &self.bookmarks {
+            if items.len() >= 8 {
+                break;
+            }
+            let hay = format!("{} {}", bookmark.title, bookmark.url.to_display()).to_ascii_lowercase();
+            if hay.contains(&needle) && items.iter().all(|item| item.url.to_display() != bookmark.url.to_display()) {
+                items.push(Suggestion {
+                    label: bookmark.title.clone(),
+                    url: bookmark.url.clone(),
+                });
+            }
+        }
+        for url in self.page().history.iter().rev() {
+            if items.len() >= 8 {
+                break;
+            }
+            let display = url.to_display();
+            if display.to_ascii_lowercase().contains(&needle) && items.iter().all(|item| item.url.to_display() != display) {
+                items.push(Suggestion { label: display, url: url.clone() });
+            }
+        }
+        items
     }
 
     pub fn title(&self) -> &str {
@@ -870,6 +1022,24 @@ impl Browser {
         self.paint_button(canvas, back, "<", self.can_back());
         self.paint_button(canvas, forward, ">", self.can_forward());
         self.paint_button(canvas, reload, "R", true);
+        let (star, list) = bookmark_buttons(width);
+        self.paint_button(canvas, star, "*", self.is_bookmarked());
+        if self.is_bookmarked() {
+            canvas.fill(star, STAR, full);
+            canvas.text(
+                &self.fonts,
+                star.x + 11.0,
+                star.y + 21.0,
+                "*",
+                16.0,
+                Color::rgb(48, 32, 8),
+                true,
+                false,
+                false,
+                star,
+            );
+        }
+        self.paint_button(canvas, list, "B", self.bookmarks_open);
         let border = if self.omnibox_focused { ADDRESS_FOCUS } else { ADDRESS_BORDER };
         canvas.fill(address, border, full);
         let inset = 2.0;
@@ -930,6 +1100,77 @@ impl Browser {
         );
         if self.page().find_open {
             self.paint_find_bar(canvas);
+        }
+        if self.bookmarks_open {
+            self.paint_bookmarks(canvas);
+        }
+        if self.omnibox_focused {
+            self.paint_suggestions(canvas);
+        }
+    }
+
+    fn paint_suggestions(&self, canvas: &mut Canvas<'_>) {
+        let items = self.suggestions();
+        if items.is_empty() {
+            return;
+        }
+        let panel = suggestion_panel(canvas.width as f32, items.len());
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        canvas.fill(panel, Color::rgb(40, 36, 32), full);
+        for (index, item) in items.iter().enumerate() {
+            let row = Rect::new(panel.x + 4.0, panel.y + index as f32 * 32.0 + 2.0, panel.width - 8.0, 28.0);
+            let fill = if self.suggestion == Some(index) { SELECTION } else { ADDRESS };
+            canvas.fill(row, fill, full);
+            canvas.text(
+                &self.fonts,
+                row.x + 8.0,
+                row.y + 19.0,
+                &item.label,
+                14.0,
+                Color::rgb(28, 26, 22),
+                false,
+                false,
+                false,
+                row,
+            );
+        }
+    }
+
+    fn paint_bookmarks(&self, canvas: &mut Canvas<'_>) {
+        let width = canvas.width as f32;
+        let panel = bookmark_panel(width, self.bookmarks.len());
+        let full = Rect::new(0.0, 0.0, width, canvas.height as f32);
+        canvas.fill(panel, Color::rgb(40, 36, 32), full);
+        if self.bookmarks.is_empty() {
+            canvas.text(
+                &self.fonts,
+                panel.x + 12.0,
+                panel.y + 21.0,
+                "No bookmarks",
+                14.0,
+                BUTTON_TEXT,
+                false,
+                false,
+                false,
+                panel,
+            );
+            return;
+        }
+        for (index, bookmark) in self.bookmarks.iter().enumerate().take(8) {
+            let row = Rect::new(panel.x + 4.0, panel.y + index as f32 * 32.0 + 2.0, panel.width - 8.0, 28.0);
+            canvas.fill(row, ADDRESS, full);
+            canvas.text(
+                &self.fonts,
+                row.x + 8.0,
+                row.y + 19.0,
+                &bookmark.title,
+                14.0,
+                Color::rgb(28, 26, 22),
+                false,
+                false,
+                false,
+                row,
+            );
         }
     }
 
@@ -1147,14 +1388,36 @@ fn tab_rects(width: f32, count: usize) -> (Vec<Rect>, Rect) {
     (rects, plus)
 }
 
+struct Suggestion {
+    label: String,
+    url: Url,
+}
+
+fn suggestion_panel(width: f32, count: usize) -> Rect {
+    let (_, _, _, address) = chrome_rects(width);
+    Rect::new(address.x, address.bottom(), address.width, count.max(1) as f32 * 32.0)
+}
+
+fn bookmark_buttons(width: f32) -> (Rect, Rect) {
+    let y = TAB_H + 12.0;
+    (Rect::new(width - 84.0, y, 32.0, 32.0), Rect::new(width - 44.0, y, 32.0, 32.0))
+}
+
+fn bookmark_panel(width: f32, count: usize) -> Rect {
+    let rows = count.clamp(1, 8) as f32;
+    let panel_w = 280.0_f32.min((width - 16.0).max(80.0));
+    Rect::new(width - panel_w - 8.0, CONTENT_TOP, panel_w, rows * 32.0)
+}
+
 fn chrome_rects(width: f32) -> (Rect, Rect, Rect, Rect) {
     let y = TAB_H + 12.0;
     let size = 32.0;
+    let address_w = (width - 136.0 - 96.0).max(40.0);
     (
         Rect::new(12.0, y, size, size),
         Rect::new(52.0, y, size, size),
         Rect::new(92.0, y, size, size),
-        Rect::new(136.0, y, (width - 148.0).max(40.0), size),
+        Rect::new(136.0, y, address_w, size),
     )
 }
 
@@ -1606,6 +1869,61 @@ mod tests {
         assert!((browser.zoom() - 1.0).abs() < 0.01);
         let frame = browser.render(800.0, 600.0);
         assert_ne!(frame[y * 800 + 150], 0x00FF_0000);
+    }
+
+    #[test]
+    fn bookmarks_save_and_reopen_a_page() {
+        let mut browser = Browser::new();
+        browser.resize(800.0, 600.0);
+        assert_eq!(browser.location(), "about:mithu");
+        assert!(!browser.is_bookmarked());
+        browser.toggle_bookmark();
+        assert!(browser.is_bookmarked());
+        browser.toggle_bookmark();
+        assert_eq!(browser.bookmark_count(), 0);
+        browser.toggle_bookmark();
+        browser.navigate("about:blank");
+        assert!(!browser.is_bookmarked());
+        browser.toggle_bookmark_list();
+        let panel = bookmark_panel(800.0, browser.bookmark_count());
+        browser.pointer_down(panel.x + 20.0, panel.y + 10.0);
+        assert_eq!(browser.location(), "about:mithu");
+        assert_eq!(browser.title(), "Mithu");
+        assert!(!browser.bookmarks_open());
+        let (star, _) = bookmark_buttons(800.0);
+        let frame = browser.render(800.0, 600.0);
+        let sx = star.x as usize + 4;
+        let sy = star.y as usize + 4;
+        assert_eq!(frame[sy * 800 + sx], STAR.to_u32());
+    }
+
+    #[test]
+    fn address_suggestions_open_a_visited_page() {
+        let mut browser = Browser::new();
+        browser.resize(800.0, 600.0);
+        browser.navigate("about:blank");
+        browser.focus_omnibox();
+        for ch in "mithu".chars() {
+            browser.insert_char(ch);
+        }
+        let items = browser.suggestions();
+        let index = items.iter().position(|item| item.url.to_display() == "about:mithu").expect("suggestion");
+        assert!(index > 0);
+        for _ in 0..=index {
+            browser.move_suggestion(1);
+        }
+        browser.submit_omnibox();
+        assert_eq!(browser.location(), "about:mithu");
+        assert!(!browser.omnibox_focused);
+
+        browser.focus_omnibox();
+        for ch in "mithu".chars() {
+            browser.insert_char(ch);
+        }
+        let panel = suggestion_panel(800.0, browser.suggestions().len());
+        let row_y = panel.y + index as f32 * 32.0 + 10.0;
+        browser.pointer_down(panel.x + 12.0, row_y);
+        assert_eq!(browser.location(), "about:mithu");
     }
 
     fn click_id(browser: &mut Browser, id: &str) {
