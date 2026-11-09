@@ -1,12 +1,13 @@
 //! Native window for the Mithu browser.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mithu_shell::Browser;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -26,6 +27,7 @@ struct App {
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     modifiers: ModifiersState,
     cursor: (f32, f32),
+    timer_mark: Instant,
 }
 
 impl App {
@@ -37,6 +39,7 @@ impl App {
             surface: None,
             modifiers: ModifiersState::default(),
             cursor: (0.0, 0.0),
+            timer_mark: Instant::now(),
         }
     }
 
@@ -232,5 +235,16 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let elapsed = self.timer_mark.elapsed().as_millis() as u64;
+        self.timer_mark = Instant::now();
+        if elapsed > 0 && self.browser.advance_timers(elapsed) {
+            self.sync_title();
+            self.request_redraw();
+        }
+        let wait = self.browser.next_timer_ms().unwrap_or(60_000).clamp(1, 60_000);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(wait)));
     }
 }

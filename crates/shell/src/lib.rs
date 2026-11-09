@@ -829,7 +829,12 @@ impl Browser {
             Some(href) => fetched.url.resolve(href).unwrap_or_else(|_| fetched.url.clone()),
             None => fetched.url.clone(),
         };
-        let mut session = Session::open(document, |src| fetch_text(&base, src));
+        let module_base = base.clone();
+        let mut session = Session::open_at(document, &fetched.url.to_display(), move |src| fetch_text(&module_base, src));
+        if let Some(next) = session.take_navigation() {
+            self.navigate(&next);
+            return;
+        }
         let logs = session.logs();
         session.edit(|doc| doc.refresh_metadata());
         let document = session.document();
@@ -892,6 +897,27 @@ impl Browser {
         if reopen {
             self.reveal_find();
         }
+    }
+
+    pub fn advance_timers(&mut self, ms: u64) -> bool {
+        let (ran, next) = {
+            let Some(session) = self.page_mut().session.as_mut() else {
+                return false;
+            };
+            (session.advance(ms), session.take_navigation())
+        };
+        if ran {
+            self.pull_page();
+        }
+        if let Some(next) = next {
+            self.navigate(&next);
+            return true;
+        }
+        ran
+    }
+
+    pub fn next_timer_ms(&self) -> Option<u64> {
+        self.page().session.as_ref().and_then(|session| session.next_timer_ms())
     }
 
     fn layout_width(&self) -> f32 {
@@ -967,6 +993,11 @@ impl Browser {
             }
         }
         self.pull_page();
+        let next = self.page_mut().session.as_mut().and_then(|session| session.take_navigation());
+        if let Some(next) = next {
+            self.navigate(&next);
+            return;
+        }
         self.page_mut().focused = focus_field;
         if let Some(submission) = submission {
             self.send_form(submission);
