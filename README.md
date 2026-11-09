@@ -2,7 +2,7 @@
 
 Mithu is a lightweight browser written in Rust, in this repository, from scratch. It is named for a rose-ringed parakeet who lived with a family and died a long time ago.
 
-The license is MIT. Anyone can use it, read it, and build on it.
+The license is MIT. Anyone can use it, read it, and build on it. The source lives at [github.com/foisalislambd/mithu](https://github.com/foisalislambd/mithu). [@foisalislambd](https://github.com/foisalislambd) maintains it.
 
 HTML, CSS, the DOM, JavaScript, layout, paint, URLs, and HTTP are implemented here. The HTML parser builds the implied document, tables, and `select` lists, and it repairs mis-nested formatting tags. `white-space: nowrap` keeps a line from wrapping. JavaScript runs in this process on the [Boa](https://github.com/boa-dev/boa) virtual machine. Scripts can change the document, and click, input, and submit events reach those scripts before the browser follows a link or sends a form. Each tab keeps its own page, history, and scroll. Ctrl+F finds text on the page, highlights every match, and scrolls the active match into view. Ctrl+Plus, Ctrl+Minus, and Ctrl+0 zoom the page and lay it out again at the new size. Ctrl+D saves or removes the current page as a bookmark, and Ctrl+B opens the list. The address bar suggests bookmarks and pages already visited. A right click opens a menu to follow a link, open it in a new tab, go back, reload, or bookmark the page. PNG, JPEG, GIF, and WebP images are decoded and painted. There is no WASM runtime and no imported browser engine. The other outside crates are the operating-system edges: a window (`winit`, `softbuffer`), TLS (`rustls`), TrueType rasterization (`fontdue`), and image decoders (`image`). Rewriting those would not make the browser stronger.
 
@@ -19,6 +19,16 @@ cargo test --workspace
 ```
 
 Type a URL in the address bar and press Enter. A hostname without a scheme opens as HTTPS. Other text is sent to DuckDuckGo. Alt+Left and Alt+Right walk history. Ctrl+L focuses the address bar. Ctrl+R reloads.
+
+Rust stable is pinned in `rust-toolchain.toml`. `cargo test --workspace` runs the suite.
+
+## Contributing
+
+Issues and pull requests go to [github.com/foisalislambd/mithu](https://github.com/foisalislambd/mithu). Read [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for how people work together here. Report a security problem through [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE). Copyright 2026 Mithu contributors.
 
 ## Workspace
 

@@ -22,6 +22,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
+authors = ["foisalislambd"]
+repository = "https://github.com/foisalislambd/mithu"
+homepage = "https://github.com/foisalislambd/mithu"
+readme = "README.md"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -3,3 +3,10 @@ chromium/
 
 # Rust build output
 target/
+
+# Local environment and editor files
+.env
+.env.*
+.DS_Store
+*.swp
+*~

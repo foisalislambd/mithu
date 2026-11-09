@@ -3,6 +3,8 @@ name = "mithu-shell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
 publish.workspace = true
 description = "Navigation, history, and the browser frame"
 

@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install fonts used by paint tests
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace
