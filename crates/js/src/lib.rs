@@ -122,13 +122,16 @@ impl Session {
                 if code.trim().is_empty() {
                     continue;
                 }
-                let result = if script.module {
-                    run_module(&mut context, &code, script.src.as_deref().unwrap_or("inline-module.js"))
-                } else if let Err(error) = context.eval(Source::from_bytes(code.as_str())) {
-                    Err(error)
-                } else {
-                    context.run_jobs()
-                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if script.module {
+                        run_module(&mut context, &code, script.src.as_deref().unwrap_or("inline-module.js"))
+                    } else if let Err(error) = context.eval(Source::from_bytes(code.as_str())) {
+                        Err(error)
+                    } else {
+                        context.run_jobs()
+                    }
+                }))
+                .unwrap_or_else(|_| Err(JsNativeError::typ().with_message("the script stopped the engine").into()));
                 if let Err(error) = result {
                     log.borrow_mut().push(format!("JavaScript error: {error}"));
                 }
@@ -1084,7 +1087,10 @@ fn push_listener(context: &mut Context, key: &str, value: &JsValue, replace: boo
 fn run_module(context: &mut Context, code: &str, name: &str) -> JsResult<()> {
     let path = PathBuf::from(name);
     let module = Module::parse(Source::from_bytes(code).with_path(&path), None, context)?;
-    let _promise = module.load_link_evaluate(context);
+    let _loaded = module.load(context);
+    context.run_jobs()?;
+    module.link(context)?;
+    let _evaluated = module.evaluate(context)?;
     context.run_jobs()
 }
 
