@@ -120,6 +120,7 @@ pub struct Browser {
     bookmarks: Vec<Bookmark>,
     bookmarks_open: bool,
     suggestion: Option<usize>,
+    menu: Option<Menu>,
     tabs: Tabs,
 }
 
@@ -148,6 +149,7 @@ impl Browser {
             bookmarks: Vec::new(),
             bookmarks_open: false,
             suggestion: None,
+            menu: None,
             tabs: Tabs {
                 pages: vec![Page::blank(1200.0)],
                 active: 0,
@@ -212,6 +214,14 @@ impl Browser {
 
     pub fn close_bookmarks(&mut self) {
         self.bookmarks_open = false;
+    }
+
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    pub fn close_menu(&mut self) {
+        self.menu = None;
     }
 
     pub fn bookmarks_open(&self) -> bool {
@@ -328,7 +338,42 @@ impl Browser {
         self.scroll_by(pages * self.page_height() * 0.9);
     }
 
+    pub fn context_menu(&mut self, x: f32, y: f32) {
+        self.bookmarks_open = false;
+        self.omnibox_focused = false;
+        self.suggestion = None;
+        let mut items = Vec::new();
+        if y >= CONTENT_TOP && y < self.viewport_h - STATUS_H {
+            let zoom = self.page().zoom.max(0.01);
+            let doc_x = x / zoom;
+            let doc_y = (y - CONTENT_TOP) / zoom + self.page().scroll;
+            if let Some(href) = self.hit_link(doc_x, doc_y) {
+                items.push(("Open link".to_string(), MenuAction::Open(href.clone())));
+                items.push(("Open in new tab".to_string(), MenuAction::NewTab(href)));
+            }
+        }
+        if self.can_back() {
+            items.push(("Back".to_string(), MenuAction::Back));
+        }
+        if self.can_forward() {
+            items.push(("Forward".to_string(), MenuAction::Forward));
+        }
+        items.push(("Reload".to_string(), MenuAction::Reload));
+        items.push(("Bookmark this page".to_string(), MenuAction::Bookmark));
+        self.menu = Some(Menu { x, y, items });
+    }
+
     pub fn pointer_down(&mut self, x: f32, y: f32) {
+        if let Some(menu) = self.menu.take() {
+            let bounds = menu_bounds(&menu, self.viewport_w, self.viewport_h);
+            if bounds.contains(x, y) {
+                let index = ((y - bounds.y) / 32.0).floor() as usize;
+                if let Some((_, action)) = menu.items.get(index).cloned() {
+                    self.run_menu(action);
+                }
+            }
+            return;
+        }
         if y >= self.viewport_h - STATUS_H {
             return;
         }
@@ -405,6 +450,31 @@ impl Browser {
         let doc_x = x / zoom;
         let doc_y = (y - CONTENT_TOP) / zoom + scroll;
         self.activate(doc_x, doc_y);
+    }
+
+    fn run_menu(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::Open(href) => self.follow(href),
+            MenuAction::NewTab(href) => self.open_in_new_tab(href),
+            MenuAction::Back => self.back(),
+            MenuAction::Forward => self.forward(),
+            MenuAction::Reload => self.reload(),
+            MenuAction::Bookmark => self.toggle_bookmark(),
+        }
+    }
+
+    fn open_in_new_tab(&mut self, href: String) {
+        let url = {
+            let page = self.page();
+            page.base.resolve(&href).unwrap_or_else(|_| interpret(&href))
+        };
+        self.omnibox_focused = false;
+        self.find_focused = false;
+        self.suggestion = None;
+        self.bookmarks_open = false;
+        self.tabs.pages.push(Page::blank(self.viewport_w));
+        self.tabs.active = self.tabs.pages.len() - 1;
+        self.navigate_url(url);
     }
 
     pub fn field_focused(&self) -> bool {
@@ -1107,6 +1177,31 @@ impl Browser {
         if self.omnibox_focused {
             self.paint_suggestions(canvas);
         }
+        if let Some(menu) = self.menu.clone() {
+            self.paint_menu(canvas, &menu);
+        }
+    }
+
+    fn paint_menu(&self, canvas: &mut Canvas<'_>, menu: &Menu) {
+        let bounds = menu_bounds(menu, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        canvas.fill(bounds, Color::rgb(40, 36, 32), full);
+        for (index, (label, _)) in menu.items.iter().enumerate() {
+            let row = Rect::new(bounds.x + 4.0, bounds.y + index as f32 * 32.0 + 2.0, bounds.width - 8.0, 28.0);
+            canvas.fill(row, ADDRESS, full);
+            canvas.text(
+                &self.fonts,
+                row.x + 8.0,
+                row.y + 19.0,
+                label,
+                14.0,
+                Color::rgb(28, 26, 22),
+                false,
+                false,
+                false,
+                row,
+            );
+        }
     }
 
     fn paint_suggestions(&self, canvas: &mut Canvas<'_>) {
@@ -1391,6 +1486,31 @@ fn tab_rects(width: f32, count: usize) -> (Vec<Rect>, Rect) {
 struct Suggestion {
     label: String,
     url: Url,
+}
+
+#[derive(Clone)]
+enum MenuAction {
+    Open(String),
+    NewTab(String),
+    Back,
+    Forward,
+    Reload,
+    Bookmark,
+}
+
+#[derive(Clone)]
+struct Menu {
+    x: f32,
+    y: f32,
+    items: Vec<(String, MenuAction)>,
+}
+
+fn menu_bounds(menu: &Menu, width: f32, height: f32) -> Rect {
+    let menu_w = 220.0;
+    let menu_h = (menu.items.len().max(1) as f32) * 32.0;
+    let x = menu.x.min((width - menu_w - 4.0).max(4.0)).max(4.0);
+    let y = menu.y.min((height - menu_h - 4.0).max(4.0)).max(4.0);
+    Rect::new(x, y, menu_w, menu_h)
 }
 
 fn suggestion_panel(width: f32, count: usize) -> Rect {
@@ -1924,6 +2044,41 @@ mod tests {
         let row_y = panel.y + index as f32 * 32.0 + 10.0;
         browser.pointer_down(panel.x + 12.0, row_y);
         assert_eq!(browser.location(), "about:mithu");
+    }
+
+    #[test]
+    fn the_context_menu_opens_a_link_in_a_new_tab() {
+        let mut browser = Browser::new();
+        browser.resize(800.0, 600.0);
+        browser.install(Fetched {
+            url: Url::parse("about:test").unwrap(),
+            html: "<a href=\"about:blank\">Elsewhere</a>".to_string(),
+            status: "test".to_string(),
+        });
+        let link = browser
+            .page()
+            .layout
+            .links
+            .iter()
+            .find(|link| link.href.contains("about:blank"))
+            .expect("link")
+            .rect;
+        browser.context_menu(link.x + 2.0, link.y + 2.0 + CONTENT_TOP);
+        let menu = browser.menu.as_ref().expect("menu");
+        let new_tab = menu.items.iter().position(|(label, _)| label == "Open in new tab").expect("item");
+        let bounds = menu_bounds(menu, 800.0, 600.0);
+        browser.pointer_down(bounds.x + 12.0, bounds.y + new_tab as f32 * 32.0 + 10.0);
+        assert_eq!(browser.tab_count(), 2);
+        assert_eq!(browser.location(), "about:blank");
+        assert!(!browser.menu_open());
+        browser.select_tab(0);
+        assert_eq!(browser.location(), "about:test");
+        browser.context_menu(20.0, CONTENT_TOP + 20.0);
+        let menu = browser.menu.as_ref().expect("menu");
+        let reload = menu.items.iter().position(|(label, _)| label == "Reload").expect("reload");
+        let bounds = menu_bounds(menu, 800.0, 600.0);
+        browser.pointer_down(bounds.x + 12.0, bounds.y + reload as f32 * 32.0 + 10.0);
+        assert_eq!(browser.location(), "about:test");
     }
 
     fn click_id(browser: &mut Browser, id: &str) {

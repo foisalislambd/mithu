@@ -142,7 +142,11 @@ impl ApplicationHandler for App {
                 self.cursor = (position.x as f32, position.y as f32);
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Left && state == ElementState::Pressed {
+                if state == ElementState::Pressed && button == MouseButton::Right {
+                    self.browser.context_menu(self.cursor.0, self.cursor.1);
+                    self.sync_title();
+                    self.request_redraw();
+                } else if button == MouseButton::Left && state == ElementState::Pressed {
                     self.browser.pointer_down(self.cursor.0, self.cursor.1);
                     self.sync_title();
                     self.request_redraw();
@@ -169,6 +173,7 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::Enter) if self.browser.find_focused => self.browser.find_next(),
                     Key::Named(NamedKey::Enter) if focused => self.browser.submit_omnibox(),
                     Key::Named(NamedKey::Enter) if self.browser.field_focused() => self.browser.submit_field(),
+                    Key::Named(NamedKey::Escape) if self.browser.menu_open() => self.browser.close_menu(),
                     Key::Named(NamedKey::Escape) if self.browser.bookmarks_open() => self.browser.close_bookmarks(),
                     Key::Named(NamedKey::Escape) if self.browser.find_is_open() => self.browser.close_find(),
                     Key::Named(NamedKey::Escape) => self.browser.blur_page(),
