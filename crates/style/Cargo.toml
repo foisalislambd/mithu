@@ -1,0 +1,18 @@
+[package]
+name = "mithu-style"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Cascade and computed style"
+
+[dependencies]
+mithu-base = { path = "../base" }
+mithu-css = { path = "../css" }
+mithu-dom = { path = "../dom" }
+
+[dev-dependencies]
+mithu-html = { path = "../html" }
+
+[lints]
+workspace = true

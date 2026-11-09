@@ -1,0 +1,15 @@
+[package]
+name = "mithu-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Software rasterizer for layout trees"
+
+[dependencies]
+mithu-base = { path = "../base" }
+mithu-layout = { path = "../layout" }
+mithu-text = { path = "../text" }
+
+[lints]
+workspace = true

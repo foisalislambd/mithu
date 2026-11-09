@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/base",
+    "crates/url",
+    "crates/net",
+    "crates/dom",
+    "crates/html",
+    "crates/css",
+    "crates/style",
+    "crates/text",
+    "crates/layout",
+    "crates/paint",
+    "crates/shell",
+    "app/mithu",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

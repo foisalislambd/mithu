@@ -1,0 +1,15 @@
+[package]
+name = "mithu-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "HTTP/1.1 and HTTPS fetch"
+
+[dependencies]
+mithu-url = { path = "../url" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+[lints]
+workspace = true

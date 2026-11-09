@@ -1,0 +1,15 @@
+[package]
+name = "mithu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Mithu browser window"
+
+[dependencies]
+mithu-shell = { path = "../../crates/shell" }
+softbuffer = "0.4"
+winit = "0.30"
+
+[lints]
+workspace = true
