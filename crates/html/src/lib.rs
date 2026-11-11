@@ -1310,12 +1310,34 @@ impl Parser {
             }
             "script" => {
                 let src = self.doc.attr(id, "src").map(str::to_string);
-                let kind = self.doc.attr(id, "type").unwrap_or("").to_ascii_lowercase();
+                let kind = self
+                    .doc
+                    .attr(id, "type")
+                    .unwrap_or("")
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                let javascript = kind.is_empty()
+                    || kind == "module"
+                    || matches!(
+                        kind.as_str(),
+                        "text/javascript"
+                            | "application/javascript"
+                            | "application/ecmascript"
+                            | "text/ecmascript"
+                            | "text/jscript"
+                    );
                 if src.is_some() || !text.trim().is_empty() {
                     self.doc.scripts.push(mithu_dom::Script {
                         src,
                         code: text,
                         module: kind == "module",
+                        defer: self.doc.attr(id, "defer").is_some(),
+                        asynchronous: self.doc.attr(id, "async").is_some(),
+                        nomodule: self.doc.attr(id, "nomodule").is_some(),
+                        javascript,
                     });
                 }
             }

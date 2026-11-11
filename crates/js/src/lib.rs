@@ -35,6 +35,8 @@ struct Host {
     clock: Rc<RefCell<Clock>>,
     event_target: Rc<Cell<Option<usize>>>,
     event_current: Rc<Cell<Option<usize>>>,
+    local: Rc<RefCell<HashMap<String, String>>>,
+    session_store: Rc<RefCell<HashMap<String, String>>>,
 }
 
 struct Clock {
@@ -75,6 +77,8 @@ pub struct Session {
     doc: Rc<RefCell<Document>>,
     log: Rc<RefCell<Vec<String>>>,
     prevented: Rc<Cell<bool>>,
+    local: Rc<RefCell<HashMap<String, String>>>,
+    session_store: Rc<RefCell<HashMap<String, String>>>,
 }
 
 impl Session {
@@ -86,6 +90,16 @@ impl Session {
         doc: Document,
         href: &str,
         fetch: impl FnMut(&str) -> Option<String> + 'static,
+    ) -> Self {
+        Self::open_with_storage(doc, href, fetch, HashMap::new(), HashMap::new())
+    }
+
+    pub fn open_with_storage(
+        doc: Document,
+        href: &str,
+        fetch: impl FnMut(&str) -> Option<String> + 'static,
+        local: HashMap<String, String>,
+        session_store: HashMap<String, String>,
     ) -> Self {
         let log = Rc::new(RefCell::new(Vec::new()));
         let prevented = Rc::new(Cell::new(false));
@@ -101,6 +115,8 @@ impl Session {
             fetch: RefCell::new(Box::new(fetch)),
             cache: RefCell::new(HashMap::new()),
         });
+        let local = Rc::new(RefCell::new(local));
+        let session_store = Rc::new(RefCell::new(session_store));
         let mut context = Context::builder()
             .module_loader(Rc::clone(&loader))
             .build()
@@ -114,12 +130,39 @@ impl Session {
             clock,
             event_target: Rc::new(Cell::new(None)),
             event_current: Rc::new(Cell::new(None)),
+            local: Rc::clone(&local),
+            session_store: Rc::clone(&session_store),
         });
         if let Err(error) = install_host(&mut context) {
             log.borrow_mut().push(format!("JavaScript error: {error}"));
         } else {
             let scripts = shared.borrow().scripts.clone();
+            let mut classic = Vec::new();
+            let mut deferred = Vec::new();
+            let mut asynchronous = Vec::new();
             for script in scripts {
+                if !script.javascript || script.nomodule {
+                    continue;
+                }
+                if script.module || script.defer {
+                    deferred.push(script);
+                } else if script.asynchronous {
+                    asynchronous.push(script);
+                } else {
+                    classic.push(script);
+                }
+            }
+            let started = std::time::Instant::now();
+            for script in classic
+                .into_iter()
+                .chain(deferred)
+                .chain(asynchronous)
+            {
+                if started.elapsed() > std::time::Duration::from_secs(8) {
+                    log.borrow_mut()
+                        .push("JavaScript error: the script ran longer than 8s".to_string());
+                    break;
+                }
                 let code = if let Some(src) = &script.src {
                     let fetched = {
                         let mut fetch = loader.fetch.borrow_mut();
@@ -130,6 +173,12 @@ impl Session {
                     script.code.clone()
                 };
                 if code.trim().is_empty() {
+                    continue;
+                }
+                if code.len() > 256_000 {
+                    log.borrow_mut().push(
+                        "JavaScript error: skipped a script larger than 256KB".to_string(),
+                    );
                     continue;
                 }
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -163,7 +212,17 @@ impl Session {
             doc: shared,
             log,
             prevented,
+            local,
+            session_store,
         }
+    }
+
+    pub fn local_storage(&self) -> HashMap<String, String> {
+        self.local.borrow().clone()
+    }
+
+    pub fn session_storage(&self) -> HashMap<String, String> {
+        self.session_store.borrow().clone()
     }
 
     pub fn document(&self) -> Document {
@@ -433,7 +492,124 @@ fn install_host(context: &mut Context) -> JsResult<()> {
         1,
         NativeFunction::from_fn_ptr(fetch_resource),
     )?;
+    let local_storage = storage_object(context, false)?;
+    let session_storage = storage_object(context, true)?;
+    context.register_global_property(js_string!("localStorage"), local_storage, flags)?;
+    context.register_global_property(js_string!("sessionStorage"), session_storage, flags)?;
     Ok(())
+}
+
+fn storage_object(context: &mut Context, session: bool) -> JsResult<JsObject> {
+    let mut object = ObjectInitializer::new(context);
+    if session {
+        object.function(
+            NativeFunction::from_fn_ptr(session_get),
+            js_string!("getItem"),
+            1,
+        );
+        object.function(
+            NativeFunction::from_fn_ptr(session_set),
+            js_string!("setItem"),
+            2,
+        );
+        object.function(
+            NativeFunction::from_fn_ptr(session_remove),
+            js_string!("removeItem"),
+            1,
+        );
+        object.function(
+            NativeFunction::from_fn_ptr(session_clear),
+            js_string!("clear"),
+            0,
+        );
+    } else {
+        object.function(
+            NativeFunction::from_fn_ptr(local_get),
+            js_string!("getItem"),
+            1,
+        );
+        object.function(
+            NativeFunction::from_fn_ptr(local_set),
+            js_string!("setItem"),
+            2,
+        );
+        object.function(
+            NativeFunction::from_fn_ptr(local_remove),
+            js_string!("removeItem"),
+            1,
+        );
+        object.function(
+            NativeFunction::from_fn_ptr(local_clear),
+            js_string!("clear"),
+            0,
+        );
+    }
+    Ok(object.build())
+}
+
+fn storage_bag(context: &mut Context, session: bool) -> JsResult<Rc<RefCell<HashMap<String, String>>>> {
+    let host = host(context)?;
+    Ok(if session {
+        host.session_store
+    } else {
+        host.local
+    })
+}
+
+fn local_get(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    storage_get(false, args, context)
+}
+
+fn session_get(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    storage_get(true, args, context)
+}
+
+fn storage_get(session: bool, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let key = arg_string(args, 0, context)?;
+    let bag = storage_bag(context, session)?;
+    Ok(match bag.borrow().get(&key) {
+        Some(value) => js_string!(value.clone()).into(),
+        None => JsValue::null(),
+    })
+}
+
+fn local_set(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    storage_set(false, args, context)
+}
+
+fn session_set(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    storage_set(true, args, context)
+}
+
+fn storage_set(session: bool, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let key = arg_string(args, 0, context)?;
+    let value = arg_string(args, 1, context)?;
+    storage_bag(context, session)?.borrow_mut().insert(key, value);
+    Ok(JsValue::undefined())
+}
+
+fn local_remove(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    storage_remove(false, args, context)
+}
+
+fn session_remove(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    storage_remove(true, args, context)
+}
+
+fn storage_remove(session: bool, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let key = arg_string(args, 0, context)?;
+    storage_bag(context, session)?.borrow_mut().remove(&key);
+    Ok(JsValue::undefined())
+}
+
+fn local_clear(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    storage_bag(context, false)?.borrow_mut().clear();
+    Ok(JsValue::undefined())
+}
+
+fn session_clear(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    storage_bag(context, true)?.borrow_mut().clear();
+    Ok(JsValue::undefined())
 }
 
 fn console_object(context: &mut Context) -> JsResult<JsObject> {
@@ -1796,13 +1972,19 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
         } else {
             mithu_net::get(&url)
         };
-        response.map_err(|error| error.to_string()).map(|response| {
-            (
+        response.map_err(|error| error.to_string()).and_then(|response| {
+            if let Some(page) = mithu_url::Url::parse(&location).ok()
+                && cross_origin(&page, &response.url)
+                && !cors_allows(&page, response.header("access-control-allow-origin"))
+            {
+                return Err("cross-origin fetch was blocked".to_string());
+            }
+            Ok((
                 response.status,
                 (200..300).contains(&response.status),
                 response.url.to_string(),
                 response.text(),
-            )
+            ))
         })
     });
     match outcome {
@@ -1812,6 +1994,21 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
         }
         Err(message) => reject_promise(context, &message),
     }
+}
+
+fn cross_origin(page: &mithu_url::Url, target: &mithu_url::Url) -> bool {
+    page.scheme != target.scheme || page.host != target.host || page.port != target.port
+}
+
+fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
+    let Some(allow) = allow.map(str::trim) else {
+        return false;
+    };
+    if allow == "*" {
+        return true;
+    }
+    let port = page.port.map(|port| format!(":{port}")).unwrap_or_default();
+    allow == format!("{}://{}{port}", page.scheme, page.host)
 }
 
 fn resolve_request(location: &str, spec: &str) -> Result<mithu_url::Url, String> {
@@ -2800,6 +2997,30 @@ mod tests {
         assert_eq!(submission.action, "/search");
         assert_eq!(submission.method, "get");
         assert_eq!(submission.query, "q=mithu+browser&show=yes");
+    }
+
+    #[test]
+    fn local_storage_round_trips_and_json_scripts_are_skipped() {
+        let mut doc = parse_html(
+            r#"<script type="application/ld+json">{not js}</script>
+            <script>
+              localStorage.setItem("city", "Dhaka");
+              sessionStorage.setItem("tab", "1");
+            </script>"#,
+        );
+        let session = Session::open(std::mem::take(&mut doc), |_| None);
+        assert_eq!(
+            session.local_storage().get("city").map(String::as_str),
+            Some("Dhaka")
+        );
+        assert_eq!(
+            session.session_storage().get("tab").map(String::as_str),
+            Some("1")
+        );
+        assert!(
+            session.logs().iter().all(|line| !line.contains("not js")),
+            "a data block must not be evaluated"
+        );
     }
 
     #[test]

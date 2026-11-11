@@ -71,6 +71,10 @@ pub enum Pseudo {
     Link,
     Empty,
     Not(Box<Compound>),
+    /// `:is()`. Specificity is the most specific argument.
+    Is(Vec<Selector>),
+    /// `:where()`. Specificity is zero.
+    Where(Vec<Selector>),
     Hover,
     Root,
     Before,
@@ -121,6 +125,13 @@ fn compound_specificity(compound: &Compound) -> (u32, u32, u32) {
                 classes += more_classes;
                 types += more_types;
             }
+            Pseudo::Is(list) => {
+                let best = list.iter().map(Selector::specificity).max().unwrap_or(0);
+                ids += best / 100;
+                classes += (best / 10) % 10;
+                types += best % 10;
+            }
+            Pseudo::Where(_) => {}
             Pseudo::Before | Pseudo::After => types += 1,
             Pseudo::Unmatched => {}
             _ => classes += 1,
@@ -190,7 +201,7 @@ impl CssParser {
             let before = self.pos;
             let saw_ws = self.skip_ws_counting();
             match self.peek() {
-                Some('{') | Some(',') | Some('}') | None => {
+                Some('{') | Some(',') | Some('}') | Some(')') | None => {
                     self.pos = if saw_ws { before } else { self.pos };
                     if saw_ws && matches!(self.peek(), Some('{') | Some(',') | Some('}')) {
                         // Whitespace before the block is not a combinator.
@@ -313,6 +324,15 @@ impl CssParser {
                                 compound.pseudos.push(Pseudo::Unmatched);
                             }
                         }
+                        "is" => {
+                            let list = self.parse_group();
+                            if list.is_empty() {
+                                compound.pseudos.push(Pseudo::Unmatched);
+                            } else {
+                                compound.pseudos.push(Pseudo::Is(list));
+                            }
+                        }
+                        "where" => compound.pseudos.push(Pseudo::Where(self.parse_group())),
                         _ => {
                             self.skip_function_args();
                             compound.pseudos.push(Pseudo::Unmatched);
@@ -395,6 +415,35 @@ impl CssParser {
                     .unwrap_or(Pseudo::Unmatched)
             }
         }
+    }
+
+    fn parse_group(&mut self) -> Vec<Selector> {
+        self.skip_ws();
+        if self.peek() != Some('(') {
+            return Vec::new();
+        }
+        self.bump();
+        let mut selectors = Vec::new();
+        loop {
+            self.skip_ws();
+            if matches!(self.peek(), Some(')') | None) {
+                break;
+            }
+            let Some(selector) = self.parse_selector() else {
+                break;
+            };
+            selectors.push(selector);
+            self.skip_ws();
+            if self.peek() == Some(',') {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        if self.peek() == Some(')') {
+            self.bump();
+        }
+        selectors
     }
 
     fn parse_not(&mut self) -> Option<Compound> {
@@ -965,6 +1014,17 @@ mod tests {
         assert!(sheet.rules[0].declarations[0].important);
         assert_eq!(sheet.rules[0].declarations[0].value, "#abc");
         assert_eq!(sheet.rules[0].declarations[1].name, "margin");
+    }
+
+    #[test]
+    fn is_takes_the_argument_specificity_and_where_adds_none() {
+        let sheet = parse_css("div:is(#a, .b) { color: red } span:where(#a, .b) { color: blue }");
+        assert!(matches!(
+            sheet.rules[0].selectors[0].compounds[0].pseudos[0],
+            Pseudo::Is(_)
+        ));
+        assert_eq!(sheet.rules[0].selectors[0].specificity(), 101);
+        assert_eq!(sheet.rules[1].selectors[0].specificity(), 1);
     }
 
     #[test]

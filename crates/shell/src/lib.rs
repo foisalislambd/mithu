@@ -255,6 +255,9 @@ pub struct Browser {
     hovering: bool,
     ripple: Option<(f32, f32)>,
     closed: Vec<Url>,
+    local_data: HashMap<String, HashMap<String, String>>,
+    session_data: HashMap<String, HashMap<String, String>>,
+    js_hops: u8,
 }
 
 struct Fetched {
@@ -296,6 +299,9 @@ impl Browser {
             hovering: false,
             ripple: None,
             closed: Vec::new(),
+            local_data: HashMap::new(),
+            session_data: HashMap::new(),
+            js_hops: 0,
         };
         browser.navigate("about:mithu");
         browser
@@ -1317,12 +1323,28 @@ impl Browser {
             None => fetched.url.clone(),
         };
         let module_base = base.clone();
-        let mut session = Session::open_at(document, &fetched.url.to_display(), move |src| {
-            fetch_text(&module_base, src)
-        });
+        let origin = origin_key(&fetched.url);
+        let local = self.local_data.get(&origin).cloned().unwrap_or_default();
+        let session_store = self.session_data.get(&origin).cloned().unwrap_or_default();
+        let mut session = Session::open_with_storage(
+            document,
+            &fetched.url.to_display(),
+            move |src| fetch_text(&module_base, src),
+            local,
+            session_store,
+        );
+        self.local_data.insert(origin.clone(), session.local_storage());
+        self.session_data
+            .insert(origin, session.session_storage());
         if let Some(next) = session.take_navigation() {
-            self.navigate(&next);
-            return;
+            if self.js_hops < 8 {
+                self.js_hops += 1;
+                self.navigate(&next);
+                return;
+            }
+            self.js_hops = 0;
+        } else {
+            self.js_hops = 0;
         }
         let logs = session.logs();
         session.edit(|doc| doc.refresh_metadata());
@@ -1332,14 +1354,16 @@ impl Browser {
             author.push_str(sheet);
             author.push('\n');
         }
-        for href in document.stylesheet_links.iter().take(6) {
+        let mut seen = Vec::new();
+        for href in document.stylesheet_links.iter().take(12) {
             if let Some(css) = fetch_text(&base, href)
-                && css.len() <= 500_000
+                && css.len() <= 1_500_000
             {
-                author.push_str(&css);
+                author.push_str(&expand_imports(&css, &base, 0, &mut seen));
                 author.push('\n');
             }
         }
+        author = expand_imports(&author, &base, 0, &mut seen);
         let styles = style_with(
             &document,
             &author,
@@ -3057,6 +3081,15 @@ fn retrieve(url: &Url, bypass_cache: bool, initiator: Option<&str>) -> Result<Fe
                 download_name: None,
             })
         }
+        "data" => {
+            let html = decode_data_text(&url.path).unwrap_or_default();
+            Ok(Fetched {
+                url: url.clone(),
+                html,
+                status: "data".to_string(),
+                download_name: None,
+            })
+        }
         "file" => {
             let path = url.path.clone();
             let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
@@ -3104,30 +3137,94 @@ fn author_css(document: &Document, base: &Url) -> String {
         author.push_str(sheet);
         author.push('\n');
     }
-    for href in document.stylesheet_links.iter().take(6) {
+    let mut seen = Vec::new();
+    for href in document.stylesheet_links.iter().take(12) {
         if let Some(css) = fetch_text(base, href)
-            && css.len() <= 500_000
+            && css.len() <= 1_500_000
         {
-            author.push_str(&css);
+            author.push_str(&expand_imports(&css, base, 0, &mut seen));
             author.push('\n');
         }
     }
-    author
+    expand_imports(&author, base, 0, &mut seen)
+}
+
+fn expand_imports(css: &str, base: &Url, depth: usize, seen: &mut Vec<String>) -> String {
+    if depth > 3 {
+        return css.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = css;
+    loop {
+        let trimmed = rest.trim_start();
+        let offset = rest.len() - trimmed.len();
+        if !trimmed.to_ascii_lowercase().starts_with("@import") {
+            out.push_str(rest);
+            break;
+        }
+        let after = &trimmed["@import".len()..];
+        let Some((url, consumed)) = import_target(after) else {
+            out.push_str(rest);
+            break;
+        };
+        if !seen.iter().any(|item| item == &url) {
+            seen.push(url.clone());
+            if let Some(fetched) = fetch_text(base, &url) {
+                let resolved = base.resolve(&url).unwrap_or_else(|_| base.clone());
+                out.push_str(&expand_imports(&fetched, &resolved, depth + 1, seen));
+                out.push('\n');
+            }
+        }
+        let next = offset + "@import".len() + consumed;
+        rest = if next < rest.len() { &rest[next..] } else { "" };
+    }
+    out
+}
+
+fn import_target(input: &str) -> Option<(String, usize)> {
+    let trimmed = input.trim_start();
+    let lead = input.len() - trimmed.len();
+    let (body, quoted) = if trimmed.starts_with("url(") {
+        (trimmed[4..].trim_start(), false)
+    } else {
+        (trimmed, true)
+    };
+    let quote = body.chars().next()?;
+    let raw = if quote == '"' || quote == '\'' {
+        let end = body[1..].find(quote)? + 1;
+        body[1..end].to_string()
+    } else if !quoted {
+        let end = body.find(')')?;
+        body[..end].trim().trim_matches(['"', '\'']).to_string()
+    } else {
+        return None;
+    };
+    let close = if trimmed.starts_with("url(") {
+        trimmed.find(')')? + 1
+    } else {
+        let start = trimmed.find(quote)?;
+        let end = trimmed[start + 1..].find(quote)? + start + 2;
+        end
+    };
+    let after = &trimmed[close..];
+    let semi = after.find(';')? + 1;
+    Some((raw, lead + close + semi))
 }
 
 fn load_images(document: &Document, base: &Url) -> HashMap<NodeId, Arc<Bitmap>> {
     let mut images = HashMap::new();
     for id in (0..document.nodes.len()).map(NodeId) {
-        if images.len() >= 16 || document.element_name(id) != Some("img") {
+        if images.len() >= 40 || document.element_name(id) != Some("img") {
             continue;
         }
-        let Some(src) = document.attr(id, "src") else {
+        let src = image_source(document, id);
+        let Some(src) = src else {
             continue;
         };
         let bitmap = if src.starts_with("data:") {
-            mithu_image::decode_data_url(src)
+            mithu_image::decode_data_url(&src)
         } else {
-            fetch_bytes(base, src).and_then(|bytes| mithu_image::decode(&bytes))
+            fetch_bytes(base, &src).and_then(|bytes| mithu_image::decode(&bytes))
         };
         if let Some(bitmap) = bitmap {
             images.insert(id, Arc::new(bitmap));
@@ -3216,11 +3313,51 @@ fn set_field_text(document: &mut Document, id: NodeId, text: &str) {
     }
 }
 
+fn image_source(document: &Document, id: NodeId) -> Option<String> {
+    if let Some(srcset) = document.attr(id, "srcset")
+        && let Some(picked) = pick_srcset(srcset)
+    {
+        return Some(picked);
+    }
+    document.attr(id, "src").map(str::to_string)
+}
+
+fn pick_srcset(value: &str) -> Option<String> {
+    let mut best: Option<(f32, String)> = None;
+    for candidate in value.split(',') {
+        let mut parts = candidate.split_whitespace();
+        let url = parts.next()?.to_string();
+        if url.is_empty() {
+            continue;
+        }
+        let descriptor = parts.next().unwrap_or("1x");
+        let width = if let Some(number) = descriptor.strip_suffix('w') {
+            number.parse::<f32>().unwrap_or(1280.0)
+        } else if let Some(number) = descriptor.strip_suffix('x') {
+            number.parse::<f32>().unwrap_or(1.0) * 1280.0
+        } else {
+            1280.0
+        };
+        let score = (width - 1280.0).abs();
+        if best.as_ref().is_none_or(|(best_score, _)| score < *best_score) {
+            best = Some((score, url));
+        }
+    }
+    best.map(|(_, url)| url)
+}
+
 fn fetch_bytes(base: &Url, href: &str) -> Option<Vec<u8>> {
     let url = base.resolve(href).ok()?;
+    if base.scheme == "https" && url.scheme == "http" {
+        return None;
+    }
     match url.scheme.as_str() {
         "http" | "https" => {
-            let response = get(&url).ok()?;
+            let response = if base.host.is_empty() {
+                get(&url).ok()?
+            } else {
+                mithu_net::get_from(&url, &base.host).ok()?
+            };
             if response.status >= 400 || response.body.len() > 4_000_000 {
                 return None;
             }
@@ -3235,10 +3372,23 @@ fn fetch_bytes(base: &Url, href: &str) -> Option<Vec<u8>> {
 }
 
 fn fetch_text(base: &Url, href: &str) -> Option<String> {
+    if let Some(payload) = href.strip_prefix("data:") {
+        return decode_data_text(payload);
+    }
+    if let Some(url) = base.resolve(href).ok().filter(|url| url.scheme == "data") {
+        return decode_data_text(&url.path);
+    }
     let url = base.resolve(href).ok()?;
+    if base.scheme == "https" && url.scheme == "http" {
+        return None;
+    }
     match url.scheme.as_str() {
         "http" | "https" => {
-            let response = get(&url).ok()?;
+            let response = if base.host.is_empty() {
+                get(&url).ok()?
+            } else {
+                mithu_net::get_from(&url, &base.host).ok()?
+            };
             if response.status >= 400 {
                 return None;
             }
@@ -3247,6 +3397,83 @@ fn fetch_text(base: &Url, href: &str) -> Option<String> {
         "file" => std::fs::read_to_string(url.path).ok(),
         _ => None,
     }
+}
+
+fn origin_key(url: &Url) -> String {
+    let port = url.port.unwrap_or(0);
+    format!("{}://{}:{port}", url.scheme, url.host)
+}
+
+fn decode_data_text(payload: &str) -> Option<String> {
+    let (meta, data) = payload.split_once(',')?;
+    let bytes = if meta.to_ascii_lowercase().contains(";base64") {
+        decode_base64(data.trim())?
+    } else {
+        percent_bytes(data)
+    };
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn percent_bytes(input: &str) -> Vec<u8> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(value) = u8::from_str_radix(hex, 16) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        if bytes[index] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[index]);
+        }
+        index += 1;
+    }
+    out
+}
+
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'=' {
+            break;
+        }
+        let a = value(bytes[index])?;
+        let b = value(bytes[index + 1])?;
+        out.push((a << 2) | (b >> 4));
+        if index + 2 >= bytes.len() || bytes[index + 2] == b'=' {
+            break;
+        }
+        let c = value(bytes[index + 2])?;
+        out.push((b << 4) | (c >> 2));
+        if index + 3 >= bytes.len() || bytes[index + 3] == b'=' {
+            break;
+        }
+        let d = value(bytes[index + 3])?;
+        out.push((c << 6) | d);
+        index += 4;
+    }
+    Some(out)
 }
 
 fn bytes_to_html(url: &Url, content_type: Option<&str>, body: &[u8]) -> String {
@@ -3454,6 +3681,12 @@ fn home_page() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn srcset_picks_the_candidate_nearest_the_layout_width() {
+        let picked = pick_srcset("small.jpg 400w, right.jpg 1200w, huge.jpg 2400w").unwrap();
+        assert_eq!(picked, "right.jpg");
+    }
 
     #[test]
     fn home_frame_has_chrome_and_page() {

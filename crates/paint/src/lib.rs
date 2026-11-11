@@ -16,6 +16,35 @@ impl Canvas<'_> {
         self.fill_round(rect, color, 0.0, clip);
     }
 
+    pub fn fill_vertical(&mut self, rect: Rect, top: Color, bottom: Color, clip: Rect) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let Some(rect) = intersect(rect, clip) else {
+            return;
+        };
+        let x0 = rect.x.floor().max(0.0) as i32;
+        let y0 = rect.y.floor().max(0.0) as i32;
+        let x1 = rect.right().ceil().min(self.width as f32) as i32;
+        let y1 = rect.bottom().ceil().min(self.height as f32) as i32;
+        let span = (rect.height - 1.0).max(1.0);
+        let stride = self.width as usize;
+        for y in y0..y1 {
+            let t = ((y as f32 - rect.y) / span).clamp(0.0, 1.0);
+            let color = mix_t(top, bottom, t);
+            let packed = color.to_u32();
+            let row = y as usize * stride;
+            for x in x0..x1 {
+                let index = row + x as usize;
+                self.pixels[index] = if color.a == 255 {
+                    packed
+                } else {
+                    blend(self.pixels[index], color, 255)
+                };
+            }
+        }
+    }
+
     pub fn fill_round(&mut self, rect: Rect, color: Color, radius: f32, clip: Rect) {
         if color.a == 0 || rect.width <= 0.0 || rect.height <= 0.0 {
             return;
@@ -173,8 +202,11 @@ impl Canvas<'_> {
         }
         let mut pen = x;
         for ch in text.chars() {
+            if !pen.is_finite() || pen < -100_000.0 || pen > 100_000.0 {
+                break;
+            }
             let glyph = fonts.glyph(ch, size, bold, mono);
-            let left = pen.round() as i32 + glyph.xmin;
+            let left = (pen.round() as i32).saturating_add(glyph.xmin);
             let top = glyph_top(baseline, &glyph);
             for row in 0..glyph.height {
                 for col in 0..glyph.width {
@@ -248,7 +280,15 @@ fn paint_box_with_opacity(
     };
     let screen = Rect::new(box_.rect.x, screen_y, box_.rect.width, box_.rect.height);
     let background = scale_alpha(box_.background, opacity);
-    if background.a > 0 {
+    if let Some((top, bottom)) = box_.gradient {
+        let top = scale_alpha(top, opacity);
+        let bottom = scale_alpha(bottom, opacity);
+        if box_.border_radius > 0.0 {
+            canvas.fill_round(screen, mix(top, bottom), box_.border_radius, clip);
+        } else {
+            canvas.fill_vertical(screen, top, bottom, clip);
+        }
+    } else if background.a > 0 {
         canvas.fill_round(screen, background, box_.border_radius, clip);
     }
     if let Some(bitmap) = &box_.image {
@@ -378,6 +418,20 @@ fn scale_alpha(color: Color, opacity: f32) -> Color {
         g: color.g,
         b: color.b,
         a: (f32::from(color.a) * opacity).round().clamp(0.0, 255.0) as u8,
+    }
+}
+
+fn mix(top: Color, bottom: Color) -> Color {
+    mix_t(top, bottom, 0.5)
+}
+
+fn mix_t(top: Color, bottom: Color, t: f32) -> Color {
+    let lerp = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color {
+        r: lerp(top.r, bottom.r),
+        g: lerp(top.g, bottom.g),
+        b: lerp(top.b, bottom.b),
+        a: lerp(top.a, bottom.a),
     }
 }
 

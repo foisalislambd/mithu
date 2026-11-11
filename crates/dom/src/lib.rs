@@ -39,6 +39,11 @@ pub struct Script {
     pub src: Option<String>,
     pub code: String,
     pub module: bool,
+    pub defer: bool,
+    pub asynchronous: bool,
+    pub nomodule: bool,
+    /// `type` is empty, JavaScript, or `module`. JSON-LD and other data blocks are not.
+    pub javascript: bool,
 }
 
 #[derive(Clone, Debug)]

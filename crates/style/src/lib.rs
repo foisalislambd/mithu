@@ -14,6 +14,10 @@ footer, form, h1, h2, h3, h4, h5, h6, header, hr, main, nav, ol, p, pre, section
 table, ul, dd, dt { display: block; }
 li { display: list-item; }
 head, style, script, title, meta, link, base, template, noscript { display: none; }
+table { display: block; }
+thead, tbody, tfoot, tr, caption { display: block; }
+td, th { display: inline-block; padding-top: 2px; padding-right: 6px; padding-bottom: 2px; padding-left: 6px; }
+th { font-weight: bold; }
 [hidden] { display: none; }
 span, a, b, strong, i, em, code, label, small, sup, sub { display: inline; }
 img, br, button, input, textarea, select, iframe, video, canvas, svg, audio { display: inline-block; }
@@ -206,6 +210,7 @@ pub struct ComputedStyle {
     pub borders: [f32; 4],
     pub before: Option<Generated>,
     pub after: Option<Generated>,
+    pub gradient: Option<(Color, Color)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -270,6 +275,7 @@ impl ComputedStyle {
             borders: [0.0; 4],
             before: None,
             after: None,
+            gradient: None,
         }
     }
 }
@@ -300,6 +306,7 @@ struct Specified {
     display: Option<Ranked<Display>>,
     color: Option<Ranked<Color>>,
     background: Option<Ranked<Color>>,
+    gradient: Option<Ranked<(Color, Color)>>,
     font_size: Option<Ranked<FontSize>>,
     bold: Option<Ranked<bool>>,
     mono: Option<Ranked<bool>>,
@@ -498,6 +505,13 @@ fn resolve_custom(
 }
 
 fn expand_vars(input: &str, vars: &HashMap<String, String>) -> String {
+    expand_vars_limited(input, vars, 0)
+}
+
+fn expand_vars_limited(input: &str, vars: &HashMap<String, String>, depth: usize) -> String {
+    if depth > 8 {
+        return input.to_string();
+    }
     let mut out = String::new();
     let mut rest = input;
     while let Some(start) = rest.to_ascii_lowercase().find("var(") {
@@ -512,12 +526,12 @@ fn expand_vars(input: &str, vars: &HashMap<String, String>) -> String {
         let name = name.trim().to_ascii_lowercase();
         if let Some(value) = vars.get(&name) {
             if value.to_ascii_lowercase().contains("var(") {
-                out.push_str(&expand_vars(value, vars));
+                out.push_str(&expand_vars_limited(value, vars, depth + 1));
             } else {
                 out.push_str(value);
             }
         } else if let Some(fallback) = fallback {
-            out.push_str(&expand_vars(fallback.trim(), vars));
+            out.push_str(&expand_vars_limited(fallback.trim(), vars, depth + 1));
         }
         rest = &after[end + 1..];
     }
@@ -724,6 +738,12 @@ fn matches_pseudo(doc: &Document, id: NodeId, pseudo: &Pseudo, state: StyleState
         Pseudo::Root => doc.parent_element(id).is_none(),
         Pseudo::Before | Pseudo::After => false,
         Pseudo::Not(inner) => !matches_compound(doc, id, inner, state),
+        Pseudo::Is(list) => list
+            .iter()
+            .any(|selector| matches_selector(doc, id, selector, state)),
+        Pseudo::Where(list) => list
+            .iter()
+            .any(|selector| matches_selector(doc, id, selector, state)),
         Pseudo::Unmatched => false,
     }
 }
@@ -785,8 +805,18 @@ fn apply_declaration(
                 rank(&mut specified.color, color, spec);
             }
         }
-        "background-color" | "background" => {
+        "background-color" => {
             if let Some(color) = parse_color(value) {
+                rank(&mut specified.background, color, spec);
+            }
+        }
+        "background" | "background-image" => {
+            if let Some(pair) = parse_linear_gradient(value) {
+                rank(&mut specified.gradient, pair, spec);
+            }
+            if declaration.name == "background"
+                && let Some(color) = parse_color(value)
+            {
                 rank(&mut specified.background, color, spec);
             }
         }
@@ -1125,6 +1155,7 @@ fn concretize(
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(Color::TRANSPARENT),
+        gradient: specified.gradient.as_ref().map(|item| item.value),
         font_size,
         bold: specified
             .bold
@@ -1709,7 +1740,8 @@ fn parse_position(value: &str) -> Option<Position> {
     Some(match value.trim().to_ascii_lowercase().as_str() {
         "static" => Position::Static,
         "relative" => Position::Relative,
-        "absolute" | "sticky" => Position::Absolute,
+        "absolute" => Position::Absolute,
+        "sticky" => Position::Relative,
         "fixed" => Position::Fixed,
         _ => return None,
     })
@@ -2223,6 +2255,48 @@ fn parse_border_width(value: &str) -> Option<f32> {
             | Length::Auto => None,
         },
     }
+}
+
+fn parse_linear_gradient(value: &str) -> Option<(Color, Color)> {
+    let lower = value.to_ascii_lowercase();
+    let start = lower.find("linear-gradient(")?;
+    let body = &value[start + "linear-gradient(".len()..];
+    let end = matching_paren(body)?;
+    let mut colors = Vec::new();
+    for argument in split_top_level(&body[..end]) {
+        let piece = argument.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        let token = piece.split_whitespace().next().unwrap_or(piece);
+        if let Some(color) = parse_color(token).or_else(|| parse_color(piece)) {
+            colors.push(color);
+        }
+    }
+    if colors.len() >= 2 {
+        Some((colors[0], colors[colors.len() - 1]))
+    } else {
+        None
+    }
+}
+
+fn split_top_level(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&input[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&input[start..]);
+    parts
 }
 
 fn parse_color(value: &str) -> Option<Color> {

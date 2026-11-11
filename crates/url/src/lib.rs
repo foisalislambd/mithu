@@ -41,6 +41,15 @@ impl Url {
         }
         let (scheme, after) = split_scheme(input).ok_or(UrlError::MissingScheme)?;
         let scheme = scheme.to_ascii_lowercase();
+        if scheme == "data" || scheme == "blob" {
+            return Ok(Self {
+                scheme,
+                host: String::new(),
+                port: None,
+                path: after.to_string(),
+                query: None,
+            });
+        }
         if scheme == "about" {
             let path = after.strip_prefix("//").unwrap_or(after);
             return Ok(Self {

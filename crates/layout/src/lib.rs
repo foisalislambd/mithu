@@ -55,6 +55,7 @@ pub struct LayoutBox {
     pub z_index: i32,
     pub borders: [f32; 4],
     pub fixed: bool,
+    pub gradient: Option<(mithu_base::Color, mithu_base::Color)>,
 }
 
 #[derive(Clone, Copy)]
@@ -350,6 +351,7 @@ fn layout_node(
         rect,
         margin: Edges::new(margin_top, margin_right, margin_bottom, margin_left),
         background: style.background,
+        gradient: style.gradient,
         border_color: style.border_color,
         border_width: borders[0],
         borders,
@@ -1771,6 +1773,7 @@ fn text_flex_item(
         rect: Rect::new(0.0, 0.0, width, height),
         margin: Edges::ZERO,
         background: mithu_base::Color::TRANSPARENT,
+        gradient: None,
         border_color: style.color,
         border_width: 0.0,
         color: style.color,
@@ -1956,6 +1959,7 @@ fn generated_block(
         rect: Rect::new(x, y, used, height),
         margin: Edges::ZERO,
         background: generated.background,
+        gradient: None,
         border_color: styled.color,
         border_width: 0.0,
         color: styled.color,
@@ -1994,6 +1998,7 @@ fn empty_box(node: NodeId) -> LayoutBox {
         rect: Rect::default(),
         margin: Edges::ZERO,
         background: mithu_base::Color::TRANSPARENT,
+        gradient: None,
         border_color: mithu_base::Color::BLACK,
         border_width: 0.0,
         color: mithu_base::Color::BLACK,

@@ -111,8 +111,77 @@ impl Response {
     }
 
     pub fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
+        decode_text(&self.body, self.header("content-type"))
     }
+}
+
+/// Decode a document body. A charset in `Content-Type` wins. Otherwise valid
+/// UTF-8 (including a BOM) is used, and bytes that are not UTF-8 are read as
+/// windows-1252, which is what HTML requires for unlabeled legacy pages.
+pub fn decode_text(body: &[u8], content_type: Option<&str>) -> String {
+    let declared = content_type.and_then(charset_label);
+    let sniffed = sniff_meta_charset(body);
+    let charset = declared.or(sniffed).unwrap_or("utf-8");
+    if charset == "utf-8" || charset == "utf8" {
+        let bytes = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return text.to_string();
+        }
+    }
+    decode_windows_1252(body)
+}
+
+fn charset_label(content_type: &str) -> Option<&str> {
+    for part in content_type.split(';').skip(1) {
+        let part = part.trim();
+        let Some(value) = part
+            .split_once('=')
+            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("charset"))
+            .map(|(_, value)| value.trim().trim_matches('"').trim())
+        else {
+            continue;
+        };
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn sniff_meta_charset(body: &[u8]) -> Option<&str> {
+    let head = &body[..body.len().min(1024)];
+    let Ok(text) = std::str::from_utf8(head) else {
+        return None;
+    };
+    let lower = text.to_ascii_lowercase();
+    let marker = "charset=";
+    let start = lower.find(marker)? + marker.len();
+    let rest = lower[start..].trim_start_matches([' ', '"', '\'']);
+    let end = rest
+        .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+        .unwrap_or(rest.len());
+    let label = &rest[..end];
+    match label {
+        "utf-8" | "utf8" => Some("utf-8"),
+        "windows-1252" | "iso-8859-1" | "latin1" | "us-ascii" => Some("windows-1252"),
+        _ => None,
+    }
+}
+
+fn decode_windows_1252(body: &[u8]) -> String {
+    const EXTRA: [char; 32] = [
+        '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}',
+        '\u{017D}', '\u{008F}', '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
+        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}',
+        '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+    ];
+    body.iter()
+        .map(|byte| match byte {
+            0x00..=0x7F | 0xA0..=0xFF => char::from(*byte),
+            0x80..=0x9F => EXTRA[(*byte - 0x80) as usize],
+        })
+        .collect()
 }
 
 pub fn get(url: &Url) -> Result<Response, NetError> {
@@ -625,6 +694,14 @@ fn find_slice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_1252_bytes_become_characters() {
+        let text = decode_text(&[0x63, 0x61, 0x66, 0xE9], Some("text/html; charset=windows-1252"));
+        assert_eq!(text, "café");
+        let utf8 = decode_text("বাংলা".as_bytes(), None);
+        assert_eq!(utf8, "বাংলা");
+    }
 
     #[test]
     fn parses_content_length_and_ignores_extra_bytes() {
