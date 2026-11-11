@@ -71,7 +71,11 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
     }
     let png = mithu_image::encode_png(width, height, &rgb)
         .ok_or_else(|| "could not encode the screenshot".to_string())?;
-    std::fs::write(path, png).map_err(|error| error.to_string())
+    std::fs::write(path, png).map_err(|error| error.to_string())?;
+    if !browser.status_line().is_empty() {
+        eprintln!("{}", browser.status_line());
+    }
+    Ok(())
 }
 
 struct App {

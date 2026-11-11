@@ -39,6 +39,8 @@ struct Host {
     session_store: Rc<RefCell<HashMap<String, String>>>,
     history: Rc<RefCell<Vec<String>>>,
     history_index: Rc<Cell<usize>>,
+    current_script: Rc<RefCell<Option<NodeId>>>,
+    ready_state: Rc<RefCell<String>>,
 }
 
 struct Clock {
@@ -136,6 +138,8 @@ impl Session {
             session_store: Rc::clone(&session_store),
             history: Rc::new(RefCell::new(vec![href.to_string()])),
             history_index: Rc::new(Cell::new(0)),
+            current_script: Rc::new(RefCell::new(None)),
+            ready_state: Rc::new(RefCell::new("interactive".to_string())),
         });
         if let Err(error) = install_host(&mut context) {
             log.borrow_mut().push(format!("JavaScript error: {error}"));
@@ -157,11 +161,7 @@ impl Session {
                 }
             }
             let started = std::time::Instant::now();
-            for script in classic
-                .into_iter()
-                .chain(deferred)
-                .chain(asynchronous)
-            {
+            for script in classic.into_iter().chain(deferred).chain(asynchronous) {
                 if started.elapsed() > std::time::Duration::from_secs(8) {
                     log.borrow_mut()
                         .push("JavaScript error: the script ran longer than 8s".to_string());
@@ -180,22 +180,38 @@ impl Session {
                     continue;
                 }
                 if code.len() > 256_000 {
-                    log.borrow_mut().push(
-                        "JavaScript error: skipped a script larger than 256KB".to_string(),
-                    );
+                    log.borrow_mut()
+                        .push("JavaScript error: skipped a script larger than 256KB".to_string());
                     continue;
+                }
+                let script_url = script.src.as_deref().map(|src| {
+                    let location = context
+                        .get_data::<Host>()
+                        .map(|host| host.location.borrow().clone())
+                        .unwrap_or_default();
+                    resolve_request(&location, src)
+                        .map(|url| url.to_display())
+                        .unwrap_or_else(|_| src.to_string())
+                });
+                if let Some(host) = context.get_data::<Host>() {
+                    *host.current_script.borrow_mut() = Some(script.node);
                 }
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if script.module {
-                        run_module(
-                            &mut context,
-                            &code,
-                            script.src.as_deref().unwrap_or("inline-module.js"),
-                        )
-                    } else if let Err(error) = context.eval(Source::from_bytes(code.as_str())) {
-                        Err(error)
+                        let name = script_url
+                            .clone()
+                            .unwrap_or_else(|| "inline-module.js".to_string());
+                        run_module(&mut context, &code, &name)
                     } else {
-                        context.run_jobs()
+                        let path =
+                            PathBuf::from(script_url.unwrap_or_else(|| "inline.js".to_string()));
+                        if let Err(error) =
+                            context.eval(Source::from_bytes(code.as_str()).with_path(&path))
+                        {
+                            Err(error)
+                        } else {
+                            context.run_jobs()
+                        }
                     }
                 }))
                 .unwrap_or_else(|_| {
@@ -203,6 +219,9 @@ impl Session {
                         .with_message("the script stopped the engine")
                         .into())
                 });
+                if let Some(host) = context.get_data::<Host>() {
+                    *host.current_script.borrow_mut() = None;
+                }
                 if let Err(error) = result {
                     log.borrow_mut().push(format!("JavaScript error: {error}"));
                 }
@@ -210,6 +229,7 @@ impl Session {
             if let Err(error) = run_due_timers(&mut context, 0) {
                 log.borrow_mut().push(format!("JavaScript error: {error}"));
             }
+            signal_document_loaded(&mut context);
         }
         Self {
             context,
@@ -552,7 +572,10 @@ fn storage_object(context: &mut Context, session: bool) -> JsResult<JsObject> {
     Ok(object.build())
 }
 
-fn storage_bag(context: &mut Context, session: bool) -> JsResult<Rc<RefCell<HashMap<String, String>>>> {
+fn storage_bag(
+    context: &mut Context,
+    session: bool,
+) -> JsResult<Rc<RefCell<HashMap<String, String>>>> {
     let host = host(context)?;
     Ok(if session {
         host.session_store
@@ -589,7 +612,9 @@ fn session_set(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 fn storage_set(session: bool, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let key = arg_string(args, 0, context)?;
     let value = arg_string(args, 1, context)?;
-    storage_bag(context, session)?.borrow_mut().insert(key, value);
+    storage_bag(context, session)?
+        .borrow_mut()
+        .insert(key, value);
     Ok(JsValue::undefined())
 }
 
@@ -660,6 +685,11 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let body_get = native(context, "get body", 0, get_body);
     let document_get = native(context, "get documentElement", 0, get_document_element);
     let head_get = native(context, "get head", 0, get_head);
+    let script_get = native(context, "get currentScript", 0, get_current_script);
+    let ready_get = native(context, "get readyState", 0, get_ready_state);
+    let base_get = native(context, "get baseURI", 0, get_location);
+    let cookie_get = native(context, "get cookie", 0, get_cookie);
+    let cookie_set = native(context, "set cookie", 1, set_cookie);
     let mut object = ObjectInitializer::new(context);
     object
         .function(
@@ -710,8 +740,92 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             None,
             ATTR,
         )
-        .accessor(js_string!("head"), Some(head_get), None, ATTR);
+        .accessor(js_string!("head"), Some(head_get), None, ATTR)
+        .accessor(js_string!("currentScript"), Some(script_get), None, ATTR)
+        .accessor(js_string!("readyState"), Some(ready_get), None, ATTR)
+        .accessor(js_string!("baseURI"), Some(base_get), None, ATTR)
+        .accessor(
+            js_string!("cookie"),
+            Some(cookie_get),
+            Some(cookie_set),
+            ATTR,
+        );
     Ok(object.build())
+}
+
+fn get_current_script(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = {
+        let host = host(context)?;
+        *host.current_script.borrow()
+    };
+    Ok(match id {
+        Some(id) => element_value(id.0, context),
+        None => JsValue::null(),
+    })
+}
+
+fn get_cookie(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    // HttpOnly cookies live in the network jar and are not visible to scripts.
+    // The string is empty until the jar can tell those apart.
+    Ok(js_string!("").into())
+}
+
+fn set_cookie(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn get_ready_state(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    Ok(js_string!(host.ready_state.borrow().clone()).into())
+}
+
+fn signal_document_loaded(context: &mut Context) {
+    let Some(html) = (|| {
+        let host = context.get_data::<Host>().cloned()?;
+        *host.ready_state.borrow_mut() = "complete".to_string();
+        find_tag(&host.doc.borrow(), "html")
+    })() else {
+        return;
+    };
+    fire_node_listeners(context, html, "DOMContentLoaded");
+    fire_window_listeners(context, html, "DOMContentLoaded");
+    fire_window_listeners(context, html, "load");
+}
+
+fn fire_node_listeners(context: &mut Context, id: NodeId, event: &str) {
+    let functions = listener_functions(context, id, event).unwrap_or_default();
+    if functions.is_empty() {
+        return;
+    }
+    if let Some(host) = context.get_data::<Host>().cloned() {
+        host.event_target.set(Some(id.0));
+        host.event_current.set(Some(id.0));
+    }
+    let Ok(event_value) = event_object(id, event, context) else {
+        return;
+    };
+    let this = element_value(id.0, context);
+    for function in functions {
+        let _ = function.call(&this, &[event_value.clone()], context);
+    }
+}
+
+fn fire_window_listeners(context: &mut Context, target: NodeId, event: &str) {
+    let functions = read_listeners(context, &format!("win:{event}")).unwrap_or_default();
+    if functions.is_empty() {
+        return;
+    }
+    let Ok(event_value) = event_object(target, event, context) else {
+        return;
+    };
+    let this = JsValue::from(context.global_object().clone());
+    for function in functions {
+        let _ = function.call(&this, &[event_value.clone()], context);
+    }
 }
 
 pub(crate) fn native(
@@ -918,6 +1032,14 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
     let href_set = native(context, "set href", 1, set_href);
     let lang_get = native(context, "get lang", 0, get_lang);
     let lang_set = native(context, "set lang", 1, set_lang);
+    let reflect_src = context.get_data::<Host>().is_some_and(|host| {
+        matches!(
+            host.doc.borrow().element_name(NodeId(id)).unwrap_or(""),
+            "script" | "img" | "iframe" | "source" | "audio" | "video" | "embed" | "track"
+        )
+    });
+    let src_get = reflect_src.then(|| native(context, "get src", 0, get_src));
+    let src_set = reflect_src.then(|| native(context, "set src", 1, set_src));
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(
@@ -1080,7 +1202,11 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
             ATTR,
         )
         .accessor(js_string!("href"), Some(href_get), Some(href_set), ATTR)
-        .accessor(js_string!("lang"), Some(lang_get), Some(lang_set), ATTR)
+        .accessor(js_string!("lang"), Some(lang_get), Some(lang_set), ATTR);
+    if let (Some(src_get), Some(src_set)) = (src_get, src_set) {
+        object.accessor(js_string!("src"), Some(src_get), Some(src_set), ATTR);
+    }
+    object
         .property(js_string!("classList"), class_list, ATTR)
         .property(js_string!("style"), style, ATTR);
     object.build().into()
@@ -1849,11 +1975,19 @@ fn push_listener(context: &mut Context, key: &str, value: &JsValue, replace: boo
 fn run_module(context: &mut Context, code: &str, name: &str) -> JsResult<()> {
     let path = PathBuf::from(name);
     let module = Module::parse(Source::from_bytes(code).with_path(&path), None, context)?;
-    let _loaded = module.load(context);
+    // Link only after the loader promise finishes. Linking earlier panics inside Boa
+    // when an import has not been written into the module graph yet.
+    let promise = module.load_link_evaluate(context);
     context.run_jobs()?;
-    module.link(context)?;
-    let _evaluated = module.evaluate(context)?;
-    context.run_jobs()
+    match promise.state() {
+        boa_engine::builtins::promise::PromiseState::Fulfilled(_) => Ok(()),
+        boa_engine::builtins::promise::PromiseState::Rejected(error) => {
+            Err(JsError::from_opaque(error))
+        }
+        boa_engine::builtins::promise::PromiseState::Pending => Err(JsNativeError::typ()
+            .with_message("the module did not finish loading")
+            .into()),
+    }
 }
 
 fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
@@ -1977,20 +2111,22 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
         } else {
             mithu_net::get(&url)
         };
-        response.map_err(|error| error.to_string()).and_then(|response| {
-            if let Some(page) = mithu_url::Url::parse(&location).ok()
-                && cross_origin(&page, &response.url)
-                && !cors_allows(&page, response.header("access-control-allow-origin"))
-            {
-                return Err("cross-origin fetch was blocked".to_string());
-            }
-            Ok((
-                response.status,
-                (200..300).contains(&response.status),
-                response.url.to_string(),
-                response.text(),
-            ))
-        })
+        response
+            .map_err(|error| error.to_string())
+            .and_then(|response| {
+                if let Some(page) = mithu_url::Url::parse(&location).ok()
+                    && cross_origin(&page, &response.url)
+                    && !cors_allows(&page, response.header("access-control-allow-origin"))
+                {
+                    return Err("cross-origin fetch was blocked".to_string());
+                }
+                Ok((
+                    response.status,
+                    (200..300).contains(&response.status),
+                    response.url.to_string(),
+                    response.text(),
+                ))
+            })
     });
     match outcome {
         Ok((status, ok, url, body)) => {
@@ -2138,12 +2274,59 @@ fn request_animation_frame(
 
 fn performance_object(context: &mut Context) -> JsResult<JsObject> {
     let mut object = ObjectInitializer::new(context);
-    object.function(
-        NativeFunction::from_fn_ptr(performance_now),
-        js_string!("now"),
-        0,
-    );
+    object
+        .function(
+            NativeFunction::from_fn_ptr(performance_now),
+            js_string!("now"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(performance_mark),
+            js_string!("mark"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(performance_mark),
+            js_string!("measure"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(performance_mark),
+            js_string!("clearMarks"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(performance_mark),
+            js_string!("clearMeasures"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(performance_entries),
+            js_string!("getEntriesByName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(performance_entries),
+            js_string!("getEntriesByType"),
+            1,
+        );
     Ok(object.build())
+}
+
+fn performance_mark(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn performance_entries(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsObject::from(JsArray::from_iter(Vec::<JsValue>::new(), context)).into())
 }
 
 fn performance_now(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -2301,6 +2484,24 @@ fn get_value(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResu
 
 fn set_value(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     write_attr(this, "value", args, context)
+}
+
+fn get_src(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let raw = host.doc.borrow().attr(id, "src").unwrap_or("").to_string();
+    if raw.is_empty() {
+        return Ok(js_string!("").into());
+    }
+    let base = host.location.borrow().clone();
+    let absolute = resolve_request(&base, &raw)
+        .map(|url| url.to_display())
+        .unwrap_or(raw);
+    Ok(js_string!(absolute).into())
+}
+
+fn set_src(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    write_attr(this, "src", args, context)
 }
 
 fn get_href(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -2577,11 +2778,17 @@ fn drop_listener(context: &mut Context, key: &str, value: &JsValue) -> JsResult<
 impl ModuleLoader for PageLoader {
     fn load_imported_module(
         self: Rc<Self>,
-        _referrer: Referrer,
+        referrer: Referrer,
         request: ModuleRequest,
         context: &RefCell<&mut Context>,
     ) -> impl std::future::Future<Output = JsResult<Module>> {
-        let specifier = request.specifier().to_std_string_lossy();
+        let requested = request.specifier().to_std_string_lossy();
+        let specifier = referrer
+            .path()
+            .and_then(|path| path.to_str())
+            .and_then(|base| resolve_request(base, &requested).ok())
+            .map(|url| url.to_display())
+            .unwrap_or(requested);
         let result = (|| {
             if let Some(module) = self.cache.borrow().get(&specifier).cloned() {
                 return Ok(module);
@@ -2694,7 +2901,11 @@ fn type_error() -> JsError {
         .into()
 }
 
-pub(crate) fn arg_string(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<String> {
+pub(crate) fn arg_string(
+    args: &[JsValue],
+    index: usize,
+    context: &mut Context,
+) -> JsResult<String> {
     let value = args.get(index).cloned().unwrap_or(JsValue::undefined());
     Ok(value.to_string(context)?.to_std_string_lossy())
 }
@@ -3004,6 +3215,91 @@ mod tests {
         assert_eq!(submission.action, "/search");
         assert_eq!(submission.method, "get");
         assert_eq!(submission.query, "q=mithu+browser&show=yes");
+    }
+
+    #[test]
+    fn an_external_script_sees_its_url_and_then_the_document_loads() {
+        let doc = parse_html(
+            r#"<script src="/app.js"></script>
+            <script>
+              window.addEventListener("load", function () {
+                document.title = document.title + "|loaded";
+              });
+            </script>"#,
+        );
+        let session = Session::open_at(doc, "https://example.com/dir/page", |src| {
+            (src == "/app.js").then(|| {
+                "document.title = document.currentScript.src + '|' + document.currentScript.getAttribute('src');".to_string()
+            })
+        });
+        assert!(
+            session.logs().is_empty(),
+            "load should not throw: {:?}",
+            session.logs()
+        );
+        assert_eq!(
+            session.document().title,
+            "https://example.com/app.js|/app.js|loaded"
+        );
+    }
+
+    #[test]
+    fn github_banner_script_reads_cookie() {
+        let doc = parse_html("<script src=\"/banner.js\"></script>");
+        let session = Session::open_at(doc, "https://github.com/", |src| {
+            (src == "/banner.js").then(|| {
+                r#"performance.mark("js-parse-end");let e,t,n,l,a="global-banner-disable-styles",d=/^[a-zA-Z0-9_-]+$/;n=((t=(e=document.cookie.match(RegExp("(?:^|;\\s*)disabled_global_site_banners\\s*=\\s*([^;]+)")))?e[1]:null)?t.split(",").map(e=>e.trim()).filter(e=>d.test(e)):[]).map(e=>`global-banner[id="${e}"]{display:none !important}`).join(""),l=document.getElementById(a),n?(l||((l=document.createElement("style")).id=a,document.head.appendChild(l)),l.textContent=n):l?.remove();"#.to_string()
+            })
+        });
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+    }
+
+    #[test]
+    fn document_cookie_is_a_string() {
+        let doc = parse_html(
+            r#"<script>document.title = String(document.cookie.match(/a=b/));</script>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "null");
+    }
+
+    #[test]
+    fn a_module_imports_a_relative_url() {
+        let doc = parse_html(r#"<script type="module" src="/app.js"></script>"#);
+        let session = Session::open_at(doc, "https://example.com/docs/page", |src| match src {
+            "/app.js" => {
+                Some("import { name } from './lib.js'; document.title = name;".to_string())
+            }
+            "https://example.com/lib.js" => Some("export const name = 'mithu';".to_string()),
+            other => Some(format!("missing {other}")),
+        });
+        assert!(
+            session.logs().is_empty(),
+            "module import failed: {:?}",
+            session.logs()
+        );
+        assert_eq!(session.document().title, "mithu");
+    }
+
+    #[test]
+    fn current_script_is_an_element_with_get_attribute() {
+        let doc = parse_html(r#"<script src="/chunk.js"></script>"#);
+        let session = Session::open_at(doc, "https://foisal.org/page", |src| {
+            (src == "/chunk.js").then(|| {
+                r#"globalThis.TURBOPACK={push:function(chunk){
+                    var script=chunk[0];
+                    document.title=script.getAttribute("src")+"|"+script.src;
+                }};
+                (globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push([document.currentScript,1]);"#
+                    .to_string()
+            })
+        });
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(
+            session.document().title,
+            "/chunk.js|https://foisal.org/chunk.js"
+        );
     }
 
     #[test]

@@ -276,6 +276,10 @@ impl Browser {
         self.tabs.page_mut()
     }
 
+    pub fn status_line(&self) -> &str {
+        &self.page().status
+    }
+
     pub fn new() -> Self {
         let mut browser = Self {
             fonts: FontBook::load(),
@@ -1333,9 +1337,9 @@ impl Browser {
             local,
             session_store,
         );
-        self.local_data.insert(origin.clone(), session.local_storage());
-        self.session_data
-            .insert(origin, session.session_storage());
+        self.local_data
+            .insert(origin.clone(), session.local_storage());
+        self.session_data.insert(origin, session.session_storage());
         if let Some(next) = session.take_navigation() {
             if self.js_hops < 8 {
                 self.js_hops += 1;
@@ -3339,7 +3343,10 @@ fn pick_srcset(value: &str) -> Option<String> {
             1280.0
         };
         let score = (width - 1280.0).abs();
-        if best.as_ref().is_none_or(|(best_score, _)| score < *best_score) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_score, _)| score < *best_score)
+        {
             best = Some((score, url));
         }
     }

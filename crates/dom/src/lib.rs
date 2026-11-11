@@ -36,6 +36,7 @@ pub enum NodeData {
 
 #[derive(Clone, Debug)]
 pub struct Script {
+    pub node: NodeId,
     pub src: Option<String>,
     pub code: String,
     pub module: bool,

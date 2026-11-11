@@ -1331,6 +1331,7 @@ impl Parser {
                     );
                 if src.is_some() || !text.trim().is_empty() {
                     self.doc.scripts.push(mithu_dom::Script {
+                        node: id,
                         src,
                         code: text,
                         module: kind == "module",

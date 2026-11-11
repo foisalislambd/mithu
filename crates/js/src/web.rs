@@ -99,7 +99,12 @@ impl Class for PageUrl {
         )?;
         let object = instance.clone().upcast();
         object.set(js_string!("href"), js_string!(href_of(&url)), true, context)?;
-        object.set(js_string!("origin"), js_string!(origin_of(&url)), true, context)?;
+        object.set(
+            js_string!("origin"),
+            js_string!(origin_of(&url)),
+            true,
+            context,
+        )?;
         object.set(
             js_string!("protocol"),
             js_string!(format!("{}:", url.scheme)),
@@ -109,9 +114,19 @@ impl Class for PageUrl {
         object.set(js_string!("username"), js_string!(""), true, context)?;
         object.set(js_string!("password"), js_string!(""), true, context)?;
         object.set(js_string!("host"), js_string!(host_of(&url)), true, context)?;
-        object.set(js_string!("hostname"), js_string!(url.host.clone()), true, context)?;
+        object.set(
+            js_string!("hostname"),
+            js_string!(url.host.clone()),
+            true,
+            context,
+        )?;
         object.set(js_string!("port"), js_string!(port_of(&url)), true, context)?;
-        object.set(js_string!("pathname"), js_string!(url.path.clone()), true, context)?;
+        object.set(
+            js_string!("pathname"),
+            js_string!(url.path.clone()),
+            true,
+            context,
+        )?;
         object.set(js_string!("search"), js_string!(search), true, context)?;
         object.set(js_string!("hash"), js_string!(hash_of(&url)), true, context)?;
         object.set(js_string!("searchParams"), params, true, context)?;
@@ -122,8 +137,14 @@ impl Class for PageUrl {
 fn url_to_string(this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
     let url = this
         .as_object()
-        .and_then(|object| object.downcast_ref::<PageUrl>().map(|data| data.url.clone()))
-        .ok_or_else(|| JsNativeError::typ().with_message("URL method called on the wrong object"))?;
+        .and_then(|object| {
+            object
+                .downcast_ref::<PageUrl>()
+                .map(|data| data.url.clone())
+        })
+        .ok_or_else(|| {
+            JsNativeError::typ().with_message("URL method called on the wrong object")
+        })?;
     Ok(js_string!(href_of(&url)).into())
 }
 
@@ -203,14 +224,26 @@ impl Class for SearchParams {
     const LENGTH: usize = 0;
 
     fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
-        class.method(js_string!("get"), 1, NativeFunction::from_fn_ptr(params_get));
-        class.method(js_string!("has"), 1, NativeFunction::from_fn_ptr(params_has));
+        class.method(
+            js_string!("get"),
+            1,
+            NativeFunction::from_fn_ptr(params_get),
+        );
+        class.method(
+            js_string!("has"),
+            1,
+            NativeFunction::from_fn_ptr(params_has),
+        );
         class.method(
             js_string!("toString"),
             0,
             NativeFunction::from_fn_ptr(params_to_string),
         );
-        class.method(js_string!("set"), 2, NativeFunction::from_fn_ptr(params_set));
+        class.method(
+            js_string!("set"),
+            2,
+            NativeFunction::from_fn_ptr(params_set),
+        );
         class.method(
             js_string!("append"),
             2,
@@ -241,7 +274,11 @@ impl Class for SearchParams {
 
 fn params_of(this: &JsValue) -> JsResult<String> {
     this.as_object()
-        .and_then(|object| object.downcast_ref::<SearchParams>().map(|data| data.query.clone()))
+        .and_then(|object| {
+            object
+                .downcast_ref::<SearchParams>()
+                .map(|data| data.query.clone())
+        })
         .ok_or_else(|| {
             JsNativeError::typ()
                 .with_message("URLSearchParams method called on the wrong object")
@@ -264,7 +301,11 @@ fn params_has(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
     Ok(JsValue::from(query_get(&query, &name).is_some()))
 }
 
-fn params_to_string(this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+fn params_to_string(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
     Ok(js_string!(params_of(this)?).into())
 }
 
@@ -626,14 +667,28 @@ fn xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
         .map(|value| value.to_std_string_lossy())
         .unwrap_or_default();
     let (status, text) = xhr_roundtrip(&method, &url, &body, context);
-    object.set(js_string!("status"), JsValue::from(u32::from(status)), true, context)?;
     object.set(
-        js_string!("statusText"),
-        js_string!(if (200..300).contains(&status) { "OK" } else { "" }),
+        js_string!("status"),
+        JsValue::from(u32::from(status)),
         true,
         context,
     )?;
-    object.set(js_string!("responseText"), js_string!(text.clone()), true, context)?;
+    object.set(
+        js_string!("statusText"),
+        js_string!(if (200..300).contains(&status) {
+            "OK"
+        } else {
+            ""
+        }),
+        true,
+        context,
+    )?;
+    object.set(
+        js_string!("responseText"),
+        js_string!(text.clone()),
+        true,
+        context,
+    )?;
     object.set(js_string!("response"), js_string!(text), true, context)?;
     object.set(js_string!("readyState"), JsValue::from(4), true, context)?;
     call_handler(&object, "onreadystatechange", context)?;
@@ -647,7 +702,10 @@ fn xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
 
 fn call_handler(object: &JsObject, name: &str, context: &mut Context) -> JsResult<()> {
     let handler = object.get(js_string!(name), context)?;
-    if let Some(function) = handler.as_object().filter(|function| function.is_callable()) {
+    if let Some(function) = handler
+        .as_object()
+        .filter(|function| function.is_callable())
+    {
         let _ = function.call(&object.clone().into(), &[], context);
     }
     Ok(())
@@ -741,7 +799,11 @@ fn history_object(context: &mut Context) -> JsResult<JsObject> {
             js_string!("replaceState"),
             3,
         )
-        .function(NativeFunction::from_fn_ptr(history_back), js_string!("back"), 0)
+        .function(
+            NativeFunction::from_fn_ptr(history_back),
+            js_string!("back"),
+            0,
+        )
         .function(
             NativeFunction::from_fn_ptr(history_forward),
             js_string!("forward"),
@@ -769,9 +831,8 @@ fn history_url(args: &[JsValue], context: &mut Context) -> JsResult<Option<Strin
     }
     let host = host(context)?;
     let location = host.location.borrow().clone();
-    let next = resolve_request(&location, &spec).map_err(|error| {
-        JsNativeError::typ().with_message(error)
-    })?;
+    let next = resolve_request(&location, &spec)
+        .map_err(|error| JsNativeError::typ().with_message(error))?;
     Ok(Some(next.to_display()))
 }
 
