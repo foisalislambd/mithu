@@ -18,35 +18,50 @@ use mithu_style::{ComputedStyle, StyleState, style_with};
 use mithu_text::{FontBook, MeasureText};
 use mithu_url::{Url, UrlError};
 
+mod icons;
 mod process;
 
-pub const TAB_H: f32 = 40.0;
+/// `kTabStripHeight` in `chrome/browser/ui/layout_constants.cc`: tab height 35
+/// plus the 6px strip padding. The toolbar overlap is the extra pixel the
+/// active tab draws into the toolbar.
+pub const TAB_H: f32 = 41.0;
 pub const TOOLBAR_H: f32 = 48.0;
-pub const BOOKMARK_BAR_H: f32 = 32.0;
+/// Bookmark button height 28 plus the 6px bar margin (`kBookmarkBarHeight`).
+pub const BOOKMARK_BAR_H: f32 = 34.0;
 pub const CONTENT_TOP: f32 = TAB_H + TOOLBAR_H + BOOKMARK_BAR_H;
 pub const FIND_H: f32 = 36.0;
 pub const STATUS_H: f32 = 26.0;
+/// `kToolbarButtonHeight`.
+const BTN: f32 = 34.0;
+const CAPTION_W: f32 = 46.0;
 
-/// Chrome light theme. Tab strip `#DEE1E6`, toolbar white, omnibox `#F1F3F4`.
-const TAB_STRIP: Color = Color::rgb(222, 225, 230);
+/// Default light frame from `ui/color/sys_color_mixer.cc`: `kColorSysHeader`
+/// is `kColorRefPrimary90` unless the user picks the grayscale scheme.
+/// `kColorSysBase` (the active tab) is `kColorRefNeutral100`.
+const TAB_STRIP: Color = Color::rgb(211, 227, 253);
 const TOOLBAR: Color = Color::rgb(255, 255, 255);
-const ICON: Color = Color::rgb(60, 64, 67);
-const ICON_DISABLED: Color = Color::rgb(154, 160, 166);
-const OMNIBOX: Color = Color::rgb(241, 243, 244);
+const ICON: Color = Color::rgb(31, 31, 31);
+const ICON_DISABLED: Color = Color::rgb(143, 143, 143);
+const OMNIBOX: Color = Color::rgb(239, 237, 237);
 const ADDRESS: Color = Color::rgb(255, 255, 255);
-const ADDRESS_BORDER: Color = Color::rgb(218, 220, 224);
-const ADDRESS_FOCUS: Color = Color::rgb(26, 115, 232);
-const STATUS_BG: Color = Color::rgb(248, 249, 250);
-const STATUS_TEXT: Color = Color::rgb(95, 99, 104);
-const SELECTION: Color = Color::rgb(232, 240, 254);
+const ADDRESS_BORDER: Color = Color::rgb(199, 199, 199);
+const ADDRESS_FOCUS: Color = Color::rgb(11, 87, 208);
+const STATUS_BG: Color = Color::rgb(242, 242, 242);
+const STATUS_TEXT: Color = Color::rgb(94, 94, 94);
+const SELECTION: Color = Color::rgb(211, 227, 253);
 const FIND_HIT: Color = Color::rgb(255, 214, 64);
 const FIND_ACTIVE: Color = Color::rgb(255, 140, 40);
-const FIND_BAR: Color = Color::rgb(255, 248, 220);
+const FIND_BAR: Color = Color::rgb(255, 255, 255);
 const STAR: Color = Color::rgb(242, 180, 0);
 const BOOKMARKED: Color = Color::rgb(254, 239, 195);
-const SEPARATOR: Color = Color::rgb(218, 220, 224);
-const CHIP: Color = Color::rgb(241, 243, 244);
-const INK: Color = Color::rgb(32, 33, 36);
+const SEPARATOR: Color = Color::rgb(199, 199, 199);
+const CHIP: Color = Color::rgb(239, 237, 237);
+const INK: Color = Color::rgb(31, 31, 31);
+/// `kColorSysStateHeaderHover` = `kColorRefPrimary80`.
+const HOVER: Color = Color::rgb(168, 199, 250);
+/// `kColorSysHeaderContainer` = `kColorRefPrimary95`. New-tab button fill.
+const PLUS: Color = Color::rgb(236, 243, 254);
+const NOT_SECURE: Color = Color::rgb(95, 99, 104);
 const ZOOMS: [f32; 17] = [
     0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0,
 ];
@@ -74,6 +89,8 @@ struct Page {
     zoom: f32,
     author_css: String,
     hover: Option<NodeId>,
+    pinned: bool,
+    group: Option<u8>,
 }
 
 struct Tabs {
@@ -124,8 +141,94 @@ impl Page {
             zoom: 1.0,
             author_css: String::new(),
             hover: None,
+            pinned: false,
+            group: None,
         }
     }
+}
+
+struct ChromeColors {
+    strip: Color,
+    toolbar: Color,
+    active: Color,
+    icon: Color,
+    icon_disabled: Color,
+    omnibox: Color,
+    address: Color,
+    focus: Color,
+    ink: Color,
+    muted: Color,
+    status_bg: Color,
+    status_text: Color,
+    chip: Color,
+    plus: Color,
+    hover: Color,
+    menu: Color,
+    tooltip_bg: Color,
+    tooltip_ink: Color,
+}
+
+fn chrome_colors(dark: bool) -> ChromeColors {
+    if dark {
+        return ChromeColors {
+            strip: Color::rgb(31, 32, 32),
+            toolbar: Color::rgb(31, 31, 31),
+            active: Color::rgb(42, 42, 42),
+            icon: Color::rgb(227, 227, 227),
+            icon_disabled: Color::rgb(143, 143, 143),
+            omnibox: Color::rgb(42, 42, 42),
+            address: Color::rgb(31, 31, 31),
+            focus: ADDRESS_FOCUS,
+            ink: Color::rgb(227, 227, 227),
+            muted: Color::rgb(196, 199, 197),
+            status_bg: Color::rgb(31, 32, 32),
+            status_text: Color::rgb(196, 199, 197),
+            chip: Color::rgb(60, 60, 60),
+            plus: Color::rgb(60, 60, 60),
+            hover: Color::rgb(60, 60, 60),
+            menu: Color::rgb(42, 42, 42),
+            tooltip_bg: Color::rgb(241, 243, 244),
+            tooltip_ink: Color::rgb(31, 31, 31),
+        };
+    }
+    ChromeColors {
+        strip: TAB_STRIP,
+        toolbar: TOOLBAR,
+        active: Color::WHITE,
+        icon: ICON,
+        icon_disabled: ICON_DISABLED,
+        omnibox: OMNIBOX,
+        address: ADDRESS,
+        focus: ADDRESS_FOCUS,
+        ink: INK,
+        muted: NOT_SECURE,
+        status_bg: STATUS_BG,
+        status_text: STATUS_TEXT,
+        chip: CHIP,
+        plus: PLUS,
+        hover: HOVER,
+        menu: ADDRESS,
+        tooltip_bg: Color::rgb(32, 33, 36),
+        tooltip_ink: Color::WHITE,
+    }
+}
+
+const GROUP_COLORS: [Color; 8] = [
+    Color::rgb(11, 87, 208),
+    Color::rgb(179, 38, 30),
+    Color::rgb(196, 132, 0),
+    Color::rgb(24, 128, 56),
+    Color::rgb(208, 24, 132),
+    Color::rgb(147, 52, 230),
+    Color::rgb(0, 123, 131),
+    Color::rgb(232, 113, 10),
+];
+
+pub enum FrameHit {
+    Close,
+    Minimize,
+    Maximize,
+    Drag,
 }
 
 struct Bookmark {
@@ -147,6 +250,11 @@ pub struct Browser {
     visits: Vec<(String, String)>,
     downloads: Vec<(String, String)>,
     drag: Option<usize>,
+    dark: bool,
+    cursor: (f32, f32),
+    hovering: bool,
+    ripple: Option<(f32, f32)>,
+    closed: Vec<Url>,
 }
 
 struct Fetched {
@@ -183,6 +291,11 @@ impl Browser {
             visits: Vec::new(),
             downloads: Vec::new(),
             drag: None,
+            dark: false,
+            cursor: (0.0, 0.0),
+            hovering: false,
+            ripple: None,
+            closed: Vec::new(),
         };
         browser.navigate("about:mithu");
         browser
@@ -219,6 +332,59 @@ impl Browser {
         }
         let next = (self.tabs.active + 1) % self.tabs.pages.len();
         self.select_tab(next);
+    }
+
+    pub fn previous_tab(&mut self) {
+        let count = self.tabs.pages.len();
+        if count == 0 {
+            return;
+        }
+        let next = if self.tabs.active == 0 {
+            count - 1
+        } else {
+            self.tabs.active - 1
+        };
+        self.select_tab(next);
+    }
+
+    pub fn toggle_dark(&mut self) {
+        self.dark = !self.dark;
+    }
+
+    pub fn is_dark(&self) -> bool {
+        self.dark
+    }
+
+    pub fn reopen_closed_tab(&mut self) {
+        let Some(url) = self.closed.pop() else {
+            return;
+        };
+        self.new_tab();
+        self.navigate_url(url);
+    }
+
+    pub fn frame_hit(&self, x: f32, y: f32) -> Option<FrameHit> {
+        if y < 0.0 || y >= TAB_H || x < 0.0 || x >= self.viewport_w {
+            return None;
+        }
+        let [minimize, maximize, close] = caption_rects(self.viewport_w);
+        if close.contains(x, y) {
+            return Some(FrameHit::Close);
+        }
+        if maximize.contains(x, y) {
+            return Some(FrameHit::Maximize);
+        }
+        if minimize.contains(x, y) {
+            return Some(FrameHit::Minimize);
+        }
+        let strip = self.tab_strip();
+        if strip.plus.contains(x, y)
+            || strip.search.contains(x, y)
+            || strip.tabs.iter().any(|rect| rect.contains(x, y))
+        {
+            return None;
+        }
+        Some(FrameHit::Drag)
     }
 
     pub fn toggle_bookmark(&mut self) {
@@ -314,16 +480,27 @@ impl Browser {
     }
 
     pub fn close_tab(&mut self) {
+        self.close_tab_at(self.tabs.active);
+    }
+
+    fn close_tab_at(&mut self, index: usize) {
+        if index >= self.tabs.pages.len() {
+            return;
+        }
         self.omnibox_focused = false;
         self.find_focused = false;
+        let url = self.tabs.pages[index].current.clone();
+        if self.closed.len() == 16 {
+            self.closed.remove(0);
+        }
+        self.closed.push(url);
         if self.tabs.pages.len() == 1 {
             self.navigate("about:mithu");
             return;
         }
-        let index = self.tabs.active;
         self.tabs.pages.remove(index);
-        if self.tabs.active >= self.tabs.pages.len() {
-            self.tabs.active = self.tabs.pages.len() - 1;
+        if self.tabs.active > index || self.tabs.active >= self.tabs.pages.len() {
+            self.tabs.active = self.tabs.active.saturating_sub(1);
         }
     }
 
@@ -384,6 +561,27 @@ impl Browser {
         self.bookmarks_open = false;
         self.omnibox_focused = false;
         self.suggestion = None;
+        if y < TAB_H {
+            let strip = self.tab_strip();
+            if let Some(index) = strip.tabs.iter().position(|rect| rect.contains(x, y)) {
+                let pinned = self.tabs.pages[index].pinned;
+                let mut items = vec![("Close tab".to_string(), MenuAction::CloseTab(index))];
+                items.push((
+                    if pinned {
+                        "Unpin tab".to_string()
+                    } else {
+                        "Pin tab".to_string()
+                    },
+                    MenuAction::Pin(index),
+                ));
+                items.push(("Add to new group".to_string(), MenuAction::Group(index)));
+                if !self.closed.is_empty() {
+                    items.push(("Reopen closed tab".to_string(), MenuAction::Reopen));
+                }
+                self.menu = Some(Menu { x, y, items });
+                return;
+            }
+        }
         let mut items = Vec::new();
         if y >= CONTENT_TOP && y < self.viewport_h - STATUS_H {
             let zoom = self.page().zoom.max(0.01);
@@ -427,30 +625,60 @@ impl Browser {
                 return;
             }
         }
+        self.ripple = Some((x, y));
         if y < TAB_H {
-            let (tabs, plus) = tab_rects(self.viewport_w, self.tab_count());
-            if plus.contains(x, y) {
+            let strip = self.tab_strip();
+            if strip.search.contains(x, y) {
+                self.open_tab_search();
+            } else if strip.plus.contains(x, y) {
                 self.new_tab();
-            } else if let Some(index) = tabs.iter().position(|rect| rect.contains(x, y)) {
+            } else if let Some(index) = strip
+                .closes
+                .iter()
+                .position(|rect| rect.width > 0.0 && rect.contains(x, y))
+            {
+                let visible = index == self.tabs.active
+                    || strip
+                        .tabs
+                        .get(index)
+                        .is_some_and(|rect| rect.contains(self.cursor.0, self.cursor.1));
+                if visible && !self.tabs.pages[index].pinned {
+                    self.close_tab_at(index);
+                } else if let Some(rect) = strip.tabs.get(index)
+                    && rect.contains(x, y)
+                {
+                    self.select_tab(index);
+                    self.drag = Some(index);
+                }
+            } else if let Some(index) = strip.tabs.iter().position(|rect| rect.contains(x, y)) {
                 self.select_tab(index);
                 self.drag = Some(index);
             }
             return;
         }
         if y < TAB_H + TOOLBAR_H {
-            let (back, forward, reload, address) = chrome_rects(self.viewport_w);
-            let (star, menu) = bookmark_buttons(self.viewport_w);
-            if back.contains(x, y) && self.can_back() {
+            let bar = toolbar(self.viewport_w);
+            let chip = security_chip(&self.page().current, self.omnibox_focused);
+            let chip_rect = chip_rect(bar.address, &chip, &self.fonts);
+            if bar.back.contains(x, y) && self.can_back() {
                 self.back();
-            } else if forward.contains(x, y) && self.can_forward() {
+            } else if bar.forward.contains(x, y) && self.can_forward() {
                 self.forward();
-            } else if reload.contains(x, y) {
+            } else if bar.reload.contains(x, y) {
                 self.reload();
-            } else if star.contains(x, y) {
+            } else if bar.home.contains(x, y) {
+                self.navigate("about:mithu");
+            } else if bar.star.contains(x, y) {
                 self.toggle_bookmark();
-            } else if menu.contains(x, y) {
+            } else if bar.extensions.contains(x, y) {
+                self.open_extensions_menu();
+            } else if bar.profile.contains(x, y) {
+                self.open_profile_menu();
+            } else if bar.menu.contains(x, y) {
                 self.open_app_menu();
-            } else if address.contains(x, y) {
+            } else if chip_rect.contains(x, y) {
+                self.open_site_info();
+            } else if bar.address.contains(x, y) {
                 self.focus_omnibox();
             }
             return;
@@ -463,6 +691,12 @@ impl Browser {
                 let url = bookmark.url.clone();
                 self.navigate_url(url);
             }
+            return;
+        }
+        if let Some(shelf) = self.shelf_rect()
+            && shelf.contains(x, y)
+        {
+            self.navigate("about:downloads");
             return;
         }
         if self.omnibox_focused {
@@ -515,12 +749,38 @@ impl Browser {
             MenuAction::Bookmarks => self.toggle_bookmark_list(),
             MenuAction::History => self.navigate("about:history"),
             MenuAction::Downloads => self.navigate("about:downloads"),
+            MenuAction::NewWindow => self.new_tab(),
+            MenuAction::Find => self.open_find(),
+            MenuAction::ZoomIn => self.zoom_in(),
+            MenuAction::ZoomOut => self.zoom_out(),
+            MenuAction::ZoomReset => self.zoom_reset(),
+            MenuAction::Settings => self.navigate("about:settings"),
+            MenuAction::Dark => self.toggle_dark(),
+            MenuAction::CloseTab(index) => self.close_tab_at(index),
+            MenuAction::Pin(index) => {
+                if let Some(page) = self.tabs.pages.get_mut(index) {
+                    page.pinned = !page.pinned;
+                }
+            }
+            MenuAction::Group(index) => {
+                if let Some(page) = self.tabs.pages.get_mut(index) {
+                    let color = page.group.map(|value| (value + 1) % 8).unwrap_or(0);
+                    page.group = Some(color);
+                }
+            }
+            MenuAction::Select(index) => self.select_tab(index),
+            MenuAction::Reopen => self.reopen_closed_tab(),
+            MenuAction::Dismiss => {}
         }
     }
 
     fn open_app_menu(&mut self) {
         let menu = menu_button(self.viewport_w);
-        let mut items = vec![("New tab".to_string(), MenuAction::NewTabPage)];
+        let zoom = (self.page().zoom * 100.0).round() as i32;
+        let mut items = vec![
+            ("New tab".to_string(), MenuAction::NewTabPage),
+            ("New window".to_string(), MenuAction::NewWindow),
+        ];
         if self.can_back() {
             items.push(("Back".to_string(), MenuAction::Back));
         }
@@ -532,10 +792,88 @@ impl Browser {
         items.push(("Bookmarks".to_string(), MenuAction::Bookmarks));
         items.push(("History".to_string(), MenuAction::History));
         items.push(("Downloads".to_string(), MenuAction::Downloads));
+        items.push(("Zoom in".to_string(), MenuAction::ZoomIn));
+        items.push(("Zoom out".to_string(), MenuAction::ZoomOut));
+        items.push((format!("Zoom {zoom}%"), MenuAction::ZoomReset));
+        items.push(("Find".to_string(), MenuAction::Find));
+        items.push(("Settings".to_string(), MenuAction::Settings));
+        items.push((
+            if self.dark {
+                "Light theme".to_string()
+            } else {
+                "Dark theme".to_string()
+            },
+            MenuAction::Dark,
+        ));
         self.menu = Some(Menu {
             x: menu.x,
             y: menu.bottom(),
             items,
+        });
+    }
+
+    fn open_tab_search(&mut self) {
+        let strip = self.tab_strip();
+        let items = self
+            .tabs
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(index, page)| {
+                let title = if page.title.is_empty() {
+                    page.current.to_display()
+                } else {
+                    page.title.clone()
+                };
+                (title, MenuAction::Select(index))
+            })
+            .collect();
+        self.menu = Some(Menu {
+            x: strip.search.x,
+            y: strip.search.bottom(),
+            items,
+        });
+    }
+
+    fn open_extensions_menu(&mut self) {
+        let bar = toolbar(self.viewport_w);
+        self.menu = Some(Menu {
+            x: bar.extensions.x,
+            y: bar.extensions.bottom(),
+            items: vec![("No extensions".to_string(), MenuAction::Dismiss)],
+        });
+    }
+
+    fn open_profile_menu(&mut self) {
+        let bar = toolbar(self.viewport_w);
+        self.menu = Some(Menu {
+            x: bar.profile.x,
+            y: bar.profile.bottom(),
+            items: vec![
+                ("Mithu profile".to_string(), MenuAction::Dismiss),
+                (
+                    if self.dark {
+                        "Light theme".to_string()
+                    } else {
+                        "Dark theme".to_string()
+                    },
+                    MenuAction::Dark,
+                ),
+            ],
+        });
+    }
+
+    fn open_site_info(&mut self) {
+        let bar = toolbar(self.viewport_w);
+        let label = match self.page().current.scheme.as_str() {
+            "https" => "Connection is secure",
+            "http" => "Connection is not secure",
+            _ => "Mithu page",
+        };
+        self.menu = Some(Menu {
+            x: bar.address.x,
+            y: bar.address.bottom(),
+            items: vec![(label.to_string(), MenuAction::Dismiss)],
         });
     }
 
@@ -825,6 +1163,7 @@ impl Browser {
         items.push(Suggestion {
             label: typed_label,
             url: typed,
+            kind: SuggestionKind::Url,
         });
         let needle = query.to_ascii_lowercase();
         for bookmark in &self.bookmarks {
@@ -841,6 +1180,7 @@ impl Browser {
                 items.push(Suggestion {
                     label: bookmark.title.clone(),
                     url: bookmark.url.clone(),
+                    kind: SuggestionKind::Bookmark,
                 });
             }
         }
@@ -855,6 +1195,7 @@ impl Browser {
                 items.push(Suggestion {
                     label: display,
                     url: url.clone(),
+                    kind: SuggestionKind::History,
                 });
             }
         }
@@ -899,7 +1240,7 @@ impl Browser {
     }
 
     fn drag_tab(&mut self, from: usize, x: f32) {
-        let (tabs, _) = tab_rects(self.viewport_w, self.tab_count());
+        let tabs = self.tab_strip().tabs;
         let Some(to) = tabs.iter().position(|rect| x < rect.right()) else {
             return;
         };
@@ -1120,9 +1461,12 @@ impl Browser {
 
     pub fn pointer_up(&mut self) {
         self.drag = None;
+        self.ripple = None;
     }
 
     pub fn pointer_move(&mut self, x: f32, y: f32) {
+        self.cursor = (x, y);
+        self.hovering = true;
         if let Some(from) = self.drag {
             self.drag_tab(from, x);
             return;
@@ -1407,54 +1751,104 @@ impl Browser {
     fn paint_chrome(&self, canvas: &mut Canvas<'_>) {
         let width = canvas.width as f32;
         let height = canvas.height as f32;
+        let colors = chrome_colors(self.dark);
         let full = Rect::new(0.0, 0.0, width, height);
-        canvas.fill(Rect::new(0.0, 0.0, width, TAB_H), TAB_STRIP, full);
-        canvas.fill(Rect::new(0.0, TAB_H, width, TOOLBAR_H), TOOLBAR, full);
+        canvas.fill(Rect::new(0.0, 0.0, width, TAB_H), colors.strip, full);
         canvas.fill(
-            Rect::new(0.0, TAB_H + TOOLBAR_H, width, BOOKMARK_BAR_H),
-            TOOLBAR,
+            Rect::new(0.0, TAB_H, width, TOOLBAR_H),
+            colors.toolbar,
             full,
         );
-        self.paint_tabs(canvas);
-        let (back, forward, reload, address) = chrome_rects(width);
-        self.paint_button(canvas, back, "‹", self.can_back());
-        self.paint_button(canvas, forward, "›", self.can_forward());
-        self.paint_button(canvas, reload, "↻", true);
-        let (star, menu) = bookmark_buttons(width);
-        self.paint_bookmarks_bar(canvas);
+        canvas.fill(
+            Rect::new(0.0, TAB_H + TOOLBAR_H, width, BOOKMARK_BAR_H),
+            colors.toolbar,
+            full,
+        );
+        self.paint_tabs(canvas, &colors);
+        let bar = toolbar(width);
+        self.paint_toolbar_button(
+            canvas,
+            bar.back,
+            icons::Kind::Back,
+            self.can_back(),
+            &colors,
+        );
+        self.paint_toolbar_button(
+            canvas,
+            bar.forward,
+            icons::Kind::Forward,
+            self.can_forward(),
+            &colors,
+        );
+        let loading = self.page().status.starts_with("Loading");
+        self.paint_toolbar_button(
+            canvas,
+            bar.reload,
+            if loading {
+                icons::Kind::Close
+            } else {
+                icons::Kind::Reload
+            },
+            true,
+            &colors,
+        );
+        self.paint_toolbar_button(canvas, bar.home, icons::Kind::Home, true, &colors);
+        self.paint_bookmarks_bar(canvas, &colors);
+        let radius = bar.address.height / 2.0;
         let border = if self.omnibox_focused {
-            ADDRESS_FOCUS
+            colors.focus
         } else {
-            OMNIBOX
+            colors.omnibox
         };
-        canvas.fill_round(address, border, 16.0, full);
+        canvas.fill_round(bar.address, border, radius, full);
         let inset = if self.omnibox_focused { 2.0 } else { 0.0 };
         canvas.fill_round(
             Rect::new(
-                address.x + inset,
-                address.y + inset,
-                address.width - inset * 2.0,
-                address.height - inset * 2.0,
+                bar.address.x + inset,
+                bar.address.y + inset,
+                bar.address.width - inset * 2.0,
+                bar.address.height - inset * 2.0,
             ),
             if self.omnibox_focused {
-                ADDRESS
+                colors.address
             } else {
-                OMNIBOX
+                colors.omnibox
             },
-            16.0,
+            radius,
             full,
         );
+        let chip = security_chip(&self.page().current, self.omnibox_focused);
+        let chip_box = chip_rect(bar.address, &chip, &self.fonts);
+        self.paint_chip(canvas, chip_box, &chip, &colors);
         if self.is_bookmarked() {
-            canvas.fill(star, BOOKMARKED, full);
+            canvas.fill(bar.star, BOOKMARKED, full);
         }
-        self.paint_button(canvas, star, "★", true);
-        self.paint_button(canvas, menu, "⋮", true);
-        let text_clip = Rect::new(
-            address.x + 16.0,
-            address.y + 4.0,
-            (address.width - 56.0).max(1.0),
-            address.height - 8.0,
+        self.paint_toolbar_button(
+            canvas,
+            bar.star,
+            if self.is_bookmarked() {
+                icons::Kind::StarFilled
+            } else {
+                icons::Kind::Star
+            },
+            true,
+            &colors,
         );
+        self.paint_extensions(canvas, bar.extensions, &colors);
+        self.paint_profile(canvas, bar.profile, &colors);
+        self.paint_more(canvas, bar.menu, &colors);
+        let text_left = if chip_box.width > 0.0 {
+            chip_box.right() + 8.0
+        } else {
+            bar.address.x + 16.0
+        };
+        let text_clip = Rect::new(
+            text_left,
+            bar.address.y + 4.0,
+            (bar.star.x - text_left - 4.0).max(1.0),
+            bar.address.height - 8.0,
+        );
+        let address = bar.address;
         let size = 16.0;
         let prefix: String = self
             .page()
@@ -1483,7 +1877,7 @@ impl Browser {
             baseline,
             &self.page().omnibox,
             size,
-            INK,
+            colors.ink,
             false,
             false,
             false,
@@ -1492,13 +1886,16 @@ impl Browser {
         if self.omnibox_focused && !self.page().select_all {
             canvas.fill(
                 Rect::new(text_x + prefix_w, address.y + 8.0, 1.5, 18.0),
-                ADDRESS_FOCUS,
+                colors.focus,
                 text_clip,
             );
         }
+        if let Some(shelf) = self.shelf_rect() {
+            self.paint_shelf(canvas, shelf, &colors);
+        }
         canvas.fill(
             Rect::new(0.0, height - STATUS_H, width, STATUS_H),
-            STATUS_BG,
+            colors.status_bg,
             full,
         );
         let mut status = if self.page().title.is_empty() {
@@ -1515,12 +1912,13 @@ impl Browser {
             height - 8.0,
             &status,
             13.0,
-            STATUS_TEXT,
+            colors.status_text,
             false,
             false,
             false,
             Rect::new(8.0, height - STATUS_H, width - 16.0, STATUS_H),
         );
+        self.paint_tooltip(canvas, &colors);
         if self.page().find_open {
             self.paint_find_bar(canvas);
         }
@@ -1539,7 +1937,7 @@ impl Browser {
         let bounds = menu_bounds(menu, canvas.width as f32, canvas.height as f32);
         let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
         canvas.fill(bounds, SEPARATOR, full);
-        for (index, (label, _)) in menu.items.iter().enumerate() {
+        for (index, (label, action)) in menu.items.iter().enumerate() {
             let row = Rect::new(
                 bounds.x + 1.0,
                 bounds.y + index as f32 * 32.0 + 1.0,
@@ -1547,9 +1945,18 @@ impl Browser {
                 30.0,
             );
             canvas.fill(row, ADDRESS, full);
+            if let Some(kind) = menu_icon(action) {
+                icons::draw(
+                    canvas,
+                    kind,
+                    Rect::new(row.x + 8.0, row.y + 7.0, 16.0, 16.0),
+                    ICON,
+                    full,
+                );
+            }
             canvas.text(
                 &self.fonts,
-                row.x + 8.0,
+                row.x + 32.0,
                 row.y + 20.0,
                 label,
                 14.0,
@@ -1583,9 +1990,16 @@ impl Browser {
                 ADDRESS
             };
             canvas.fill(row, fill, full);
+            let glyph = Rect::new(row.x + 8.0, row.y + 7.0, 16.0, 16.0);
+            let kind = match item.kind {
+                SuggestionKind::Bookmark => icons::Kind::Star,
+                SuggestionKind::History => icons::Kind::History,
+                SuggestionKind::Url => icons::Kind::Search,
+            };
+            icons::draw(canvas, kind, glyph, ICON, full);
             canvas.text(
                 &self.fonts,
-                row.x + 8.0,
+                row.x + 32.0,
                 row.y + 20.0,
                 &item.label,
                 14.0,
@@ -1702,23 +2116,23 @@ impl Browser {
         );
     }
 
-    fn paint_bookmarks_bar(&self, canvas: &mut Canvas<'_>) {
+    fn paint_bookmarks_bar(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
         let width = canvas.width as f32;
         let y = TAB_H + TOOLBAR_H;
         let full = Rect::new(0.0, 0.0, width, canvas.height as f32);
         canvas.fill(
             Rect::new(0.0, y + BOOKMARK_BAR_H - 1.0, width, 1.0),
-            SEPARATOR,
+            colors.chip,
             full,
         );
         if self.bookmarks.is_empty() {
             canvas.text(
                 &self.fonts,
                 12.0,
-                y + 21.0,
+                y + 22.0,
                 "Bookmarks",
                 13.0,
-                ICON_DISABLED,
+                colors.icon_disabled,
                 false,
                 false,
                 false,
@@ -1728,14 +2142,19 @@ impl Browser {
         }
         let slots = bookmark_slots(width, self.bookmarks.len());
         for (slot, bookmark) in slots.iter().zip(self.bookmarks.iter()) {
-            canvas.fill_round(*slot, CHIP, 8.0, full);
+            let fill = if self.hovering && slot.contains(self.cursor.0, self.cursor.1) {
+                colors.hover
+            } else {
+                colors.chip
+            };
+            canvas.fill_round(*slot, fill, 14.0, full);
             canvas.text(
                 &self.fonts,
-                slot.x + 8.0,
-                slot.y + 16.0,
+                slot.x + 10.0,
+                slot.y + 18.0,
                 &bookmark.title,
                 13.0,
-                INK,
+                colors.ink,
                 false,
                 false,
                 false,
@@ -1744,78 +2163,475 @@ impl Browser {
         }
     }
 
-    fn paint_tabs(&self, canvas: &mut Canvas<'_>) {
-        let (rects, plus) = tab_rects(canvas.width as f32, self.tabs.pages.len());
+    fn paint_tabs(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
+        let strip = self.tab_strip();
         let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
-        for (index, rect) in rects.iter().enumerate() {
+        for (index, rect) in strip.tabs.iter().enumerate() {
+            let page = &self.tabs.pages[index];
             let active = index == self.tabs.active;
+            let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
             if active {
-                canvas.fill_round(*rect, Color::WHITE, 8.0, full);
+                canvas.fill_round(*rect, colors.active, 10.0, full);
                 canvas.fill(
-                    Rect::new(rect.x, rect.bottom() - 8.0, rect.width, 8.0),
-                    Color::WHITE,
+                    Rect::new(rect.x, rect.bottom() - 10.0, rect.width, 11.0),
+                    colors.active,
+                    full,
+                );
+            } else if hovered {
+                canvas.fill_round(*rect, colors.hover, 10.0, full);
+            } else if index > 0 && index != self.tabs.active && index - 1 != self.tabs.active {
+                canvas.fill(
+                    Rect::new(rect.x, rect.y + (rect.height - 20.0) / 2.0, 1.0, 20.0),
+                    colors.hover,
                     full,
                 );
             }
-            let title = {
-                let page = &self.tabs.pages[index];
-                if page.title.is_empty() {
+            if let Some(group) = page.group {
+                let color = GROUP_COLORS[group as usize % GROUP_COLORS.len()];
+                canvas.fill(
+                    Rect::new(rect.x + 8.0, rect.bottom() - 3.0, rect.width - 16.0, 3.0),
+                    color,
+                    full,
+                );
+            }
+            let favicon = Rect::new(
+                rect.x + 8.0,
+                rect.y + (rect.height - 16.0) / 2.0,
+                16.0,
+                16.0,
+            );
+            if page.status.starts_with("Loading") {
+                self.paint_throbber(canvas, favicon, colors);
+            } else {
+                let letter = page
+                    .title
+                    .chars()
+                    .next()
+                    .or_else(|| page.current.host.chars().next())
+                    .unwrap_or('M');
+                canvas.fill_circle(favicon.x + 8.0, favicon.y + 8.0, 8.0, colors.chip, full);
+                let text = letter.to_string();
+                let width = self.fonts.width(&text, 11.0, true, false);
+                canvas.text(
+                    &self.fonts,
+                    favicon.x + (16.0 - width) / 2.0,
+                    favicon.y + 12.0,
+                    &text,
+                    11.0,
+                    colors.ink,
+                    true,
+                    false,
+                    false,
+                    favicon,
+                );
+            }
+            if !page.pinned {
+                let title = if page.title.is_empty() {
                     page.current.to_display()
                 } else {
                     page.title.clone()
-                }
+                };
+                let color = if active { colors.ink } else { colors.muted };
+                let text_right = if strip.closes[index].width > 0.0 && (active || hovered) {
+                    strip.closes[index].x - 4.0
+                } else {
+                    rect.right() - 8.0
+                };
+                canvas.text(
+                    &self.fonts,
+                    rect.x + 28.0,
+                    rect.y + 22.0,
+                    &title,
+                    13.0,
+                    color,
+                    active,
+                    false,
+                    false,
+                    Rect::new(
+                        rect.x + 28.0,
+                        rect.y,
+                        (text_right - rect.x - 28.0).max(1.0),
+                        rect.height,
+                    ),
+                );
+            }
+            if (active || hovered) && !page.pinned {
+                icons::draw(
+                    canvas,
+                    icons::Kind::CloseTab,
+                    strip.closes[index],
+                    colors.icon,
+                    full,
+                );
+            }
+        }
+        self.paint_round_icon(canvas, strip.plus, icons::Kind::Add, colors);
+        self.paint_round_icon(canvas, strip.search, icons::Kind::Search, colors);
+        self.paint_caption(canvas, colors);
+    }
+
+    fn paint_caption(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
+        let [minimize, maximize, close] = caption_rects(canvas.width as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        for (rect, kind) in [
+            (minimize, icons::Kind::Minimize),
+            (maximize, icons::Kind::Maximize),
+            (close, icons::Kind::Close),
+        ] {
+            let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
+            if hovered {
+                let fill = if kind == icons::Kind::Close {
+                    Color::rgb(196, 43, 28)
+                } else {
+                    colors.hover
+                };
+                canvas.fill(rect, fill, full);
+            }
+            let glyph = Rect::new(
+                rect.x + (rect.width - 16.0) / 2.0,
+                rect.y + (rect.height - 16.0) / 2.0,
+                16.0,
+                16.0,
+            );
+            let ink = if hovered && kind == icons::Kind::Close {
+                Color::WHITE
+            } else {
+                colors.icon
             };
-            let color = if active { INK } else { ICON };
-            canvas.text(
-                &self.fonts,
-                rect.x + 12.0,
-                rect.y + 18.0,
-                &title,
-                13.0,
-                color,
-                active,
-                false,
-                false,
-                *rect,
+            icons::draw(canvas, kind, glyph, ink, full);
+        }
+    }
+
+    fn paint_round_icon(
+        &self,
+        canvas: &mut Canvas<'_>,
+        rect: Rect,
+        kind: icons::Kind,
+        colors: &ChromeColors,
+    ) {
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
+        canvas.fill_round(
+            rect,
+            if hovered { colors.hover } else { colors.plus },
+            rect.height / 2.0,
+            full,
+        );
+        let glyph = Rect::new(
+            rect.x + (rect.width - 16.0) / 2.0,
+            rect.y + (rect.height - 16.0) / 2.0,
+            16.0,
+            16.0,
+        );
+        icons::draw(canvas, kind, glyph, colors.icon, full);
+    }
+
+    fn paint_toolbar_button(
+        &self,
+        canvas: &mut Canvas<'_>,
+        rect: Rect,
+        kind: icons::Kind,
+        enabled: bool,
+        colors: &ChromeColors,
+    ) {
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let hovered = enabled && self.hovering && rect.contains(self.cursor.0, self.cursor.1);
+        let pressed = self.ripple.is_some_and(|(x, y)| rect.contains(x, y));
+        if hovered || pressed {
+            canvas.fill_circle(
+                rect.x + rect.width / 2.0,
+                rect.y + rect.height / 2.0,
+                16.0,
+                if pressed {
+                    Color::rgba(31, 31, 31, 36)
+                } else {
+                    Color::rgba(31, 31, 31, 18)
+                },
+                full,
             );
         }
-        canvas.fill_round(plus, CHIP, 8.0, full);
-        canvas.text(
-            &self.fonts,
-            plus.x + 8.0,
-            plus.y + 18.0,
-            "+",
+        let color = if !enabled {
+            colors.icon_disabled
+        } else if kind == icons::Kind::StarFilled {
+            STAR
+        } else {
+            colors.icon
+        };
+        let glyph = Rect::new(
+            rect.x + (rect.width - 16.0) / 2.0,
+            rect.y + (rect.height - 16.0) / 2.0,
             16.0,
-            ICON,
-            true,
-            false,
-            false,
-            plus,
+            16.0,
+        );
+        icons::draw(canvas, kind, glyph, color, full);
+    }
+
+    fn paint_more(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
+        if hovered {
+            canvas.fill_circle(
+                rect.x + rect.width / 2.0,
+                rect.y + rect.height / 2.0,
+                16.0,
+                Color::rgba(31, 31, 31, 18),
+                full,
+            );
+        }
+        let cx = rect.x + rect.width / 2.0;
+        let cy = rect.y + rect.height / 2.0;
+        for offset in [-5.0, 0.0, 5.0] {
+            canvas.fill_circle(cx, cy + offset, 1.6, colors.icon, full);
+        }
+    }
+
+    fn paint_extensions(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
+        if hovered {
+            canvas.fill_circle(
+                rect.x + rect.width / 2.0,
+                rect.y + rect.height / 2.0,
+                16.0,
+                Color::rgba(31, 31, 31, 18),
+                full,
+            );
+        }
+        let glyph = Rect::new(
+            rect.x + (rect.width - 16.0) / 2.0,
+            rect.y + (rect.height - 16.0) / 2.0,
+            16.0,
+            16.0,
+        );
+        canvas.fill_round(glyph, colors.icon, 3.0, full);
+        canvas.fill_round(
+            Rect::new(glyph.x + 3.0, glyph.y + 3.0, 10.0, 10.0),
+            colors.toolbar,
+            2.0,
+            full,
+        );
+        canvas.fill(
+            Rect::new(glyph.x + 7.0, glyph.y + 3.0, 2.0, 10.0),
+            colors.icon,
+            full,
+        );
+        canvas.fill(
+            Rect::new(glyph.x + 3.0, glyph.y + 7.0, 10.0, 2.0),
+            colors.icon,
+            full,
         );
     }
 
-    fn paint_button(&self, canvas: &mut Canvas<'_>, rect: Rect, label: &str, enabled: bool) {
-        let size = 16.0;
-        let width = self.fonts.width(label, size, true, false);
-        let color = if !enabled {
-            ICON_DISABLED
-        } else if label == "★" && self.is_bookmarked() {
-            STAR
-        } else {
-            ICON
-        };
+    fn paint_profile(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let cx = rect.x + rect.width / 2.0;
+        let cy = rect.y + rect.height / 2.0;
+        canvas.fill_circle(cx, cy, 12.0, colors.chip, full);
+        canvas.fill_circle(cx, cy, 11.0, colors.focus, full);
+        let width = self.fonts.width("M", 14.0, true, false);
         canvas.text(
             &self.fonts,
-            rect.x + (rect.width - width) / 2.0,
-            rect.y + 21.0,
-            label,
-            size,
-            color,
+            cx - width / 2.0,
+            cy + 5.0,
+            "M",
+            14.0,
+            Color::WHITE,
             true,
             false,
             false,
             rect,
         );
+    }
+
+    fn paint_chip(&self, canvas: &mut Canvas<'_>, rect: Rect, chip: &Chip, colors: &ChromeColors) {
+        if rect.width <= 0.0 {
+            return;
+        }
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        match chip {
+            Chip::Hidden => {}
+            Chip::Lock => {
+                icons::draw(canvas, icons::Kind::Lock, rect, colors.icon, full);
+            }
+            Chip::NotSecure => {
+                canvas.text(
+                    &self.fonts,
+                    rect.x,
+                    rect.y + rect.height - 8.0,
+                    "Not secure",
+                    13.0,
+                    colors.muted,
+                    false,
+                    false,
+                    false,
+                    rect,
+                );
+            }
+            Chip::Name => {
+                canvas.text(
+                    &self.fonts,
+                    rect.x,
+                    rect.y + rect.height - 8.0,
+                    "Mithu",
+                    13.0,
+                    colors.ink,
+                    true,
+                    false,
+                    false,
+                    rect,
+                );
+            }
+        }
+    }
+
+    fn paint_throbber(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let cx = rect.x + rect.width / 2.0;
+        let cy = rect.y + rect.height / 2.0;
+        for index in 0..8 {
+            let angle = index as f32 / 8.0 * std::f32::consts::TAU;
+            let color = if index < 3 {
+                colors.focus
+            } else {
+                colors.icon_disabled
+            };
+            canvas.fill_circle(
+                cx + angle.cos() * 5.0,
+                cy + angle.sin() * 5.0,
+                1.3,
+                color,
+                full,
+            );
+        }
+    }
+
+    fn paint_shelf(&self, canvas: &mut Canvas<'_>, shelf: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        canvas.fill_round(shelf, colors.menu, 12.0, full);
+        canvas.fill(
+            Rect::new(shelf.x, shelf.y, shelf.width, 1.0),
+            colors.chip,
+            full,
+        );
+        let glyph = Rect::new(
+            shelf.x + 12.0,
+            shelf.y + (shelf.height - 16.0) / 2.0,
+            16.0,
+            16.0,
+        );
+        icons::draw(canvas, icons::Kind::Download, glyph, colors.icon, full);
+        let (name, url) = self.downloads.last().cloned().unwrap_or_default();
+        canvas.text(
+            &self.fonts,
+            shelf.x + 36.0,
+            shelf.y + 20.0,
+            &name,
+            13.0,
+            colors.ink,
+            true,
+            false,
+            false,
+            shelf,
+        );
+        canvas.text(
+            &self.fonts,
+            shelf.x + 36.0,
+            shelf.y + 36.0,
+            &url,
+            12.0,
+            colors.muted,
+            false,
+            false,
+            false,
+            Rect::new(shelf.x + 36.0, shelf.y, shelf.width - 48.0, shelf.height),
+        );
+    }
+
+    fn paint_tooltip(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
+        if !self.hovering || self.menu.is_some() {
+            return;
+        }
+        let Some(label) = self.tooltip_label() else {
+            return;
+        };
+        let width = self.fonts.width(label, 12.0, false, false) + 16.0;
+        let height = 24.0;
+        let mut x = self.cursor.0 - width / 2.0;
+        let mut y = self.cursor.1 + 18.0;
+        let limit = canvas.width as f32;
+        x = x.clamp(4.0, (limit - width - 4.0).max(4.0));
+        if y + height > canvas.height as f32 - 4.0 {
+            y = self.cursor.1 - height - 8.0;
+        }
+        let rect = Rect::new(x, y, width, height);
+        let full = Rect::new(0.0, 0.0, limit, canvas.height as f32);
+        canvas.fill_round(rect, colors.tooltip_bg, 4.0, full);
+        canvas.text(
+            &self.fonts,
+            rect.x + 8.0,
+            rect.y + 16.0,
+            label,
+            12.0,
+            colors.tooltip_ink,
+            false,
+            false,
+            false,
+            rect,
+        );
+    }
+
+    fn tooltip_label(&self) -> Option<&'static str> {
+        let (x, y) = self.cursor;
+        let strip = self.tab_strip();
+        if strip.plus.contains(x, y) {
+            return Some("New tab (Ctrl+T)");
+        }
+        if strip.search.contains(x, y) {
+            return Some("Search tabs");
+        }
+        let bar = toolbar(self.viewport_w);
+        if bar.back.contains(x, y) {
+            return Some("Back (Alt+Left)");
+        }
+        if bar.forward.contains(x, y) {
+            return Some("Forward (Alt+Right)");
+        }
+        if bar.reload.contains(x, y) {
+            return Some("Reload (Ctrl+R)");
+        }
+        if bar.home.contains(x, y) {
+            return Some("Home");
+        }
+        if bar.star.contains(x, y) {
+            return Some("Bookmark this tab (Ctrl+D)");
+        }
+        if bar.extensions.contains(x, y) {
+            return Some("Extensions");
+        }
+        if bar.profile.contains(x, y) {
+            return Some("Profile");
+        }
+        if bar.menu.contains(x, y) {
+            return Some("Customize and control Mithu");
+        }
+        None
+    }
+
+    fn shelf_rect(&self) -> Option<Rect> {
+        if self.downloads.is_empty() {
+            return None;
+        }
+        let bottom = if self.page().find_open {
+            self.viewport_h - STATUS_H - FIND_H
+        } else {
+            self.viewport_h - STATUS_H
+        };
+        Some(Rect::new(8.0, bottom - 52.0, self.viewport_w - 16.0, 48.0))
+    }
+
+    fn tab_strip(&self) -> TabStrip {
+        let pinned: Vec<bool> = self.tabs.pages.iter().map(|page| page.pinned).collect();
+        tab_layout(self.viewport_w, &pinned)
     }
 }
 
@@ -1956,20 +2772,76 @@ fn collect_runs(box_: &mithu_layout::LayoutBox, runs: &mut Vec<TextRun>) {
     }
 }
 
+struct TabStrip {
+    tabs: Vec<Rect>,
+    closes: Vec<Rect>,
+    plus: Rect,
+    search: Rect,
+}
+
+#[cfg(test)]
 fn tab_rects(width: f32, count: usize) -> (Vec<Rect>, Rect) {
-    let count = count.max(1) as f32;
-    let available = (width - 52.0).max(80.0);
-    let tab_w = (available / count - 4.0).clamp(48.0, 180.0);
-    let rects = (0..count as usize)
-        .map(|index| Rect::new(8.0 + index as f32 * (tab_w + 4.0), 6.0, tab_w, TAB_H - 12.0))
-        .collect();
-    let plus = Rect::new(8.0 + count * (tab_w + 4.0), 6.0, 28.0, TAB_H - 12.0);
-    (rects, plus)
+    let pinned = vec![false; count.max(1)];
+    let strip = tab_layout(width, &pinned);
+    (strip.tabs, strip.plus)
+}
+
+fn tab_layout(width: f32, pinned: &[bool]) -> TabStrip {
+    let count = pinned.len().max(1);
+    let pinned_flags = if pinned.is_empty() {
+        vec![false]
+    } else {
+        pinned.to_vec()
+    };
+    let y = 6.0;
+    let height = 35.0;
+    let reserved = 8.0 + 28.0 + 4.0 + 28.0 + 12.0 + CAPTION_W * 3.0;
+    let available = (width - reserved).max(80.0);
+    let pinned_count = pinned_flags.iter().filter(|flag| **flag).count() as f32;
+    let pinned_w = 46.0;
+    let normal_count = (count as f32 - pinned_count).max(0.0);
+    let rest = (available - pinned_count * pinned_w).max(48.0);
+    let normal_w = if normal_count == 0.0 {
+        0.0
+    } else {
+        (rest / normal_count).clamp(48.0, 240.0)
+    };
+    let mut x = 8.0;
+    let mut tabs = Vec::new();
+    let mut closes = Vec::new();
+    for flag in &pinned_flags {
+        let tab_w = if *flag { pinned_w } else { normal_w };
+        let rect = Rect::new(x, y, tab_w, height);
+        let close = Rect::new(
+            rect.right() - 8.0 - 16.0,
+            rect.y + (rect.height - 16.0) / 2.0,
+            16.0,
+            16.0,
+        );
+        tabs.push(rect);
+        closes.push(close);
+        x += tab_w;
+    }
+    let plus = Rect::new(x + 6.0, y + 3.0, 28.0, 28.0);
+    let search = Rect::new(plus.right() + 4.0, plus.y, 28.0, 28.0);
+    TabStrip {
+        tabs,
+        closes,
+        plus,
+        search,
+    }
 }
 
 struct Suggestion {
     label: String,
     url: Url,
+    kind: SuggestionKind,
+}
+
+enum SuggestionKind {
+    Url,
+    History,
+    Bookmark,
 }
 
 #[derive(Clone)]
@@ -1984,6 +2856,19 @@ enum MenuAction {
     Bookmarks,
     History,
     Downloads,
+    NewWindow,
+    Find,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    Settings,
+    Dark,
+    CloseTab(usize),
+    Pin(usize),
+    Group(usize),
+    Select(usize),
+    Reopen,
+    Dismiss,
 }
 
 #[derive(Clone)]
@@ -1993,8 +2878,24 @@ struct Menu {
     items: Vec<(String, MenuAction)>,
 }
 
+fn menu_icon(action: &MenuAction) -> Option<icons::Kind> {
+    match action {
+        MenuAction::NewTabPage | MenuAction::NewWindow => Some(icons::Kind::Add),
+        MenuAction::Back => Some(icons::Kind::Back),
+        MenuAction::Forward => Some(icons::Kind::Forward),
+        MenuAction::Reload => Some(icons::Kind::Reload),
+        MenuAction::Bookmark | MenuAction::Bookmarks => Some(icons::Kind::Star),
+        MenuAction::History => Some(icons::Kind::History),
+        MenuAction::Downloads => Some(icons::Kind::Download),
+        MenuAction::Find => Some(icons::Kind::Find),
+        MenuAction::Settings => Some(icons::Kind::Settings),
+        MenuAction::CloseTab(_) => Some(icons::Kind::CloseTab),
+        _ => None,
+    }
+}
+
 fn menu_bounds(menu: &Menu, width: f32, height: f32) -> Rect {
-    let menu_w = 220.0;
+    let menu_w = 280.0;
     let menu_h = (menu.items.len().max(1) as f32) * 32.0;
     let x = menu.x.min((width - menu_w - 4.0).max(4.0)).max(4.0);
     let y = menu.y.min((height - menu_h - 4.0).max(4.0)).max(4.0);
@@ -2012,26 +2913,67 @@ fn suggestion_panel(width: f32, count: usize) -> Rect {
 }
 
 fn toolbar_y() -> f32 {
-    TAB_H + (TOOLBAR_H - 32.0) / 2.0
+    TAB_H + (TOOLBAR_H - BTN) / 2.0
+}
+
+struct Toolbar {
+    back: Rect,
+    forward: Rect,
+    reload: Rect,
+    home: Rect,
+    address: Rect,
+    star: Rect,
+    extensions: Rect,
+    profile: Rect,
+    menu: Rect,
+}
+
+fn toolbar(width: f32) -> Toolbar {
+    let y = toolbar_y();
+    let mut x = 6.0;
+    let back = Rect::new(x, y, BTN, BTN);
+    x += BTN + 4.0;
+    let forward = Rect::new(x, y, BTN, BTN);
+    x += BTN + 4.0;
+    let reload = Rect::new(x, y, BTN, BTN);
+    x += BTN + 4.0;
+    let home = Rect::new(x, y, BTN, BTN);
+    x += BTN + 9.0;
+    let trailing = BTN * 3.0 + 4.0 * 2.0 + 8.0;
+    let address_w = (width - x - trailing).max(40.0);
+    let address = Rect::new(x, y, address_w, BTN);
+    let star = Rect::new(address.right() - BTN - 2.0, y, BTN, BTN);
+    let mut right = address.right() + 8.0;
+    let extensions = Rect::new(right, y, BTN, BTN);
+    right += BTN + 4.0;
+    let profile = Rect::new(right, y, BTN, BTN);
+    right += BTN + 4.0;
+    let menu = Rect::new(right, y, BTN, BTN);
+    Toolbar {
+        back,
+        forward,
+        reload,
+        home,
+        address,
+        star,
+        extensions,
+        profile,
+        menu,
+    }
 }
 
 fn menu_button(width: f32) -> Rect {
-    Rect::new(width - 44.0, toolbar_y(), 32.0, 32.0)
+    toolbar(width).menu
 }
 
+#[cfg(test)]
 fn bookmark_buttons(width: f32) -> (Rect, Rect) {
-    let (_, _, _, address) = chrome_rects(width);
-    let star = Rect::new(
-        (address.right() - 36.0).max(address.x),
-        address.y,
-        32.0,
-        32.0,
-    );
-    (star, menu_button(width))
+    let bar = toolbar(width);
+    (bar.star, bar.menu)
 }
 
 fn bookmark_slots(width: f32, count: usize) -> Vec<Rect> {
-    let y = TAB_H + TOOLBAR_H + 4.0;
+    let y = TAB_H + TOOLBAR_H + 3.0;
     let mut x = 8.0;
     let mut slots = Vec::new();
     for _ in 0..count.min(12) {
@@ -2039,10 +2981,53 @@ fn bookmark_slots(width: f32, count: usize) -> Vec<Rect> {
         if x + slot_w > width - 8.0 {
             break;
         }
-        slots.push(Rect::new(x, y, slot_w, BOOKMARK_BAR_H - 8.0));
+        slots.push(Rect::new(x, y, slot_w, 28.0));
         x += slot_w + 8.0;
     }
     slots
+}
+
+fn caption_rects(width: f32) -> [Rect; 3] {
+    let close = Rect::new(width - CAPTION_W, 0.0, CAPTION_W, TAB_H);
+    let maximize = Rect::new(width - CAPTION_W * 2.0, 0.0, CAPTION_W, TAB_H);
+    let minimize = Rect::new(width - CAPTION_W * 3.0, 0.0, CAPTION_W, TAB_H);
+    [minimize, maximize, close]
+}
+
+enum Chip {
+    Lock,
+    NotSecure,
+    Name,
+    Hidden,
+}
+
+fn security_chip(url: &Url, focused: bool) -> Chip {
+    if focused {
+        return Chip::Hidden;
+    }
+    match url.scheme.as_str() {
+        "https" => Chip::Lock,
+        "http" => Chip::NotSecure,
+        _ => Chip::Name,
+    }
+}
+
+fn chip_rect(address: Rect, chip: &Chip, fonts: &mithu_text::FontBook) -> Rect {
+    let width = match chip {
+        Chip::Hidden => {
+            return Rect::new(address.x, address.y, 0.0, 0.0);
+        }
+        Chip::Lock => 16.0,
+        Chip::NotSecure => fonts.width("Not secure", 13.0, false, false),
+        Chip::Name => fonts.width("Mithu", 13.0, true, false),
+    };
+    let height = 16.0;
+    Rect::new(
+        address.x + 12.0,
+        address.y + (address.height - height) / 2.0,
+        width,
+        height,
+    )
 }
 
 fn bookmark_panel(width: f32, count: usize) -> Rect {
@@ -2052,16 +3037,8 @@ fn bookmark_panel(width: f32, count: usize) -> Rect {
 }
 
 fn chrome_rects(width: f32) -> (Rect, Rect, Rect, Rect) {
-    let y = toolbar_y();
-    let size = 32.0;
-    let address_x = 120.0;
-    let address_w = (width - address_x - 52.0).max(40.0);
-    (
-        Rect::new(8.0, y, size, size),
-        Rect::new(40.0, y, size, size),
-        Rect::new(72.0, y, size, size),
-        Rect::new(address_x, y, address_w, size),
-    )
+    let bar = toolbar(width);
+    (bar.back, bar.forward, bar.reload, bar.address)
 }
 
 fn retrieve(url: &Url, bypass_cache: bool, initiator: Option<&str>) -> Result<Fetched, String> {
@@ -2069,6 +3046,7 @@ fn retrieve(url: &Url, bypass_cache: bool, initiator: Option<&str>) -> Result<Fe
         "about" => {
             let (html, status) = match url.path.as_str() {
                 "mithu" | "home" | "" => (home_page(), "Mithu".to_string()),
+                "settings" => (settings_page(), "Settings".to_string()),
                 "blank" => ("<!DOCTYPE html><html><head><title>about:blank</title></head><body></body></html>".to_string(), "about:blank".to_string()),
                 other => (error_page(url, &format!("unknown about page {other}")), format!("unknown about:{other}")),
             };
@@ -2365,6 +3343,47 @@ fn download_name(url: &Url, mime: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+fn settings_page() -> String {
+    r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Settings</title>
+<style>
+  body { margin: 0; background: #f2f2f2; color: #1f1f1f; font-family: sans-serif; }
+  main { max-width: 720px; margin: 24px auto; background: #fff; border-radius: 16px; padding: 8px 24px 24px; }
+  h1 { font-size: 28px; }
+  section { border-top: 1px solid #e3e3e3; padding: 16px 0; }
+  h2 { font-size: 16px; margin: 0 0 8px; }
+  p { margin: 0; color: #5e5e5e; }
+  a { color: #0b57d0; text-decoration: none; margin-right: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Settings</h1>
+  <section>
+    <h2>Appearance</h2>
+    <p>Light and dark follow the app menu. The frame uses the Chrome Refresh header color.</p>
+  </section>
+  <section>
+    <h2>Search</h2>
+    <p>Words typed in the address bar open DuckDuckGo. Hosts open directly.</p>
+  </section>
+  <section>
+    <h2>Privacy</h2>
+    <p>Cookies and the HTTP cache stay in this Mithu profile.</p>
+  </section>
+  <section>
+    <h2>Shortcuts</h2>
+    <p><a href="about:history">History</a> · <a href="about:downloads">Downloads</a> · <a href="about:mithu">New tab</a></p>
+  </section>
+</main>
+</body>
+</html>"#
+        .to_string()
+}
+
 fn history_page(visits: &[(String, String)]) -> String {
     let mut items = String::new();
     for (title, url) in visits.iter().rev().take(40) {
@@ -2379,7 +3398,7 @@ fn history_page(visits: &[(String, String)]) -> String {
         items.push_str("<li>No pages yet.</li>");
     }
     format!(
-        "<!DOCTYPE html><html><head><title>History</title><style>body{{font-family:sans-serif;margin:24px;color:#202124}}a{{color:#1a73e8;text-decoration:none}}.url{{color:#5f6368;font-size:13px}}</style></head><body><h1>History</h1><ul>{items}</ul></body></html>"
+        "<!DOCTYPE html><html><head><title>History</title><style>body{{font-family:sans-serif;margin:24px;color:#1f1f1f;background:#fff}}a{{color:#0b57d0;text-decoration:none}}.url{{color:#5e5e5e;font-size:13px}}</style></head><body><h1>History</h1><ul>{items}</ul></body></html>"
     )
 }
 
@@ -2396,7 +3415,7 @@ fn downloads_page(downloads: &[(String, String)]) -> String {
         items.push_str("<li>No downloads yet.</li>");
     }
     format!(
-        "<!DOCTYPE html><html><head><title>Downloads</title><style>body{{font-family:sans-serif;margin:24px;color:#202124}}.url{{color:#5f6368;font-size:13px}}</style></head><body><h1>Downloads</h1><ul>{items}</ul></body></html>"
+        "<!DOCTYPE html><html><head><title>Downloads</title><style>body{{font-family:sans-serif;margin:24px;color:#1f1f1f;background:#fff}}.url{{color:#5e5e5e;font-size:13px}}</style></head><body><h1>Downloads</h1><ul>{items}</ul></body></html>"
     )
 }
 
@@ -2407,14 +3426,14 @@ fn home_page() -> String {
 <meta charset="utf-8">
 <title>New Tab</title>
 <style>
-  body { margin: 0; background: #f8f9fa; color: #202124; text-align: center; }
-  .wrap { padding-top: 72px; }
-  h1 { color: #202124; font-size: 44px; margin-bottom: 8px; }
-  .sub { color: #5f6368; font-size: 16px; }
-  .search { width: 520px; margin-left: auto; margin-right: auto; background: #ffffff; border: 1px solid #dfe1e5; border-radius: 24px; padding: 12px 20px; color: #5f6368; margin-top: 28px; text-align: left; }
+  body { margin: 0; background: #f2f2f2; color: #1f1f1f; text-align: center; }
+  .wrap { padding-top: 88px; }
+  h1 { color: #1f1f1f; font-size: 44px; margin-bottom: 8px; letter-spacing: -1px; }
+  .sub { color: #5e5e5e; font-size: 16px; }
+  .search { width: 560px; margin-left: auto; margin-right: auto; background: #ffffff; border: 1px solid #c7c7c7; border-radius: 24px; padding: 14px 20px; color: #5e5e5e; margin-top: 28px; text-align: left; }
   .row { display: flex; justify-content: center; gap: 16px; margin-top: 36px; }
-  .tile { width: 96px; background: #ffffff; border: 1px solid #dadce0; border-radius: 8px; padding: 12px; }
-  a { color: #1a73e8; text-decoration: none; }
+  .tile { width: 112px; background: #ffffff; border: 1px solid #e3e3e3; border-radius: 16px; padding: 16px; }
+  a { color: #0b57d0; text-decoration: none; }
 </style>
 </head>
 <body>
@@ -2753,6 +3772,46 @@ mod tests {
                 .text_content(browser.page().document.root)
                 .contains("about:blank"),
             "history should list the blank page"
+        );
+    }
+
+    #[test]
+    fn toolbar_icon_is_vector_ink_and_the_close_button_removes_a_tab() {
+        let mut browser = Browser::new();
+        browser.navigate("about:blank");
+        let frame = browser.render(800.0, 600.0);
+        let (back, _, _, _) = chrome_rects(800.0);
+        let x = (back.x + back.width / 2.0) as usize;
+        let y = (back.y + back.height / 2.0) as usize;
+        assert_ne!(
+            frame[y * 800 + x],
+            TOOLBAR.to_u32(),
+            "the back arrow should paint inside its button"
+        );
+        browser.new_tab();
+        let strip = browser.tab_strip();
+        let close = strip.closes[1];
+        browser.pointer_move(close.x + 4.0, close.y + 4.0);
+        browser.pointer_down(close.x + 4.0, close.y + 4.0);
+        assert_eq!(browser.tab_count(), 1);
+        browser.reopen_closed_tab();
+        assert_eq!(browser.tab_count(), 2);
+    }
+
+    #[test]
+    fn dark_theme_and_settings_page_follow_the_menu() {
+        let mut browser = Browser::new();
+        browser.toggle_dark();
+        let frame = browser.render(800.0, 600.0);
+        assert_ne!(frame[4 * 800 + 4], TAB_STRIP.to_u32());
+        browser.navigate("about:settings");
+        assert_eq!(browser.title(), "Settings");
+        assert!(
+            browser
+                .page()
+                .document
+                .text_content(browser.page().document.root)
+                .contains("Appearance")
         );
     }
 

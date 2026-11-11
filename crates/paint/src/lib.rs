@@ -58,6 +58,66 @@ impl Canvas<'_> {
         }
     }
 
+    /// Nonzero-winding fill. Each contour is closed from its last point to its first.
+    pub fn fill_contours(&mut self, contours: &[Vec<(f32, f32)>], color: Color, clip: Rect) {
+        if color.a == 0 || contours.is_empty() {
+            return;
+        }
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for contour in contours {
+            for (x, y) in contour {
+                min_x = min_x.min(*x);
+                min_y = min_y.min(*y);
+                max_x = max_x.max(*x);
+                max_y = max_y.max(*y);
+            }
+        }
+        if max_x <= min_x || max_y <= min_y {
+            return;
+        }
+        let bounds = Rect::new(min_x, min_y, max_x - min_x, max_y - min_y);
+        let Some(rect) = intersect(bounds, clip) else {
+            return;
+        };
+        let x0 = rect.x.floor().max(0.0) as i32;
+        let y0 = rect.y.floor().max(0.0) as i32;
+        let x1 = rect.right().ceil().min(self.width as f32) as i32;
+        let y1 = rect.bottom().ceil().min(self.height as f32) as i32;
+        let stride = self.width as usize;
+        for y in y0..y1 {
+            let row = y as usize * stride;
+            for x in x0..x1 {
+                let mut hits = 0;
+                for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                    if winding(x as f32 + ox, y as f32 + oy, contours) != 0 {
+                        hits += 1;
+                    }
+                }
+                if hits == 0 {
+                    continue;
+                }
+                let index = row + x as usize;
+                let coverage = (hits * 255 / 4) as u8;
+                self.pixels[index] = blend(self.pixels[index], color, coverage);
+            }
+        }
+    }
+
+    pub fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color, clip: Rect) {
+        if radius <= 0.0 || color.a == 0 {
+            return;
+        }
+        self.fill_round(
+            Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0),
+            color,
+            radius,
+            clip,
+        );
+    }
+
     pub fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect) {
         if dest.width <= 0.0 || dest.height <= 0.0 || bitmap.width == 0 || bitmap.height == 0 {
             return;
@@ -349,6 +409,27 @@ fn inside_round(x: i32, y: i32, rect: Rect, radius: f32) -> bool {
     let dx = px - cx;
     let dy = py - cy;
     dx * dx + dy * dy <= radius * radius
+}
+
+fn winding(px: f32, py: f32, contours: &[Vec<(f32, f32)>]) -> i32 {
+    let mut wind = 0;
+    for contour in contours {
+        let count = contour.len();
+        if count < 2 {
+            continue;
+        }
+        for index in 0..count {
+            let (x0, y0) = contour[index];
+            let (x1, y1) = contour[(index + 1) % count];
+            if (y0 <= py && y1 > py) || (y1 <= py && y0 > py) {
+                let t = (py - y0) / (y1 - y0);
+                if x0 + t * (x1 - x0) > px {
+                    wind += if y1 > y0 { 1 } else { -1 };
+                }
+            }
+        }
+    }
+    wind
 }
 
 fn intersect(rect: Rect, clip: Rect) -> Option<Rect> {

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mithu_shell::Browser;
+use mithu_shell::{Browser, FrameHit};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -130,6 +130,7 @@ impl ApplicationHandler for App {
         }
         let attributes = Window::default_attributes()
             .with_title("Mithu")
+            .with_decorations(false)
             .with_inner_size(LogicalSize::new(1200.0, 800.0));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -187,7 +188,25 @@ impl ApplicationHandler for App {
                     self.sync_title();
                     self.request_redraw();
                 } else if button == MouseButton::Left && state == ElementState::Pressed {
-                    self.browser.pointer_down(self.cursor.0, self.cursor.1);
+                    match self.browser.frame_hit(self.cursor.0, self.cursor.1) {
+                        Some(FrameHit::Close) => event_loop.exit(),
+                        Some(FrameHit::Minimize) => {
+                            if let Some(window) = &self.window {
+                                let _ = window.set_minimized(true);
+                            }
+                        }
+                        Some(FrameHit::Maximize) => {
+                            if let Some(window) = &self.window {
+                                window.set_maximized(!window.is_maximized());
+                            }
+                        }
+                        Some(FrameHit::Drag) => {
+                            if let Some(window) = &self.window {
+                                let _ = window.drag_window();
+                            }
+                        }
+                        None => self.browser.pointer_down(self.cursor.0, self.cursor.1),
+                    }
                     self.sync_title();
                     self.request_redraw();
                 } else if button == MouseButton::Left && state == ElementState::Released {
@@ -254,9 +273,26 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::PageUp) if !focused => self.browser.scroll_page(-1.0),
                     Key::Named(NamedKey::Home) if !focused => self.browser.scroll_by(-1.0e9),
                     Key::Named(NamedKey::End) if !focused => self.browser.scroll_by(1.0e9),
+                    Key::Named(NamedKey::Tab) if ctrl && shift => self.browser.previous_tab(),
                     Key::Named(NamedKey::Tab) if ctrl => self.browser.next_tab(),
+                    Key::Named(NamedKey::F5) => self.browser.reload(),
+                    Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("t") => {
+                        self.browser.reopen_closed_tab()
+                    }
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("t") => {
                         self.browser.new_tab()
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("n") => {
+                        self.browser.new_tab()
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("h") => {
+                        self.browser.navigate("about:history")
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("j") => {
+                        self.browser.navigate("about:downloads")
+                    }
+                    Key::Character(text) if ctrl && text == "," => {
+                        self.browser.navigate("about:settings")
                     }
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("w") => {
                         self.browser.close_tab()

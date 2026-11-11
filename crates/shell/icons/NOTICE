@@ -1,0 +1,18 @@
+Chromium vector icons
+======================
+
+The `.icon` files in this directory (except `maximize.icon`) are copied from the
+Chromium source tree:
+
+- `components/vector_icons/`
+- `chrome/app/vector_icons/`
+
+Copyright 2012-2026 The Chromium Authors. Use of this source code is governed
+by a BSD-style license that can be found at
+https://chromium.googlesource.com/chromium/src/+/main/LICENSE (BSD 3-Clause).
+
+They are stored as the original path text and rasterized by `src/icons.rs`.
+No Google or Chrome logos, wordmarks, or product images are included.
+
+`maximize.icon` is a geometric window glyph written for Mithu. It is not a
+Chromium asset.
