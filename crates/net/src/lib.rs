@@ -16,6 +16,7 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
 mod cache;
 mod cookies;
+mod http2;
 
 pub use cache::HttpCache;
 pub use cookies::{Cookie, CookieJar};
@@ -115,16 +116,55 @@ impl Response {
 }
 
 pub fn get(url: &Url) -> Result<Response, NetError> {
-    fetch("GET", url, None, &[], 0, CacheMode::Use)
+    fetch("GET", url, None, &[], 0, CacheMode::Use, None, true)
+}
+
+/// GET issued by a document. `initiator_host` is that document's host, so
+/// `SameSite` can tell a cross-site subresource from a same-site one.
+/// Top-level navigation from a page, so `SameSite=Lax` is sent and `Strict` is not
+/// when the initiator site differs.
+pub fn navigate_from(url: &Url, initiator_host: &str) -> Result<Response, NetError> {
+    fetch(
+        "GET",
+        url,
+        None,
+        &[],
+        0,
+        CacheMode::Use,
+        Some(initiator_host),
+        true,
+    )
+}
+
+pub fn get_from(url: &Url, initiator_host: &str) -> Result<Response, NetError> {
+    fetch(
+        "GET",
+        url,
+        None,
+        &[],
+        0,
+        CacheMode::Use,
+        Some(initiator_host),
+        false,
+    )
 }
 
 /// GET that ignores a fresh cache entry. The reload button uses this.
 pub fn reload(url: &Url) -> Result<Response, NetError> {
-    fetch("GET", url, None, &[], 0, CacheMode::Bypass)
+    fetch("GET", url, None, &[], 0, CacheMode::Bypass, None, true)
 }
 
 pub fn post(url: &Url, content_type: &str, body: &[u8]) -> Result<Response, NetError> {
-    fetch("POST", url, Some(content_type), body, 0, CacheMode::Bypass)
+    fetch(
+        "POST",
+        url,
+        Some(content_type),
+        body,
+        0,
+        CacheMode::Bypass,
+        None,
+        true,
+    )
 }
 
 fn fetch(
@@ -134,6 +174,8 @@ fn fetch(
     body: &[u8],
     redirects: u8,
     cache_mode: CacheMode,
+    initiator: Option<&str>,
+    top_level: bool,
 ) -> Result<Response, NetError> {
     if redirects > 8 {
         return Err(NetError::TooManyRedirects);
@@ -149,16 +191,36 @@ fn fetch(
         if let Some(hit) = with_profile(|profile| profile.cache.get(&key)) {
             return Ok(hit);
         }
+        if disk_ok(url)
+            && let Some(hit) = cache::load_disk(&disk_dir(), &key)
+        {
+            let stored = hit.clone();
+            if let Some(max_age) = cache::max_age(&stored.headers) {
+                with_profile(|profile| profile.cache.insert(key.clone(), stored, max_age));
+            }
+            return Ok(hit);
+        }
     }
-    let cookie = with_profile(|profile| profile.cookies.header_for(url));
+    let cookie = with_profile(|profile| {
+        profile.cookies.header_for_request(&cookies::CookieRequest {
+            url,
+            initiator_host: initiator,
+            top_level,
+            method,
+        })
+    });
     let port = url.effective_port().unwrap_or(80);
     let request = build_request(method, url, content_type, body, cookie.as_deref());
-    let raw = if url.scheme == "https" {
-        https_exchange(&url.host, port, &request)?
+    let mut parsed = if url.scheme == "https" {
+        https_exchange(&url.host, port, &request, method, url)?
     } else {
-        tcp_exchange(&url.host, port, &request)?
+        let raw = tcp_exchange(&url.host, port, &request)?;
+        parse_http_message(&raw)?
     };
-    let parsed = parse_http_message(&raw)?;
+    parsed.body = decode_body(&parsed.headers, parsed.body)?;
+    parsed
+        .headers
+        .retain(|(name, _)| name != "content-encoding");
     with_profile(|profile| profile.cookies.ingest(url, &parsed.headers));
     if matches!(parsed.status, 301 | 302 | 303 | 307 | 308)
         && let Some(location) = header(&parsed.headers, "location")
@@ -168,9 +230,27 @@ fn fetch(
             .map_err(|_| NetError::InvalidRedirect)?;
         let switch_to_get = matches!(parsed.status, 301 | 302 | 303);
         if switch_to_get {
-            return fetch("GET", &next, None, &[], redirects + 1, cache_mode);
+            return fetch(
+                "GET",
+                &next,
+                None,
+                &[],
+                redirects + 1,
+                cache_mode,
+                initiator,
+                top_level,
+            );
         }
-        return fetch(method, &next, content_type, body, redirects + 1, cache_mode);
+        return fetch(
+            method,
+            &next,
+            content_type,
+            body,
+            redirects + 1,
+            cache_mode,
+            initiator,
+            top_level,
+        );
     }
     let response = Response {
         status: parsed.status,
@@ -182,7 +262,10 @@ fn fetch(
         && response.status == 200
         && let Some(max_age) = cache::max_age(&response.headers)
     {
-        with_profile(|profile| profile.cache.insert(key, response.clone(), max_age));
+        with_profile(|profile| profile.cache.insert(key.clone(), response.clone(), max_age));
+        if disk_ok(url) {
+            cache::store_disk(&disk_dir(), &key, &response, max_age);
+        }
     }
     Ok(response)
 }
@@ -201,7 +284,7 @@ fn build_request(
         _ => url.host.clone(),
     };
     let mut head = format!(
-        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mithu/0.1 (Rust)\r\nAccept: text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mithu/0.1 (Rust)\r\nAccept: text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1\r\nAccept-Encoding: gzip, deflate, br\r\nConnection: close\r\n",
         url.request_target()
     );
     if let Some(content_type) = content_type {
@@ -227,16 +310,69 @@ fn tcp_exchange(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetErr
     exchange(&mut stream, request)
 }
 
-fn https_exchange(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetError> {
+fn https_exchange(
+    host: &str,
+    port: u16,
+    request: &[u8],
+    method: &str,
+    url: &Url,
+) -> Result<RawHttp, NetError> {
+    match https_once(host, port, request, method, url, true) {
+        Ok(message) => Ok(message),
+        Err(error) => {
+            if error_is_http2(&error) {
+                https_once(host, port, request, method, url, false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn error_is_http2(error: &NetError) -> bool {
+    matches!(error, NetError::Tls(message) if message.starts_with("http2"))
+}
+
+fn https_once(
+    host: &str,
+    port: u16,
+    request: &[u8],
+    method: &str,
+    url: &Url,
+    allow_h2: bool,
+) -> Result<RawHttp, NetError> {
     let mut socket = TcpStream::connect((host, port))?;
     prepare_socket(&socket);
-    let config = tls_config()?;
+    let config = tls_config(allow_h2)?;
     let name = ServerName::try_from(host.to_string())
         .map_err(|_| NetError::Tls(format!("invalid server name {host}")))?;
     let mut connection =
         ClientConnection::new(config, name).map_err(|error| NetError::Tls(error.to_string()))?;
+    while connection.is_handshaking() {
+        connection
+            .complete_io(&mut socket)
+            .map_err(|error| NetError::Tls(error.to_string()))?;
+    }
+    let alpn = connection.alpn_protocol().map(|protocol| protocol.to_vec());
     let mut tls = rustls::Stream::new(&mut connection, &mut socket);
-    exchange(&mut tls, request)
+    if allow_h2 && alpn.as_deref() == Some(b"h2".as_slice()) {
+        let cookie = header_value_from_request(request, "cookie");
+        return http2::roundtrip(&mut tls, method, url, cookie.as_deref())
+            .map(|message| RawHttp {
+                status: message.status,
+                headers: message.headers,
+                body: message.body,
+            })
+            .map_err(|error| NetError::Tls(format!("http2: {error}")));
+    }
+    let raw = exchange(&mut tls, request)?;
+    parse_http_message(&raw)
+}
+
+fn header_value_from_request(request: &[u8], name: &str) -> Option<String> {
+    let text = std::str::from_utf8(request).ok()?;
+    let head = text.split("\r\n\r\n").next()?;
+    header(&header_pairs(head), name).map(str::to_string)
 }
 
 fn prepare_socket(stream: &TcpStream) {
@@ -246,9 +382,11 @@ fn prepare_socket(stream: &TcpStream) {
     let _ = stream.set_nodelay(true);
 }
 
-fn tls_config() -> Result<Arc<ClientConfig>, NetError> {
-    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    if let Some(config) = CONFIG.get() {
+fn tls_config(allow_h2: bool) -> Result<Arc<ClientConfig>, NetError> {
+    static H2: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    static HTTP1: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let slot = if allow_h2 { &H2 } else { &HTTP1 };
+    if let Some(config) = slot.get() {
         return Ok(Arc::clone(config));
     }
     let mut roots = RootCertStore::empty();
@@ -256,10 +394,81 @@ fn tls_config() -> Result<Arc<ClientConfig>, NetError> {
     let mut config = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = if allow_h2 {
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    } else {
+        vec![b"http/1.1".to_vec()]
+    };
     let config = Arc::new(config);
-    let _ = CONFIG.set(Arc::clone(&config));
+    let _ = slot.set(Arc::clone(&config));
     Ok(config)
+}
+
+fn disk_dir() -> std::path::PathBuf {
+    std::env::var_os("MITHU_CACHE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("mithu-http-cache"))
+}
+
+fn disk_ok(url: &Url) -> bool {
+    !matches!(url.host.as_str(), "localhost" | "127.0.0.1" | "::1")
+}
+
+fn decode_body(headers: &[(String, String)], mut body: Vec<u8>) -> Result<Vec<u8>, NetError> {
+    let Some(encoding) = header(headers, "content-encoding") else {
+        return Ok(body);
+    };
+    let mut codings = encoding
+        .split(',')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| !part.is_empty() && part != "identity")
+        .collect::<Vec<_>>();
+    codings.reverse();
+    for coding in codings {
+        body = match coding.as_str() {
+            "gzip" | "x-gzip" => inflate_gzip(&body)?,
+            "deflate" => inflate_deflate(&body)?,
+            "br" => inflate_brotli(&body)?,
+            _ => {
+                return Err(NetError::Io(format!(
+                    "unsupported content-encoding {coding}"
+                )));
+            }
+        };
+    }
+    Ok(body)
+}
+
+fn inflate_gzip(body: &[u8]) -> Result<Vec<u8>, NetError> {
+    let mut decoder = flate2::read::GzDecoder::new(body);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|error| NetError::Io(error.to_string()))?;
+    Ok(out)
+}
+
+fn inflate_deflate(body: &[u8]) -> Result<Vec<u8>, NetError> {
+    let mut out = Vec::new();
+    if flate2::read::ZlibDecoder::new(body)
+        .read_to_end(&mut out)
+        .is_ok()
+    {
+        return Ok(out);
+    }
+    out.clear();
+    flate2::read::DeflateDecoder::new(body)
+        .read_to_end(&mut out)
+        .map_err(|error| NetError::Io(error.to_string()))?;
+    Ok(out)
+}
+
+fn inflate_brotli(body: &[u8]) -> Result<Vec<u8>, NetError> {
+    let mut out = Vec::new();
+    brotli::Decompressor::new(body, 4096)
+        .read_to_end(&mut out)
+        .map_err(|error| NetError::Io(error.to_string()))?;
+    Ok(out)
 }
 
 fn exchange(stream: &mut (impl Read + Write), request: &[u8]) -> Result<Vec<u8>, NetError> {
@@ -425,6 +634,34 @@ mod tests {
         assert_eq!(message.status, 200);
         assert_eq!(message.body, b"hello");
         assert!(message_complete(raw));
+    }
+
+    #[test]
+    fn gzip_body_is_inflated() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let mut encoded = Vec::new();
+            {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(&mut encoded, flate2::Compression::fast());
+                encoder.write_all(b"hello gzip").unwrap();
+                encoder.finish().unwrap();
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                encoded.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&encoded).unwrap();
+        });
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/gz")).unwrap();
+        let response = get(&url).unwrap();
+        assert_eq!(response.text(), "hello gzip");
+        server.join().unwrap();
     }
 
     #[test]

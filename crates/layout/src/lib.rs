@@ -2,7 +2,8 @@
 //!
 //! Block boxes fill their containing block. Inline content wraps into line
 //! boxes. Inline-block and replaced elements (images, inputs, frames) become
-//! atomic boxes. Margin collapsing and floats are not implemented.
+//! atomic boxes. Floats sit beside the following blocks, and grid places
+//! children into tracks. Margin collapsing is not implemented.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,8 +12,8 @@ use mithu_base::{Edges, Rect};
 use mithu_dom::{Document, NodeData, NodeId};
 use mithu_image::Bitmap;
 use mithu_style::{
-    AlignItems, BoxSizing, ComputedStyle, Display, FlexDirection, Generated, Justify, Length,
-    LineHeight, Position, TextAlign, TextTransform, WhiteSpace,
+    AlignItems, BoxSizing, Clear, ComputedStyle, Display, FlexDirection, FloatSide, Generated,
+    GridTrack, Justify, Length, LineHeight, Position, TextAlign, TextTransform, WhiteSpace,
 };
 use mithu_text::MeasureText;
 
@@ -229,6 +230,20 @@ fn layout_node(
     let blockish = synthetic.is_none() && has_block_child(doc, styles, id);
     let (lines, mut children, flowed) = if display == Display::Flex {
         layout_flex(
+            doc,
+            styles,
+            measure,
+            images,
+            id,
+            &style,
+            content_x,
+            content_y,
+            content_w,
+            href.clone(),
+            view,
+        )
+    } else if display == Display::Grid {
+        layout_grid(
             doc,
             styles,
             measure,
@@ -465,18 +480,41 @@ fn layout_blocks(
         children.extend(atoms);
         *y += height;
     };
+    let mut floats = Vec::new();
     for child in doc.node(id).children.clone() {
-        if is_block_child(doc, styles, child) {
+        let floated = style_of(styles, child).float;
+        if matches!(floated, FloatSide::Left | FloatSide::Right) && !is_skipped(doc, styles, child)
+        {
             flush(&mut group, &mut y, &mut lines, &mut children);
+            if let Some(placed) = place_float(
+                doc,
+                styles,
+                measure,
+                images,
+                child,
+                floated,
+                content_x,
+                &mut y,
+                content_w,
+                href.clone(),
+                view,
+                &mut floats,
+            ) {
+                children.push(placed);
+            }
+        } else if is_block_child(doc, styles, child) {
+            flush(&mut group, &mut y, &mut lines, &mut children);
+            y = clear_to(y, style_of(styles, child).clear, &floats);
+            let (band_x, band_w) = float_band(y, content_x, content_w, &floats);
             if let Some(child_box) = layout_node(
                 doc,
                 styles,
                 measure,
                 images,
                 child,
-                content_x,
+                band_x,
                 y,
-                content_w,
+                band_w,
                 href.clone(),
                 false,
                 view,
@@ -503,6 +541,220 @@ fn layout_blocks(
         children.push(after);
     }
     (lines, children, (y - content_y).max(0.0))
+}
+
+struct FloatBox {
+    side: FloatSide,
+    bottom: f32,
+    edge: f32,
+}
+
+fn float_band(y: f32, content_x: f32, content_w: f32, floats: &[FloatBox]) -> (f32, f32) {
+    let mut left = content_x;
+    let mut right = content_x + content_w;
+    for float_box in floats {
+        if y + 0.5 >= float_box.bottom {
+            continue;
+        }
+        if float_box.side == FloatSide::Left {
+            left = left.max(float_box.edge);
+        } else {
+            right = right.min(float_box.edge);
+        }
+    }
+    (left, (right - left).max(0.0))
+}
+
+fn clear_to(y: f32, clear: Clear, floats: &[FloatBox]) -> f32 {
+    let mut next = y;
+    for float_box in floats {
+        let hit = match clear {
+            Clear::None => false,
+            Clear::Both => true,
+            Clear::Left => float_box.side == FloatSide::Left,
+            Clear::Right => float_box.side == FloatSide::Right,
+        };
+        if hit {
+            next = next.max(float_box.bottom);
+        }
+    }
+    next
+}
+
+fn place_float(
+    doc: &Document,
+    styles: &[ComputedStyle],
+    measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
+    id: NodeId,
+    side: FloatSide,
+    content_x: f32,
+    y: &mut f32,
+    content_w: f32,
+    href: Option<String>,
+    view: View,
+    floats: &mut Vec<FloatBox>,
+) -> Option<LayoutBox> {
+    let mut cursor = *y;
+    for _ in 0..4 {
+        let (band_x, band_w) = float_band(cursor, content_x, content_w, floats);
+        let mut layout = layout_node(
+            doc,
+            styles,
+            measure,
+            images,
+            id,
+            band_x,
+            cursor,
+            band_w.max(1.0),
+            href.clone(),
+            false,
+            view,
+        )?;
+        let outer = layout.margin.left + layout.rect.width + layout.margin.right;
+        if outer > band_w + 0.5 && band_w + 0.5 < content_w {
+            cursor = floats
+                .iter()
+                .map(|float_box| float_box.bottom)
+                .fold(cursor, f32::max)
+                + 0.1;
+            continue;
+        }
+        if side == FloatSide::Right {
+            let target = band_x + band_w - outer;
+            let dx = target - layout.rect.x + layout.margin.left;
+            translate(&mut layout, dx, 0.0);
+        }
+        let bottom = layout.rect.bottom() + layout.margin.bottom;
+        let edge = if side == FloatSide::Left {
+            layout.rect.right() + layout.margin.right
+        } else {
+            layout.rect.x - layout.margin.left
+        };
+        floats.push(FloatBox { side, bottom, edge });
+        return Some(layout);
+    }
+    None
+}
+
+fn layout_grid(
+    doc: &Document,
+    styles: &[ComputedStyle],
+    measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
+    id: NodeId,
+    style: &ComputedStyle,
+    content_x: f32,
+    content_y: f32,
+    content_w: f32,
+    href: Option<String>,
+    view: View,
+) -> (Vec<LineBox>, Vec<LayoutBox>, f32) {
+    let tracks = if style.grid_columns.is_empty() {
+        vec![GridTrack::Fr(1.0)]
+    } else {
+        style.grid_columns.clone()
+    };
+    let gap = style.gap.max(0.0);
+    let widths = resolve_tracks(&tracks, content_w, gap);
+    let columns = widths.len().max(1);
+    let mut rows: Vec<Vec<(NodeId, usize, usize)>> = vec![Vec::new()];
+    let mut column = 0usize;
+    for child in doc.node(id).children.clone() {
+        if is_skipped(doc, styles, child) {
+            continue;
+        }
+        if matches!(&doc.node(child).data, NodeData::Text(text) if text.trim().is_empty()) {
+            continue;
+        }
+        let span = (style_of(styles, child).grid_span as usize).clamp(1, columns);
+        if column + span > columns && column != 0 {
+            rows.push(Vec::new());
+            column = 0;
+        }
+        rows.last_mut().unwrap().push((child, column, span));
+        column += span;
+        if column >= columns {
+            rows.push(Vec::new());
+            column = 0;
+        }
+    }
+    if rows.last().is_some_and(|row| row.is_empty()) {
+        rows.pop();
+    }
+    let mut y = content_y;
+    let mut placed = Vec::new();
+    for row in rows {
+        let mut row_h = 0.0_f32;
+        let mut boxes = Vec::new();
+        for (child, column, span) in row {
+            let x = content_x + widths[..column].iter().sum::<f32>() + gap * column as f32;
+            let width = widths[column..column + span].iter().sum::<f32>()
+                + gap * span.saturating_sub(1) as f32;
+            if let Some(mut layout) = layout_node(
+                doc,
+                styles,
+                measure,
+                images,
+                child,
+                0.0,
+                0.0,
+                width.max(0.0),
+                href.clone(),
+                false,
+                view,
+            ) {
+                let dx = x - layout.rect.x + layout.margin.left;
+                translate(&mut layout, dx, 0.0);
+                row_h = row_h.max(layout.margin.top + layout.rect.height + layout.margin.bottom);
+                boxes.push(layout);
+            }
+        }
+        for mut layout in boxes {
+            let dy = y + layout.margin.top - layout.rect.y;
+            translate(&mut layout, 0.0, dy);
+            placed.push(layout);
+        }
+        y += row_h + gap;
+    }
+    let height = if placed.is_empty() {
+        0.0
+    } else {
+        (y - content_y - gap).max(0.0)
+    };
+    (Vec::new(), placed, height)
+}
+
+fn resolve_tracks(tracks: &[GridTrack], content_w: f32, gap: f32) -> Vec<f32> {
+    if tracks.is_empty() {
+        return vec![content_w.max(0.0)];
+    }
+    let gaps = gap * tracks.len().saturating_sub(1) as f32;
+    let fixed: f32 = tracks
+        .iter()
+        .map(|track| match track {
+            GridTrack::Px(px) => px.max(0.0),
+            _ => 0.0,
+        })
+        .sum();
+    let free = (content_w - gaps - fixed).max(0.0);
+    let fr: f32 = tracks
+        .iter()
+        .map(|track| match track {
+            GridTrack::Fr(value) => value.max(0.0),
+            GridTrack::Auto => 1.0,
+            GridTrack::Px(_) => 0.0,
+        })
+        .sum();
+    tracks
+        .iter()
+        .map(|track| match track {
+            GridTrack::Px(px) => px.max(0.0),
+            GridTrack::Fr(value) if fr > 0.0 => free * value.max(0.0) / fr,
+            GridTrack::Auto if fr > 0.0 => free / fr,
+            GridTrack::Fr(_) | GridTrack::Auto => 0.0,
+        })
+        .collect()
 }
 
 fn collect_children(
@@ -559,7 +811,11 @@ fn collect_node(
             let display = effective_display(doc, styles, id);
             if matches!(
                 display,
-                Display::Block | Display::ListItem | Display::InlineBlock | Display::Flex
+                Display::Block
+                    | Display::ListItem
+                    | Display::InlineBlock
+                    | Display::Flex
+                    | Display::Grid
             ) || synthetic_text(doc, id).is_some()
             {
                 let Some(layout) = layout_node(
@@ -1006,8 +1262,10 @@ fn contains_block(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool 
         if display == Display::None {
             continue;
         }
-        if matches!(display, Display::Block | Display::ListItem | Display::Flex)
-            || contains_block(doc, styles, *child)
+        if matches!(
+            display,
+            Display::Block | Display::ListItem | Display::Flex | Display::Grid
+        ) || contains_block(doc, styles, *child)
         {
             return true;
         }
@@ -1029,7 +1287,7 @@ fn is_block_child(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool 
     doc.element_name(id).is_some_and(|_| {
         matches!(
             effective_display(doc, styles, id),
-            Display::Block | Display::ListItem | Display::Flex
+            Display::Block | Display::ListItem | Display::Flex | Display::Grid
         )
     })
 }
@@ -1238,7 +1496,7 @@ fn layout_flex(
         0.0,
         content_w,
     ) {
-        items.push((before, 0.0));
+        items.push((before, 0.0, 0.0));
     }
     for child in doc.node(id).children.clone() {
         if let NodeData::Text(text) = &doc.node(child).data {
@@ -1248,6 +1506,7 @@ fn layout_flex(
             items.push((
                 text_flex_item(child, text, style, measure, href.clone(), content_w),
                 0.0,
+                1.0,
             ));
             continue;
         }
@@ -1285,7 +1544,11 @@ fn layout_flex(
             {
                 layout.rect.width = basis.max(0.0);
             }
-            items.push((layout, child_style.flex_grow.max(0.0)));
+            items.push((
+                layout,
+                child_style.flex_grow.max(0.0),
+                child_style.flex_shrink.max(0.0),
+            ));
         }
     }
     if let Some(after) = generated_block(
@@ -1298,7 +1561,7 @@ fn layout_flex(
         0.0,
         content_w,
     ) {
-        items.push((after, 0.0));
+        items.push((after, 0.0, 0.0));
     }
     if style.flex_reverse {
         items.reverse();
@@ -1378,7 +1641,7 @@ fn outer_main(layout: &LayoutBox, row: bool) -> f32 {
 fn place_flex_line(
     styles: &[ComputedStyle],
     style: &ComputedStyle,
-    items: Vec<(LayoutBox, f32)>,
+    items: Vec<(LayoutBox, f32, f32)>,
     content_x: f32,
     content_y: f32,
     content_w: f32,
@@ -1396,16 +1659,25 @@ fn place_flex_line(
     };
     let bases: Vec<f32> = items
         .iter()
-        .map(|(layout, _)| outer(layout, true))
+        .map(|(layout, _, _)| outer(layout, true))
         .collect();
     let gap_total = gap * (count.saturating_sub(1)) as f32;
     let used: f32 = bases.iter().sum::<f32>() + gap_total;
     let free = if row { content_w - used } else { 0.0 };
-    let grow_sum: f32 = items.iter().map(|(_, grow)| *grow).sum();
+    let grow_sum: f32 = items.iter().map(|(_, grow, _)| *grow).sum();
+    let shrink_weight: f32 = items
+        .iter()
+        .zip(bases.iter())
+        .map(|((_, _, shrink), base)| shrink.max(0.0) * base)
+        .sum();
     let mut extra = vec![0.0; count];
     if row && free > 0.0 && grow_sum > 0.0 {
-        for (index, (_, grow)) in items.iter().enumerate() {
+        for (index, (_, grow, _)) in items.iter().enumerate() {
             extra[index] = free * grow / grow_sum;
+        }
+    } else if row && free < 0.0 && shrink_weight > 0.0 {
+        for (index, ((_, _, shrink), base)) in items.iter().zip(bases.iter()).enumerate() {
+            extra[index] = (free * shrink.max(0.0) * base / shrink_weight).max(-base);
         }
     }
     let leftover = if row && free > 0.0 && grow_sum == 0.0 {
@@ -1425,7 +1697,7 @@ fn place_flex_line(
     };
     let cross: Vec<f32> = items
         .iter()
-        .map(|(layout, _)| outer(layout, false))
+        .map(|(layout, _, _)| outer(layout, false))
         .collect();
     let line = cross.iter().copied().fold(0.0_f32, f32::max);
     let mut cursor = if row {
@@ -1434,9 +1706,9 @@ fn place_flex_line(
         content_y + start
     };
     let mut placed = Vec::new();
-    for (index, (mut layout, _)) in items.into_iter().enumerate() {
-        if row && extra[index] > 0.0 {
-            layout.rect.width += extra[index];
+    for (index, (mut layout, _, _)) in items.into_iter().enumerate() {
+        if row && extra[index] != 0.0 {
+            layout.rect.width = (layout.rect.width + extra[index]).max(0.0);
         }
         let main = bases[index] + extra[index];
         let cross_size = cross[index];
@@ -2008,6 +2280,79 @@ mod tests {
             (host.rect.width - 100.0).abs() < 0.5,
             "w {}",
             host.rect.width
+        );
+    }
+
+    #[test]
+    fn a_left_float_narrows_the_next_block() {
+        let doc = parse_html(
+            r#"<div id="host" style="width:300px"><div id="side" style="float:left;width:80px;height:40px"></div><div id="main" style="height:40px"></div><div id="below" style="clear:both;height:10px"></div></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let side = find(&tree.root, doc.get_element_by_id("side").unwrap()).unwrap();
+        let main = find(&tree.root, doc.get_element_by_id("main").unwrap()).unwrap();
+        let below = find(&tree.root, doc.get_element_by_id("below").unwrap()).unwrap();
+        assert!(
+            (side.rect.width - 80.0).abs() < 0.5,
+            "side {}",
+            side.rect.width
+        );
+        assert!(
+            (main.rect.x - (side.rect.right())).abs() < 1.0,
+            "main x {} side right {}",
+            main.rect.x,
+            side.rect.right()
+        );
+        assert!(
+            (main.rect.width - 220.0).abs() < 1.0,
+            "main w {}",
+            main.rect.width
+        );
+        assert!(
+            below.rect.y + 0.5 >= side.rect.bottom(),
+            "below {} side {}",
+            below.rect.y,
+            side.rect.bottom()
+        );
+    }
+
+    #[test]
+    fn grid_places_tracks_and_a_span() {
+        let doc = parse_html(
+            r#"<div id="grid" style="display:grid;width:300px;grid-template-columns:100px 1fr;gap:10px"><div id="a" style="height:20px"></div><div id="b" style="height:20px"></div><div id="c" style="grid-column:span 2;height:10px"></div></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let a = find(&tree.root, doc.get_element_by_id("a").unwrap()).unwrap();
+        let b = find(&tree.root, doc.get_element_by_id("b").unwrap()).unwrap();
+        let c = find(&tree.root, doc.get_element_by_id("c").unwrap()).unwrap();
+        assert!((a.rect.width - 100.0).abs() < 0.5, "a {}", a.rect.width);
+        assert!((b.rect.width - 190.0).abs() < 0.5, "b {}", b.rect.width);
+        assert!(
+            (b.rect.x - (a.rect.right() + 10.0)).abs() < 1.0,
+            "b x {}",
+            b.rect.x
+        );
+        assert!((c.rect.width - 300.0).abs() < 1.0, "c {}", c.rect.width);
+        assert!(c.rect.y > a.rect.y, "c y {} a y {}", c.rect.y, a.rect.y);
+    }
+
+    #[test]
+    fn flex_items_shrink_to_the_line() {
+        let doc = parse_html(
+            r#"<div id="row" style="display:flex;width:100px"><div id="a" style="width:80px;height:10px"></div><div id="b" style="width:80px;height:10px"></div></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let a = find(&tree.root, doc.get_element_by_id("a").unwrap()).unwrap();
+        let b = find(&tree.root, doc.get_element_by_id("b").unwrap()).unwrap();
+        assert!(a.rect.width < 79.0, "a {}", a.rect.width);
+        assert!(
+            (a.rect.width + b.rect.width - 100.0).abs() < 1.0,
+            "{} {}",
+            a.rect.width,
+            b.rect.width
         );
     }
 }

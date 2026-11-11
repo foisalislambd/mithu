@@ -4,7 +4,7 @@ Mithu follows the version in the workspace `Cargo.toml`. Dates are the day the r
 
 ## Unreleased
 
-Chrome-like frame (tab strip, omnibox, bookmarks bar, app menu, new tab page). The network profile stores cookies and reuses fresh `Cache-Control: max-age` responses. JavaScript remains on Boa. See `docs/ARCHITECTURE.md`.
+Chrome-like frame (tab strip, omnibox, bookmarks bar, app menu, new tab page, tab drag, history, downloads). The network profile stores cookies (`Expires`, `SameSite`), inflates gzip, deflate, and brotli, speaks HTTP/2 when TLS negotiates it, and reuses fresh `Cache-Control: max-age` responses from memory and disk. Layout covers floats, flex shrink, and a basic grid. JavaScript remains on Boa. See `docs/ARCHITECTURE.md`.
 
 ## 0.1.0
 

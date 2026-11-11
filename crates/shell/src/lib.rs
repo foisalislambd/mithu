@@ -144,12 +144,16 @@ pub struct Browser {
     suggestion: Option<usize>,
     menu: Option<Menu>,
     tabs: Tabs,
+    visits: Vec<(String, String)>,
+    downloads: Vec<(String, String)>,
+    drag: Option<usize>,
 }
 
 struct Fetched {
     url: Url,
     html: String,
     status: String,
+    download_name: Option<String>,
 }
 
 impl Browser {
@@ -176,6 +180,9 @@ impl Browser {
                 pages: vec![Page::blank(1200.0)],
                 active: 0,
             },
+            visits: Vec::new(),
+            downloads: Vec::new(),
+            drag: None,
         };
         browser.navigate("about:mithu");
         browser
@@ -426,6 +433,7 @@ impl Browser {
                 self.new_tab();
             } else if let Some(index) = tabs.iter().position(|rect| rect.contains(x, y)) {
                 self.select_tab(index);
+                self.drag = Some(index);
             }
             return;
         }
@@ -505,6 +513,8 @@ impl Browser {
             MenuAction::Bookmark => self.toggle_bookmark(),
             MenuAction::NewTabPage => self.new_tab(),
             MenuAction::Bookmarks => self.toggle_bookmark_list(),
+            MenuAction::History => self.navigate("about:history"),
+            MenuAction::Downloads => self.navigate("about:downloads"),
         }
     }
 
@@ -520,6 +530,8 @@ impl Browser {
         items.push(("Reload".to_string(), MenuAction::Reload));
         items.push(("Bookmark this page".to_string(), MenuAction::Bookmark));
         items.push(("Bookmarks".to_string(), MenuAction::Bookmarks));
+        items.push(("History".to_string(), MenuAction::History));
+        items.push(("Downloads".to_string(), MenuAction::Downloads));
         self.menu = Some(Menu {
             x: menu.x,
             y: menu.bottom(),
@@ -886,19 +898,71 @@ impl Browser {
         self.load_url(url, false);
     }
 
+    fn drag_tab(&mut self, from: usize, x: f32) {
+        let (tabs, _) = tab_rects(self.viewport_w, self.tab_count());
+        let Some(to) = tabs.iter().position(|rect| x < rect.right()) else {
+            return;
+        };
+        if to == from || to >= self.tabs.pages.len() {
+            return;
+        }
+        let page = self.tabs.pages.remove(from);
+        self.tabs.pages.insert(to, page);
+        self.tabs.active = match self.tabs.active {
+            active if active == from => to,
+            active if from < active && to >= active => active - 1,
+            active if from > active && to <= active => active + 1,
+            active => active,
+        };
+        self.drag = Some(to);
+    }
+
     fn load_url(&mut self, url: Url, bypass_cache: bool) {
         self.page_mut().status = format!("Loading {}", url.to_display());
-        match retrieve(&url, bypass_cache) {
+        if url.scheme == "about" && matches!(url.path.as_str(), "history" | "downloads") {
+            let html = if url.path == "history" {
+                history_page(&self.visits)
+            } else {
+                downloads_page(&self.downloads)
+            };
+            let status = if url.path == "history" {
+                "History".to_string()
+            } else {
+                "Downloads".to_string()
+            };
+            self.install(Fetched {
+                url,
+                html,
+                status,
+                download_name: None,
+            });
+            return;
+        }
+        let initiator = {
+            let host = self.page().current.host.clone();
+            if host.is_empty() { None } else { Some(host) }
+        };
+        match retrieve(&url, bypass_cache, initiator.as_deref()) {
             Ok(fetched) => self.install(fetched),
             Err(message) => self.install(Fetched {
                 html: error_page(&url, &message),
                 status: message,
                 url,
+                download_name: None,
             }),
         }
     }
 
-    fn install(&mut self, fetched: Fetched) {
+    fn install(&mut self, mut fetched: Fetched) {
+        if let Some(name) = fetched.download_name.clone() {
+            self.downloads.push((name, fetched.url.to_display()));
+            if self.downloads.len() > 100 {
+                self.downloads.remove(0);
+            }
+            fetched.html = downloads_page(&self.downloads);
+            fetched.status = "Downloads".to_string();
+            fetched.url = Url::parse("about:downloads").expect("downloads");
+        }
         let find_query = self.page().find_query.clone();
         let find_open = self.page().find_open;
         let zoom = self.page().zoom;
@@ -995,6 +1059,13 @@ impl Browser {
         if reopen {
             self.reveal_find();
         }
+        let visit = (self.page().title.clone(), self.page().current.to_display());
+        if !visit.1.starts_with("about:history") && !visit.1.starts_with("about:downloads") {
+            self.visits.push(visit);
+            if self.visits.len() > 200 {
+                self.visits.remove(0);
+            }
+        }
     }
 
     pub fn advance_timers(&mut self, ms: u64) -> bool {
@@ -1047,7 +1118,15 @@ impl Browser {
         self.page_mut().layout = layout;
     }
 
+    pub fn pointer_up(&mut self) {
+        self.drag = None;
+    }
+
     pub fn pointer_move(&mut self, x: f32, y: f32) {
+        if let Some(from) = self.drag {
+            self.drag_tab(from, x);
+            return;
+        }
         if self.menu.is_some() || y < CONTENT_TOP || y >= self.viewport_h - STATUS_H {
             self.set_hover(None);
             return;
@@ -1184,12 +1263,14 @@ impl Browser {
                         url: response.url,
                         html,
                         status,
+                        download_name: None,
                     });
                 }
                 Err(error) => self.install(Fetched {
                     html: error_page(&url, &error.to_string()),
                     status: error.to_string(),
                     url,
+                    download_name: None,
                 }),
             }
             return;
@@ -1901,6 +1982,8 @@ enum MenuAction {
     Bookmark,
     NewTabPage,
     Bookmarks,
+    History,
+    Downloads,
 }
 
 #[derive(Clone)]
@@ -1981,7 +2064,7 @@ fn chrome_rects(width: f32) -> (Rect, Rect, Rect, Rect) {
     )
 }
 
-fn retrieve(url: &Url, bypass_cache: bool) -> Result<Fetched, String> {
+fn retrieve(url: &Url, bypass_cache: bool, initiator: Option<&str>) -> Result<Fetched, String> {
     match url.scheme.as_str() {
         "about" => {
             let (html, status) = match url.path.as_str() {
@@ -1993,6 +2076,7 @@ fn retrieve(url: &Url, bypass_cache: bool) -> Result<Fetched, String> {
                 url: url.clone(),
                 html,
                 status,
+                download_name: None,
             })
         }
         "file" => {
@@ -2002,11 +2086,14 @@ fn retrieve(url: &Url, bypass_cache: bool) -> Result<Fetched, String> {
                 url: url.clone(),
                 html: bytes_to_html(url, Some("text/html"), &bytes),
                 status: "file".to_string(),
+                download_name: None,
             })
         }
         "http" | "https" => {
             let response = if bypass_cache {
                 mithu_net::reload(url)
+            } else if let Some(host) = initiator {
+                mithu_net::navigate_from(url, host)
             } else {
                 get(url)
             }
@@ -2015,11 +2102,18 @@ fn retrieve(url: &Url, bypass_cache: bool) -> Result<Fetched, String> {
                 return Err(format!("HTTP {}", response.status));
             }
             let status = format!("{} {}", response.status, response.url.to_display());
-            let html = bytes_to_html(&response.url, response.content_type(), &response.body);
+            let mime = response.content_type().unwrap_or("");
+            let download_name = download_name(&response.url, mime);
+            let html = if download_name.is_some() {
+                String::new()
+            } else {
+                bytes_to_html(&response.url, response.content_type(), &response.body)
+            };
             Ok(Fetched {
                 url: response.url,
                 html,
                 status,
+                download_name,
             })
         }
         other => Err(format!("Mithu cannot open {other} URLs")),
@@ -2254,6 +2348,58 @@ fn error_page(url: &Url, message: &str) -> String {
     )
 }
 
+fn download_name(url: &Url, mime: &str) -> Option<String> {
+    let mime = mime.split(';').next().unwrap_or("").trim();
+    let download = mime == "application/pdf"
+        || mime == "application/zip"
+        || mime == "application/octet-stream"
+        || mime == "application/gzip";
+    if !download {
+        return None;
+    }
+    let name = url
+        .path
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("download");
+    Some(name.to_string())
+}
+
+fn history_page(visits: &[(String, String)]) -> String {
+    let mut items = String::new();
+    for (title, url) in visits.iter().rev().take(40) {
+        items.push_str(&format!(
+            "<li><a href=\"{}\">{}</a><div class=\"url\">{}</div></li>",
+            escape(url),
+            escape(title),
+            escape(url)
+        ));
+    }
+    if items.is_empty() {
+        items.push_str("<li>No pages yet.</li>");
+    }
+    format!(
+        "<!DOCTYPE html><html><head><title>History</title><style>body{{font-family:sans-serif;margin:24px;color:#202124}}a{{color:#1a73e8;text-decoration:none}}.url{{color:#5f6368;font-size:13px}}</style></head><body><h1>History</h1><ul>{items}</ul></body></html>"
+    )
+}
+
+fn downloads_page(downloads: &[(String, String)]) -> String {
+    let mut items = String::new();
+    for (name, url) in downloads.iter().rev() {
+        items.push_str(&format!(
+            "<li><b>{}</b><div class=\"url\">{}</div></li>",
+            escape(name),
+            escape(url)
+        ));
+    }
+    if items.is_empty() {
+        items.push_str("<li>No downloads yet.</li>");
+    }
+    format!(
+        "<!DOCTYPE html><html><head><title>Downloads</title><style>body{{font-family:sans-serif;margin:24px;color:#202124}}.url{{color:#5f6368;font-size:13px}}</style></head><body><h1>Downloads</h1><ul>{items}</ul></body></html>"
+    )
+}
+
 fn home_page() -> String {
     r#"<!DOCTYPE html>
 <html>
@@ -2313,6 +2459,7 @@ mod tests {
             url: Url::parse("about:test").unwrap(),
             html: "<a href=\"about:blank\">Go there now</a>".to_string(),
             status: "test".to_string(),
+            download_name: None,
         });
         browser.resize(800.0, 600.0);
         let link = browser
@@ -2337,6 +2484,7 @@ mod tests {
             url: Url::parse("about:test").unwrap(),
             html: "<img id=\"pic\" alt=\"red\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\">".to_string(),
             status: "test".to_string(),
+            download_name: None,
         });
         browser.resize(800.0, 600.0);
         let pic = browser.page().document.get_element_by_id("pic").unwrap();
@@ -2371,6 +2519,7 @@ mod tests {
                 </script>"#
                 .to_string(),
             status: "test".to_string(),
+            download_name: None,
         });
         click_id(&mut browser, "go");
         let out = browser.page().document.get_element_by_id("out").unwrap();
@@ -2389,6 +2538,7 @@ mod tests {
             url: Url::parse("about:test").unwrap(),
             html: "<title>One</title><p>one</p>".to_string(),
             status: "test".to_string(),
+            download_name: None,
         });
         browser.new_tab();
         assert_eq!(browser.tab_count(), 2);
@@ -2415,6 +2565,7 @@ mod tests {
             url: Url::parse("about:test").unwrap(),
             html: "<style>p{margin:0}</style><p>alpha beta alpha</p><div style=\"height:1800px\"></div><p>alpha tail</p>".to_string(),
             status: "test".to_string(),
+            download_name: None,
         });
         browser.open_find();
         for ch in "Alpha".chars() {
@@ -2450,6 +2601,7 @@ mod tests {
             html: "<div style=\"width:100px;height:40px;background:#ff0000;margin:0\"></div>"
                 .to_string(),
             status: "test".to_string(),
+            download_name: None,
         });
         let y = (CONTENT_TOP + 20.0) as usize;
         let frame = browser.render(800.0, 600.0);
@@ -2543,6 +2695,7 @@ mod tests {
             url: Url::parse("about:test").unwrap(),
             html: "<a href=\"about:blank\">Elsewhere</a>".to_string(),
             status: "test".to_string(),
+            download_name: None,
         });
         let link = browser
             .page()
@@ -2576,6 +2729,31 @@ mod tests {
         let bounds = menu_bounds(menu, 800.0, 600.0);
         browser.pointer_down(bounds.x + 12.0, bounds.y + reload as f32 * 32.0 + 10.0);
         assert_eq!(browser.location(), "about:test");
+    }
+
+    #[test]
+    fn dragging_a_tab_reorders_it_and_history_lists_the_visit() {
+        let mut browser = Browser::new();
+        browser.navigate("about:blank");
+        browser.new_tab();
+        assert_eq!(browser.location(), "about:mithu");
+        let (tabs, _) = tab_rects(browser.viewport_w, browser.tab_count());
+        browser.pointer_down(tabs[1].x + 4.0, tabs[1].y + 4.0);
+        browser.pointer_move(tabs[0].x + 2.0, tabs[0].y + 4.0);
+        browser.pointer_up();
+        assert_eq!(browser.active_tab(), 0);
+        assert_eq!(browser.location(), "about:mithu");
+        browser.select_tab(1);
+        assert_eq!(browser.location(), "about:blank");
+        browser.navigate("about:history");
+        assert!(
+            browser
+                .page()
+                .document
+                .text_content(browser.page().document.root)
+                .contains("about:blank"),
+            "history should list the blank page"
+        );
     }
 
     fn click_id(browser: &mut Browser, id: &str) {

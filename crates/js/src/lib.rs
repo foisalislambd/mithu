@@ -444,8 +444,11 @@ fn console_object(context: &mut Context) -> JsResult<JsObject> {
 }
 
 fn navigator_object(context: &mut Context) -> JsResult<JsObject> {
+    let languages = JsArray::from_iter([JsValue::from(js_string!("en"))], context);
     let mut object = ObjectInitializer::new(context);
     object.property(js_string!("userAgent"), js_string!("Mithu"), ATTR);
+    object.property(js_string!("language"), js_string!("en"), ATTR);
+    object.property(js_string!("languages"), languages, ATTR);
     Ok(object.build())
 }
 
@@ -719,6 +722,8 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
     let checked_set = native(context, "set checked", 1, set_checked);
     let href_get = native(context, "get href", 0, get_href);
     let href_set = native(context, "set href", 1, set_href);
+    let lang_get = native(context, "get lang", 0, get_lang);
+    let lang_set = native(context, "set lang", 1, set_lang);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(
@@ -785,6 +790,21 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
             NativeFunction::from_fn_ptr(append_child),
             js_string!("appendChild"),
             1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(append_nodes),
+            js_string!("append"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(prepend_nodes),
+            js_string!("prepend"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(insert_adjacent_html),
+            js_string!("insertAdjacentHTML"),
+            2,
         )
         .function(
             NativeFunction::from_fn_ptr(insert_before_child),
@@ -866,6 +886,7 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
             ATTR,
         )
         .accessor(js_string!("href"), Some(href_get), Some(href_set), ATTR)
+        .accessor(js_string!("lang"), Some(lang_get), Some(lang_set), ATTR)
         .property(js_string!("classList"), class_list, ATTR)
         .property(js_string!("style"), style, ATTR);
     object.build().into()
@@ -1338,6 +1359,124 @@ fn remove_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     Ok(child_value)
 }
 
+fn get_lang(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    Ok(js_string!(host.doc.borrow().attr(id, "lang").unwrap_or("").to_string()).into())
+}
+
+fn set_lang(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let value = arg_string(args, 0, context)?;
+    host.doc.borrow_mut().set_attr(id, "lang", &value);
+    Ok(JsValue::undefined())
+}
+
+fn append_nodes(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    insert_mixed(this, args, context, false)
+}
+
+fn prepend_nodes(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    insert_mixed(this, args, context, true)
+}
+
+fn insert_mixed(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+    prepend: bool,
+) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let parent = node_of(this).ok_or_else(type_error)?;
+    let anchor = if prepend {
+        host.doc.borrow().node(parent).children.first().copied()
+    } else {
+        None
+    };
+    for arg in args {
+        if let Some(child) = node_of(arg) {
+            host.doc.borrow_mut().insert_before(parent, child, anchor);
+        } else if !arg.is_null_or_undefined() {
+            let text = arg.to_string(context)?.to_std_string_lossy();
+            if text.is_empty() {
+                continue;
+            }
+            let mut doc = host.doc.borrow_mut();
+            let node = doc.create_text_detached(&text);
+            doc.insert_before(parent, node, anchor);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn insert_adjacent_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let position = arg_string(args, 0, context)?.to_ascii_lowercase();
+    let html = arg_string(args, 1, context)?;
+    let parsed = parse_html(&format!("<div id=\"mithu-root\">{html}</div>"));
+    let Some(root) = parsed.get_element_by_id("mithu-root") else {
+        return Ok(this.clone());
+    };
+    let mut doc = host.doc.borrow_mut();
+    let parent = doc.nodes.get(id.0).and_then(|node| node.parent);
+    match position.as_str() {
+        "beforebegin" => {
+            let Some(parent) = parent else {
+                return Ok(this.clone());
+            };
+            graft(&parsed, root, &mut doc, parent, Some(id));
+        }
+        "afterbegin" => {
+            let anchor = doc.node(id).children.first().copied();
+            graft(&parsed, root, &mut doc, id, anchor);
+        }
+        "beforeend" => graft(&parsed, root, &mut doc, id, None),
+        "afterend" => {
+            let Some(parent) = parent else {
+                return Ok(this.clone());
+            };
+            let next = doc.next_element_sibling(id).or_else(|| {
+                let children = &doc.node(parent).children;
+                let index = children.iter().position(|child| *child == id)?;
+                children.get(index + 1).copied()
+            });
+            graft(&parsed, root, &mut doc, parent, next);
+        }
+        _ => {}
+    }
+    Ok(this.clone())
+}
+
+fn graft(
+    src: &Document,
+    src_parent: NodeId,
+    dst: &mut Document,
+    dst_parent: NodeId,
+    before: Option<NodeId>,
+) {
+    for child in src.node(src_parent).children.clone() {
+        let id = match &src.node(child).data {
+            NodeData::Text(text) => dst.create_text_detached(text),
+            NodeData::Element(element) => {
+                let id = dst.create_element_detached(&element.name);
+                for (name, value) in &element.attrs {
+                    dst.set_attr(id, name, value);
+                }
+                copy_children(src, child, dst, id);
+                id
+            }
+            NodeData::Comment(_) | NodeData::Document => continue,
+        };
+        dst.insert_before(dst_parent, id, before);
+    }
+}
+
 fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let parent = node_of(this).ok_or_else(type_error)?;
@@ -1604,16 +1743,23 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     let host = host(context)?;
     let location = host.location.borrow().clone();
     let outcome = resolve_request(&location, &spec).and_then(|url| {
-        mithu_net::get(&url)
-            .map_err(|error| error.to_string())
-            .map(|response| {
-                (
-                    response.status,
-                    (200..300).contains(&response.status),
-                    response.url.to_string(),
-                    response.text(),
-                )
-            })
+        let initiator = mithu_url::Url::parse(&location)
+            .ok()
+            .map(|page| page.host)
+            .filter(|host| !host.is_empty());
+        let response = if let Some(host) = initiator.as_deref() {
+            mithu_net::get_from(&url, host)
+        } else {
+            mithu_net::get(&url)
+        };
+        response.map_err(|error| error.to_string()).map(|response| {
+            (
+                response.status,
+                (200..300).contains(&response.status),
+                response.url.to_string(),
+                response.text(),
+            )
+        })
     });
     match outcome {
         Ok((status, ok, url, body)) => {
@@ -2385,7 +2531,12 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mithu_dom::NodeData;
     use mithu_html::parse_html;
+
+    fn doc_name_is(node: &mithu_dom::Node, name: &str) -> bool {
+        matches!(&node.data, NodeData::Element(element) if element.name == name)
+    }
 
     #[test]
     fn script_updates_text_and_style() {
@@ -2415,6 +2566,45 @@ mod tests {
         assert!(style.contains("color: navy"), "{style}");
         assert!(style.contains("display: flex"), "{style}");
         assert_eq!(log, vec!["ready".to_string()]);
+    }
+
+    #[test]
+    fn example_script_inserts_translations_without_throwing() {
+        let script = r#"var B=document.body,P,p;B.children[0].insertAdjacentHTML("afterend","<p lang=ar>AR</p><p lang=fr>FR</p><a href=https://iana.org/help/example-domains>Learn more</a>");P=[...B.querySelectorAll("p")];P[0].lang="en";navigator.languages.some(l=>p=P.find(p=>p.lang==l.split("-")[0]));p=p||P[0];B.prepend(p);B.insertAdjacentHTML("afterbegin","<style>p+p{opacity:.6}</style><svg viewBox=0,0,20,20></svg>");"#;
+        let mut doc = parse_html(&format!(
+            "<!doctype html><html><head><title>Example Domain</title></head><body><p>This domain is for use in documentation examples.</p><script>{script}</script></body></html>"
+        ));
+        let log = run_scripts(&mut doc, |_| None);
+        assert!(log.is_empty(), "{log:?}");
+        let body = doc
+            .nodes
+            .iter()
+            .position(|node| doc_name_is(node, "body"))
+            .map(mithu_dom::NodeId)
+            .expect("body");
+        let text = doc.text_content(body);
+        assert!(text.contains("AR"), "{text}");
+        assert!(text.contains("FR"), "{text}");
+        assert!(text.contains("Learn more"), "{text}");
+        assert!(
+            doc.nodes.iter().any(|node| doc_name_is(node, "svg")),
+            "svg from insertAdjacentHTML"
+        );
+        assert!(
+            doc.stylesheets
+                .iter()
+                .any(|sheet| sheet.contains("opacity"))
+                || doc.nodes.iter().any(|node| doc_name_is(node, "style")),
+            "style element should be inserted"
+        );
+        doc.refresh_metadata();
+        assert!(
+            doc.stylesheets
+                .iter()
+                .any(|sheet| sheet.contains("opacity")),
+            "{:?}",
+            doc.stylesheets
+        );
     }
 
     #[test]

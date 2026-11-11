@@ -2,8 +2,8 @@
 //!
 //! Chromium stores cookies in the network service (`net/cookies`). Mithu keeps
 //! one jar for the browser profile and sends it on later requests to the same
-//! site. `HttpOnly` and `SameSite` are accepted and ignored: scripts cannot
-//! read the jar, and every navigation is a top-level request.
+//! site. `Expires` and `SameSite` decide which later request includes the
+//! cookie. Scripts never read the jar, so `HttpOnly` stays on the browser side.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,22 @@ pub struct Cookie {
     pub path: String,
     pub secure: bool,
     pub expires_at: Option<u64>,
+    pub same_site: SameSite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SameSite {
+    Default,
+    Lax,
+    Strict,
+    None,
+}
+
+pub struct CookieRequest<'a> {
+    pub url: &'a Url,
+    pub initiator_host: Option<&'a str>,
+    pub top_level: bool,
+    pub method: &'a str,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -59,18 +75,33 @@ impl CookieJar {
         }
     }
 
-    /// `Cookie` header value for `url`, or `None` when nothing matches.
+    /// `Cookie` header for an address-bar load. No initiator means the cookie
+    /// is not crossing sites, so `SameSite` does not drop it.
     pub fn header_for(&self, url: &Url) -> Option<String> {
+        self.header_for_request(&CookieRequest {
+            url,
+            initiator_host: None,
+            top_level: true,
+            method: "GET",
+        })
+    }
+
+    pub fn header_for_request(&self, request: &CookieRequest<'_>) -> Option<String> {
         let now = now_secs();
         let mut pairs = Vec::new();
         for cookie in &self.cookies {
             if cookie.expires_at.is_some_and(|expires| expires <= now) {
                 continue;
             }
-            if cookie.secure && url.scheme != "https" {
+            if cookie.secure && request.url.scheme != "https" {
                 continue;
             }
-            if !domain_matches(cookie, &url.host) || !path_matches(&cookie.path, &url.path) {
+            if !domain_matches(cookie, &request.url.host)
+                || !path_matches(&cookie.path, &request.url.path)
+            {
+                continue;
+            }
+            if !same_site_allows(cookie, request) {
                 continue;
             }
             pairs.push(format!("{}={}", cookie.name, cookie.value));
@@ -99,7 +130,9 @@ pub fn parse_set_cookie(header: &str, url: &Url, now: u64) -> Option<Cookie> {
         path: default_path(&url.path),
         secure: false,
         expires_at: None,
+        same_site: SameSite::Default,
     };
+    let mut max_age_set = false;
     for attribute in parts {
         let attribute = attribute.trim();
         if attribute.is_empty() {
@@ -124,14 +157,106 @@ pub fn parse_set_cookie(header: &str, url: &Url, now: u64) -> Option<Cookie> {
             }
             "secure" => cookie.secure = true,
             "max-age" => match raw.parse::<i64>() {
-                Ok(age) if age <= 0 => cookie.expires_at = Some(0),
-                Ok(age) => cookie.expires_at = Some(now.saturating_add(age as u64)),
+                Ok(age) if age <= 0 => {
+                    cookie.expires_at = Some(0);
+                    max_age_set = true;
+                }
+                Ok(age) => {
+                    cookie.expires_at = Some(now.saturating_add(age as u64));
+                    max_age_set = true;
+                }
                 Err(_) => {}
             },
+            "expires" if !max_age_set => {
+                cookie.expires_at = parse_http_date(raw);
+            }
+            "samesite" => {
+                cookie.same_site = match raw.to_ascii_lowercase().as_str() {
+                    "strict" => SameSite::Strict,
+                    "none" => SameSite::None,
+                    _ => SameSite::Lax,
+                };
+            }
             _ => {}
         }
     }
+    if cookie.same_site == SameSite::None && !cookie.secure {
+        return None;
+    }
     Some(cookie)
+}
+
+fn same_site_allows(cookie: &Cookie, request: &CookieRequest<'_>) -> bool {
+    let Some(initiator) = request.initiator_host else {
+        return true;
+    };
+    if site_of(initiator) == site_of(&request.url.host) {
+        return true;
+    }
+    match cookie.same_site {
+        SameSite::Strict => false,
+        SameSite::Lax | SameSite::Default => {
+            request.top_level && request.method.eq_ignore_ascii_case("GET")
+        }
+        SameSite::None => cookie.secure,
+    }
+}
+
+fn site_of(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return host;
+    }
+    let parts: Vec<&str> = host.split('.').filter(|part| !part.is_empty()).collect();
+    if parts.len() >= 2 {
+        format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1])
+    } else {
+        host
+    }
+}
+
+fn parse_http_date(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() || value == "0" {
+        return Some(0);
+    }
+    let mut parts = value.split_whitespace();
+    let _weekday = parts.next()?;
+    let day: u64 = parts.next()?.trim_end_matches(',').parse().ok()?;
+    let month = match parts.next()?.to_ascii_lowercase().as_str() {
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
+        _ => return None,
+    };
+    let year: i32 = parts.next()?.parse().ok()?;
+    let clock = parts.next()?;
+    let mut clock = clock.split(':');
+    let hour: u64 = clock.next()?.parse().ok()?;
+    let minute: u64 = clock.next()?.parse().ok()?;
+    let second: u64 = clock.next()?.parse().ok()?;
+    Some(days_from_civil(year, month, day as i32) * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+/// Howard Hinnant's civil-from-days, inverted. Days since 1970-01-01.
+fn days_from_civil(year: i32, month: u32, day: i32) -> u64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = (year - era * 400) as u64;
+    let month = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * month as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era as i64 * 146097 + doe as i64 - 719468;
+    days.max(0) as u64
 }
 
 fn same_slot(left: &Cookie, right: &Cookie) -> bool {
@@ -224,6 +349,66 @@ mod tests {
             &[("set-cookie".into(), "sid=abc; Max-Age=0; Path=/".into())],
         );
         assert!(jar.header_for(&page).is_none());
+    }
+
+    #[test]
+    fn expires_and_samesite_filter_later_requests() {
+        let mut jar = CookieJar::new();
+        let page = url("https://example.com/");
+        jar.ingest(
+            &page,
+            &[(
+                "set-cookie".into(),
+                "old=1; Expires=Thu, 01 Jan 1970 00:00:01 GMT; Path=/".into(),
+            )],
+        );
+        assert!(jar.header_for(&page).is_none(), "a past Expires deletes");
+        assert_eq!(parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+        jar.ingest(
+            &page,
+            &[(
+                "set-cookie".into(),
+                "strict=1; SameSite=Strict; Path=/".into(),
+            )],
+        );
+        jar.ingest(
+            &page,
+            &[("set-cookie".into(), "lax=1; SameSite=Lax; Path=/".into())],
+        );
+        let cross = CookieRequest {
+            url: &page,
+            initiator_host: Some("other.test"),
+            top_level: true,
+            method: "GET",
+        };
+        let header = jar.header_for_request(&cross).unwrap_or_default();
+        assert!(!header.contains("strict=1"), "{header}");
+        assert!(header.contains("lax=1"), "{header}");
+        let sub = CookieRequest {
+            url: &page,
+            initiator_host: Some("other.test"),
+            top_level: false,
+            method: "GET",
+        };
+        assert!(jar.header_for_request(&sub).is_none());
+        let same = CookieRequest {
+            url: &url("https://www.example.com/"),
+            initiator_host: Some("example.com"),
+            top_level: false,
+            method: "POST",
+        };
+        jar.ingest(
+            &page,
+            &[(
+                "set-cookie".into(),
+                "shared=1; Domain=example.com; Path=/".into(),
+            )],
+        );
+        assert!(
+            jar.header_for_request(&same)
+                .unwrap_or_default()
+                .contains("shared=1")
+        );
     }
 
     #[test]

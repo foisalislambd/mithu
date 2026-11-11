@@ -18,7 +18,7 @@ JavaScript stays on [Boa](https://github.com/boa-dev/boa) (`boa_engine` in `crat
 
 The window stays on `winit` and `softbuffer`. Chromium draws its widgets with the Views toolkit (`chrome/browser/ui/views`) and draws web content with Skia (`SkCanvas` in the Skia tree) through the compositor (`cc/`). A GPU stack (`wgpu`) or a retained widget toolkit would add a large dependency for a UI that is a handful of rectangles and glyphs. Mithu already rasterizes the page and the browser frame into one CPU buffer. That is the lightweight stand-in for Skia plus Views: one framebuffer, no GPU process.
 
-Other existing edges stay as they are: `rustls` and `webpki-roots` for TLS, `fontdue` for glyphs, and the `image` crate (via `mithu-image`) for PNG, JPEG, GIF, and WebP. The screenshot path reuses that same `image` crate to write a PNG. No new third-party crate was added.
+Other existing edges stay as they are: `rustls` and `webpki-roots` for TLS, `fontdue` for glyphs, and the `image` crate (via `mithu-image`) for PNG, JPEG, GIF, and WebP. The screenshot path reuses that same `image` crate to write a PNG. `flate2` and `brotli` are the only new third-party crates. Nothing already in the workspace inflates gzip, deflate, or brotli.
 
 ## Process model
 
@@ -37,7 +37,7 @@ Today `Browser::install` in `crates/shell` builds the `Committed` message after 
 Same order Chromium uses, with a much smaller implementation at each step:
 
 1. The omnibox text becomes a URL (`mithu-url`). A hostname without a scheme is HTTPS. Other text is a DuckDuckGo query.
-2. The browser process fetches it (`mithu-net`): HTTP/1.1 on a TCP socket, TLS through Rustls, redirects, `Cookie` / `Set-Cookie`, and a memory cache for `Cache-Control: max-age`.
+2. The browser process fetches it (`mithu-net`): HTTP/1.1, or HTTP/2 when TLS negotiates `h2`, redirects, `Cookie` / `Set-Cookie` (`Expires` and `SameSite`), gzip/deflate/brotli, a memory cache, and a disk cache for non-loopback `Cache-Control: max-age` responses.
 3. The renderer parses HTML into a DOM (`mithu-html`, `mithu-dom`).
 4. CSS is parsed (`mithu-css`) and cascaded (`mithu-style`), including the user-agent sheet.
 5. Boa runs classic scripts and module scripts (`mithu-js`) against that DOM.
@@ -55,13 +55,13 @@ Same order Chromium uses, with a much smaller implementation at each step:
 | `chrome/browser/ui/color/chrome_color_id.h` | color constants in shell | Light Chrome colors: tab strip `#DEE1E6`, white toolbar, omnibox `#F1F3F4`, focus `#1A73E8`. |
 | `chrome/browser/ui` new tab | `about:mithu` | Centered wordmark, a search hint, and shortcut tiles. Not Google's new tab page. |
 | `content/browser` navigation | `Browser` history in shell | Per-tab history, back, forward, reload. Reload bypasses the cache. |
-| `net/url_request`, `net/http/http_cache.h` | `mithu-net` | HTTP/1.1, redirects, a 32-entry memory cache. No disk cache, no HTTP/2. |
-| `net/cookies/cookie_store.h` | `CookieJar` in `mithu-net` | Name, value, domain, path, Secure, Max-Age. One jar for the process. |
+| `net/url_request`, `net/http/http_cache.h`, `net/spdy` | `mithu-net` | HTTP/1.1 and a one-stream HTTP/2 client, redirects, a 32-entry memory cache, and a disk cache under `MITHU_CACHE` or the temp directory. |
+| `net/cookies/cookie_store.h` | `CookieJar` in `mithu-net` | Name, value, domain, path, Secure, Max-Age, Expires, SameSite. One jar for the process. |
 | `net/socket/ssl_client_socket.h` | Rustls in `mithu-net` | Certificate check against the webpki root set. |
 | `third_party/blink/renderer/core/html` | `mithu-html` | Tokenizer and a tree builder, including tables and the adoption agency algorithm. Not a full HTML5 parser. |
 | `third_party/blink/renderer/core/dom/document.h` | `mithu-dom` | Arena DOM. Scripts can mutate it through Boa. |
 | `third_party/blink/renderer/core/css` | `mithu-css`, `mithu-style` | A subset: selectors, cascade, custom properties, media width queries. Not the full CSS engine. |
-| `third_party/blink/renderer/core/layout/layout_object.h` | `mithu-layout` | Block, inline, and a small flex model. No floats, no grid. |
+| `third_party/blink/renderer/core/layout/layout_object.h` | `mithu-layout` | Block, inline, flex (including shrink), floats, and a row-major grid. |
 | `cc/` and Skia `SkCanvas` | `mithu-paint` | Software framebuffer, `0x00RRGGBB`. |
 | `v8/src` | `mithu-js` (Boa) | DOM bindings, events, timers, `fetch`, modules. Boa, not V8. |
 | `chrome/browser/ui/views` widget tree | `winit` + `softbuffer` in `app/mithu` | One native window. Input is forwarded into `Browser`. |
@@ -73,7 +73,7 @@ The design choices that keep the binary and the memory down:
 - One process, one cookie jar, one memory cache (no network service process, no GPU process).
 - CPU rasterization instead of Skia/GPU.
 - Boa instead of V8.
-- HTTP/1.1 with `Accept-Encoding: identity`, so response bodies are not decompressed by another library.
+- HTTP/1.1 by default, with HTTP/2 only after ALPN selects `h2`. Bodies are inflated with `flate2` (gzip, deflate) and `brotli`. Those two crates were added because nothing already in the workspace decodes `Content-Encoding`.
 - Images and stylesheets are capped (16 images, stylesheets limited in size and count).
 
 ## Window

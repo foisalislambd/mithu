@@ -44,7 +44,30 @@ pub enum Display {
     InlineBlock,
     ListItem,
     Flex,
+    Grid,
     None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatSide {
+    None,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clear {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GridTrack {
+    Px(f32),
+    Fr(f32),
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,7 +190,12 @@ pub struct ComputedStyle {
     pub align_items: AlignItems,
     pub align_self: Option<AlignItems>,
     pub flex_grow: f32,
+    pub flex_shrink: f32,
     pub flex_basis: Length,
+    pub float: FloatSide,
+    pub clear: Clear,
+    pub grid_columns: Vec<GridTrack>,
+    pub grid_span: u16,
     pub box_sizing: BoxSizing,
     pub overflow_hidden: bool,
     pub border_radius: f32,
@@ -226,7 +254,12 @@ impl ComputedStyle {
             align_items: AlignItems::Stretch,
             align_self: None,
             flex_grow: 0.0,
+            flex_shrink: 1.0,
             flex_basis: Length::Auto,
+            float: FloatSide::None,
+            clear: Clear::None,
+            grid_columns: Vec::new(),
+            grid_span: 1,
             box_sizing: BoxSizing::ContentBox,
             overflow_hidden: false,
             border_radius: 0.0,
@@ -295,7 +328,12 @@ struct Specified {
     align_items: Option<Ranked<AlignItems>>,
     align_self: Option<Ranked<AlignItems>>,
     flex_grow: Option<Ranked<f32>>,
+    flex_shrink: Option<Ranked<f32>>,
     flex_basis: Option<Ranked<Length>>,
+    float: Option<Ranked<FloatSide>>,
+    clear: Option<Ranked<Clear>>,
+    grid_columns: Option<Ranked<Vec<GridTrack>>>,
+    grid_span: Option<Ranked<u16>>,
     box_sizing: Option<Ranked<BoxSizing>>,
     overflow_hidden: Option<Ranked<bool>>,
     border_radius: Option<Ranked<f32>>,
@@ -938,6 +976,31 @@ fn apply_declaration(
                 rank(&mut specified.flex_grow, grow.max(0.0), spec);
             }
         }
+        "flex-shrink" => {
+            if let Some(shrink) = value.trim().parse::<f32>().ok() {
+                rank(&mut specified.flex_shrink, shrink.max(0.0), spec);
+            }
+        }
+        "float" => {
+            if let Some(side) = parse_float(value) {
+                rank(&mut specified.float, side, spec);
+            }
+        }
+        "clear" => {
+            if let Some(clear) = parse_clear(value) {
+                rank(&mut specified.clear, clear, spec);
+            }
+        }
+        "grid-template-columns" => {
+            if let Some(tracks) = parse_grid_tracks(value) {
+                rank(&mut specified.grid_columns, tracks, spec);
+            }
+        }
+        "grid-column" => {
+            if let Some(span) = parse_grid_span(value) {
+                rank(&mut specified.grid_span, span, spec);
+            }
+        }
         "box-sizing" => {
             if let Some(sizing) = parse_box_sizing(value) {
                 rank(&mut specified.box_sizing, sizing, spec);
@@ -1153,6 +1216,11 @@ fn concretize(
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(0.0),
+        flex_shrink: specified
+            .flex_shrink
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(1.0),
         flex_basis: specified
             .flex_basis
             .as_ref()
@@ -1187,6 +1255,27 @@ fn concretize(
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(parent.text_transform),
+        float: specified
+            .float
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(FloatSide::None),
+        clear: specified
+            .clear
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Clear::None),
+        grid_columns: specified
+            .grid_columns
+            .as_ref()
+            .map(|item| item.value.clone())
+            .unwrap_or_default(),
+        grid_span: specified
+            .grid_span
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(1)
+            .max(1),
     };
     apply_presentational_hints(doc, id, &mut computed);
     computed
@@ -1548,6 +1637,7 @@ fn parse_display(value: &str) -> Option<Display> {
         "inline-block" => Display::InlineBlock,
         "list-item" => Display::ListItem,
         "flex" | "inline-flex" => Display::Flex,
+        "grid" | "inline-grid" => Display::Grid,
         "none" => Display::None,
         _ => return None,
     })
@@ -1587,6 +1677,115 @@ fn parse_position(value: &str) -> Option<Position> {
         "fixed" => Position::Fixed,
         _ => return None,
     })
+}
+
+fn parse_float(value: &str) -> Option<FloatSide> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "left" => FloatSide::Left,
+        "right" => FloatSide::Right,
+        "none" => FloatSide::None,
+        _ => return None,
+    })
+}
+
+fn parse_clear(value: &str) -> Option<Clear> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "left" => Clear::Left,
+        "right" => Clear::Right,
+        "both" => Clear::Both,
+        "none" => Clear::None,
+        _ => return None,
+    })
+}
+
+fn parse_grid_span(value: &str) -> Option<u16> {
+    let value = value.trim().to_ascii_lowercase();
+    let token = value
+        .strip_prefix("span")
+        .map(str::trim)
+        .unwrap_or(value.as_str());
+    let span = token.split_whitespace().next()?.parse::<u16>().ok()?;
+    Some(span.max(1))
+}
+
+fn parse_grid_tracks(value: &str) -> Option<Vec<GridTrack>> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let mut tokens = tokenize_tracks(value);
+    let mut tracks = Vec::new();
+    while !tokens.is_empty() {
+        if tokens[0].eq_ignore_ascii_case("repeat") {
+            tokens.remove(0);
+            if tokens.first().is_some_and(|token| token == "(") {
+                tokens.remove(0);
+            }
+            let count: usize = tokens.first()?.parse().ok()?;
+            tokens.remove(0);
+            if tokens.first().is_some_and(|token| token == ",") {
+                tokens.remove(0);
+            }
+            let mut inner = Vec::new();
+            while let Some(token) = tokens.first() {
+                if token == ")" {
+                    tokens.remove(0);
+                    break;
+                }
+                inner.push(parse_track(token)?);
+                tokens.remove(0);
+            }
+            if inner.is_empty() || count > 64 {
+                return None;
+            }
+            for _ in 0..count {
+                tracks.extend(inner.iter().cloned());
+            }
+        } else {
+            tracks.push(parse_track(&tokens.remove(0))?);
+        }
+    }
+    Some(tracks)
+}
+
+fn tokenize_tracks(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch == '(' || ch == ')' || ch == ',' {
+            if !current.trim().is_empty() {
+                tokens.push(current.trim().to_string());
+            }
+            current.clear();
+            tokens.push(ch.to_string());
+        } else if ch.is_whitespace() {
+            if !current.trim().is_empty() {
+                tokens.push(current.trim().to_string());
+            }
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.trim().is_empty() {
+        tokens.push(current.trim().to_string());
+    }
+    tokens
+}
+
+fn parse_track(token: &str) -> Option<GridTrack> {
+    let token = token.trim().to_ascii_lowercase();
+    if token == "auto" {
+        return Some(GridTrack::Auto);
+    }
+    if let Some(number) = token.strip_suffix("fr") {
+        let fr = number.trim().parse::<f32>().ok()?;
+        return Some(GridTrack::Fr(fr.max(0.0)));
+    }
+    match parse_length(&token)? {
+        Length::Px(px) => Some(GridTrack::Px(px.max(0.0))),
+        _ => None,
+    }
 }
 
 fn parse_flex_direction(value: &str) -> Option<(FlexDirection, bool)> {
@@ -2194,7 +2393,7 @@ mod tests {
         let doc = parse_html("<p style=\"color: rgb(1, 2, 3)\">Hi</p>");
         let styles = style_document(&doc, "p { color: red }");
         let p = doc.get_element_by_id("").or_else(|| {
-            doc.nodes.iter().enumerate().find_map(|(index, node)| {
+            doc.nodes.iter().enumerate().find_map(|(index, _node)| {
                 matches!(doc.element_name(NodeId(index)), Some("p")).then_some(NodeId(index))
             })
         });

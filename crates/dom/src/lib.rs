@@ -298,6 +298,12 @@ impl Document {
         if parent == child || self.contains_node(child, parent) {
             return false;
         }
+        // Inserting a node before itself means "leave it in front of the next sibling".
+        let before = if before == Some(child) {
+            self.next_sibling(child)
+        } else {
+            before
+        };
         self.detach(child);
         self.nodes[child.0].parent = Some(parent);
         if let Some(before) = before
@@ -339,6 +345,13 @@ impl Document {
             data: NodeData::Text(text.to_string()),
         });
         self.nodes[parent.0].children.insert(index, id);
+    }
+
+    fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.nodes.get(id.0)?.parent?;
+        let children = &self.nodes.get(parent.0)?.children;
+        let index = children.iter().position(|child| *child == id)?;
+        children.get(index + 1).copied()
     }
 
     pub fn element_child_index(&self, id: NodeId) -> Option<usize> {

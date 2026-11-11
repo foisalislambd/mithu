@@ -190,6 +190,8 @@ impl ApplicationHandler for App {
                     self.browser.pointer_down(self.cursor.0, self.cursor.1);
                     self.sync_title();
                     self.request_redraw();
+                } else if button == MouseButton::Left && state == ElementState::Released {
+                    self.browser.pointer_up();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
