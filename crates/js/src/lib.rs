@@ -37,6 +37,8 @@ struct Host {
     event_current: Rc<Cell<Option<usize>>>,
     local: Rc<RefCell<HashMap<String, String>>>,
     session_store: Rc<RefCell<HashMap<String, String>>>,
+    history: Rc<RefCell<Vec<String>>>,
+    history_index: Rc<Cell<usize>>,
 }
 
 struct Clock {
@@ -132,6 +134,8 @@ impl Session {
             event_current: Rc::new(Cell::new(None)),
             local: Rc::clone(&local),
             session_store: Rc::clone(&session_store),
+            history: Rc::new(RefCell::new(vec![href.to_string()])),
+            history_index: Rc::new(Cell::new(0)),
         });
         if let Err(error) = install_host(&mut context) {
             log.borrow_mut().push(format!("JavaScript error: {error}"));
@@ -496,6 +500,7 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     let session_storage = storage_object(context, true)?;
     context.register_global_property(js_string!("localStorage"), local_storage, flags)?;
     context.register_global_property(js_string!("sessionStorage"), session_storage, flags)?;
+    crate::web::register(context)?;
     Ok(())
 }
 
@@ -709,7 +714,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     Ok(object.build())
 }
 
-fn native(
+pub(crate) fn native(
     context: &mut Context,
     name: &str,
     length: usize,
@@ -1996,11 +2001,11 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     }
 }
 
-fn cross_origin(page: &mithu_url::Url, target: &mithu_url::Url) -> bool {
+pub(crate) fn cross_origin(page: &mithu_url::Url, target: &mithu_url::Url) -> bool {
     page.scheme != target.scheme || page.host != target.host || page.port != target.port
 }
 
-fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
+pub(crate) fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
     let Some(allow) = allow.map(str::trim) else {
         return false;
     };
@@ -2011,7 +2016,7 @@ fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
     allow == format!("{}://{}{port}", page.scheme, page.host)
 }
 
-fn resolve_request(location: &str, spec: &str) -> Result<mithu_url::Url, String> {
+pub(crate) fn resolve_request(location: &str, spec: &str) -> Result<mithu_url::Url, String> {
     if let Ok(absolute) = mithu_url::Url::parse(spec) {
         return Ok(absolute);
     }
@@ -2679,7 +2684,7 @@ fn form_encode(text: &str) -> String {
     out
 }
 
-fn host(context: &mut Context) -> JsResult<Host> {
+pub(crate) fn host(context: &mut Context) -> JsResult<Host> {
     context.get_data::<Host>().cloned().ok_or_else(type_error)
 }
 
@@ -2689,7 +2694,7 @@ fn type_error() -> JsError {
         .into()
 }
 
-fn arg_string(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<String> {
+pub(crate) fn arg_string(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<String> {
     let value = args.get(index).cloned().unwrap_or(JsValue::undefined());
     Ok(value.to_string(context)?.to_std_string_lossy())
 }
@@ -2807,6 +2812,8 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
+
+mod web;
 
 #[cfg(test)]
 mod tests {
@@ -2997,6 +3004,35 @@ mod tests {
         assert_eq!(submission.action, "/search");
         assert_eq!(submission.method, "get");
         assert_eq!(submission.query, "q=mithu+browser&show=yes");
+    }
+
+    #[test]
+    fn url_text_encoder_history_and_observer_exist() {
+        let doc = parse_html(
+            r#"<script>
+              var url = new URL("/docs?q=mithu+browser#top", "https://example.com/a/b");
+              var path = url.pathname;
+              var query = url.searchParams.get("q");
+              var hash = url.hash;
+              var encoded = new TextEncoder().encode("Hi");
+              var decoded = new TextDecoder().decode(encoded);
+              var latin = atob(btoa("mithu"));
+              history.pushState(null, "", "/next");
+              history.replaceState(null, "", "/replaced");
+              new MutationObserver(function () {});
+              document.title = path + "|" + query + "|" + hash + "|" + decoded + "|" + latin + "|" + location.href;
+            </script>"#,
+        );
+        let session = Session::open_at(doc, "https://example.com/a/b", |_| None);
+        assert!(
+            session.logs().is_empty(),
+            "host classes should not throw: {:?}",
+            session.logs()
+        );
+        assert_eq!(
+            session.document().title,
+            "/docs|mithu browser|#top|Hi|mithu|https://example.com/replaced"
+        );
     }
 
     #[test]

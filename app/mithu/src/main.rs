@@ -34,15 +34,25 @@ fn run() {
             }
             return;
         }
-        let event_loop = EventLoop::new().expect("create the event loop");
+        let event_loop = event_loop();
         let mut app = App::new();
         app.browser.navigate(&first);
         event_loop.run_app(&mut app).expect("run the window");
         return;
     }
-    let event_loop = EventLoop::new().expect("create the event loop");
+    let event_loop = event_loop();
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("run the window");
+}
+
+fn event_loop() -> EventLoop<()> {
+    let mut builder = EventLoop::builder();
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_any_thread(true);
+    }
+    builder.build().expect("create the event loop")
 }
 
 fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
