@@ -301,7 +301,10 @@ impl Document {
         self.detach(child);
         self.nodes[child.0].parent = Some(parent);
         if let Some(before) = before
-            && let Some(index) = self.nodes[parent.0].children.iter().position(|id| *id == before)
+            && let Some(index) = self.nodes[parent.0]
+                .children
+                .iter()
+                .position(|id| *id == before)
         {
             self.nodes[parent.0].children.insert(index, child);
             return true;
@@ -314,7 +317,11 @@ impl Document {
         if text.is_empty() || self.nodes.get(parent.0).is_none() {
             return;
         }
-        let Some(index) = self.nodes[parent.0].children.iter().position(|id| *id == before) else {
+        let Some(index) = self.nodes[parent.0]
+            .children
+            .iter()
+            .position(|id| *id == before)
+        else {
             self.append_text(parent, text);
             return;
         };
@@ -377,7 +384,12 @@ impl Document {
         for id in ids {
             match self.element_name(id) {
                 Some("title") if title.is_none() => {
-                    title = Some(self.text_content(id).split_whitespace().collect::<Vec<_>>().join(" "));
+                    title = Some(
+                        self.text_content(id)
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    );
                 }
                 Some("style") => {
                     let text = self.text_content(id);

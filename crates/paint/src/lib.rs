@@ -3,7 +3,7 @@
 use mithu_base::{Color, Rect};
 use mithu_image::Bitmap;
 use mithu_layout::{LayoutBox, LayoutTree};
-use mithu_text::{glyph_top, FontBook, MeasureText};
+use mithu_text::{FontBook, MeasureText, glyph_top};
 
 pub struct Canvas<'a> {
     pub pixels: &'a mut [u32],
@@ -76,7 +76,12 @@ impl Canvas<'_> {
                 let u = (u as i64).clamp(0, bitmap.width as i64 - 1) as u32;
                 let v = (v as i64).clamp(0, bitmap.height as i64 - 1) as u32;
                 let packed = bitmap.pixels[(v * bitmap.width + u) as usize];
-                let color = Color::rgba((packed >> 16) as u8, (packed >> 8) as u8, packed as u8, (packed >> 24) as u8);
+                let color = Color::rgba(
+                    (packed >> 16) as u8,
+                    (packed >> 8) as u8,
+                    packed as u8,
+                    (packed >> 24) as u8,
+                );
                 if color.a == 0 {
                     continue;
                 }
@@ -150,7 +155,14 @@ pub fn paint_layout(
     paint_box(canvas, &tree.root, fonts, clip, scroll, origin_y);
 }
 
-fn paint_box(canvas: &mut Canvas<'_>, box_: &LayoutBox, fonts: &FontBook, clip: Rect, scroll: f32, origin_y: f32) {
+fn paint_box(
+    canvas: &mut Canvas<'_>,
+    box_: &LayoutBox,
+    fonts: &FontBook,
+    clip: Rect,
+    scroll: f32,
+    origin_y: f32,
+) {
     paint_box_with_opacity(canvas, box_, fonts, clip, scroll, origin_y, 1.0, false);
 }
 
@@ -169,7 +181,11 @@ fn paint_box_with_opacity(
     }
     let pinned = pinned || box_.fixed;
     let opacity = (opacity * box_.opacity).clamp(0.0, 1.0);
-    let screen_y = if pinned { box_.rect.y + origin_y } else { box_.rect.y - scroll + origin_y };
+    let screen_y = if pinned {
+        box_.rect.y + origin_y
+    } else {
+        box_.rect.y - scroll + origin_y
+    };
     let screen = Rect::new(box_.rect.x, screen_y, box_.rect.width, box_.rect.height);
     let background = scale_alpha(box_.background, opacity);
     if background.a > 0 {
@@ -198,16 +214,32 @@ fn paint_box_with_opacity(
         let bottom = box_.borders[2].max(0.0);
         let left = box_.borders[3].max(0.0);
         if top > 0.0 {
-            canvas.fill(Rect::new(screen.x, screen.y, screen.width, top), border_color, clip);
+            canvas.fill(
+                Rect::new(screen.x, screen.y, screen.width, top),
+                border_color,
+                clip,
+            );
         }
         if bottom > 0.0 {
-            canvas.fill(Rect::new(screen.x, screen.bottom() - bottom, screen.width, bottom), border_color, clip);
+            canvas.fill(
+                Rect::new(screen.x, screen.bottom() - bottom, screen.width, bottom),
+                border_color,
+                clip,
+            );
         }
         if left > 0.0 {
-            canvas.fill(Rect::new(screen.x, screen.y, left, screen.height), border_color, clip);
+            canvas.fill(
+                Rect::new(screen.x, screen.y, left, screen.height),
+                border_color,
+                clip,
+            );
         }
         if right > 0.0 {
-            canvas.fill(Rect::new(screen.right() - right, screen.y, right, screen.height), border_color, clip);
+            canvas.fill(
+                Rect::new(screen.right() - right, screen.y, right, screen.height),
+                border_color,
+                clip,
+            );
         }
     }
     let child_clip = if box_.overflow_hidden {
@@ -222,7 +254,13 @@ fn paint_box_with_opacity(
         let baseline = box_
             .lines
             .first()
-            .map(|line| if pinned { line.baseline + origin_y } else { line.baseline - scroll + origin_y })
+            .map(|line| {
+                if pinned {
+                    line.baseline + origin_y
+                } else {
+                    line.baseline - scroll + origin_y
+                }
+            })
             .unwrap_or(screen.y + box_.font_size);
         canvas.text(
             fonts,
@@ -238,7 +276,11 @@ fn paint_box_with_opacity(
         );
     }
     for line in &box_.lines {
-        let baseline = if pinned { line.baseline + origin_y } else { line.baseline - scroll + origin_y };
+        let baseline = if pinned {
+            line.baseline + origin_y
+        } else {
+            line.baseline - scroll + origin_y
+        };
         for fragment in &line.fragments {
             canvas.text(
                 fonts,
@@ -257,7 +299,16 @@ fn paint_box_with_opacity(
     let mut order: Vec<usize> = (0..box_.children.len()).collect();
     order.sort_by_key(|index| box_.children[*index].z_index);
     for index in order {
-        paint_box_with_opacity(canvas, &box_.children[index], fonts, child_clip, scroll, origin_y, opacity, pinned);
+        paint_box_with_opacity(
+            canvas,
+            &box_.children[index],
+            fonts,
+            child_clip,
+            scroll,
+            origin_y,
+            opacity,
+            pinned,
+        );
     }
 }
 
@@ -359,7 +410,10 @@ mod tests {
             false,
             Rect::new(0.0, 0.0, 80.0, 80.0),
         );
-        let above = pixels.iter().take(50 * 80).any(|pixel| *pixel != Color::WHITE.to_u32());
+        let above = pixels
+            .iter()
+            .take(50 * 80)
+            .any(|pixel| *pixel != Color::WHITE.to_u32());
         assert!(above, "glyph should rise above the baseline");
     }
 }

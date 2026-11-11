@@ -11,34 +11,45 @@ use mithu_dom::{Document, NodeId};
 use mithu_html::parse_html;
 use mithu_image::Bitmap;
 use mithu_js::{Session, Submission};
-use mithu_layout::{hit_test, layout_tree, LayoutTree};
+use mithu_layout::{LayoutTree, hit_test, layout_tree};
 use mithu_net::{get, post};
-use mithu_paint::{paint_layout, Canvas};
-use mithu_style::{style_with, ComputedStyle, StyleState};
+use mithu_paint::{Canvas, paint_layout};
+use mithu_style::{ComputedStyle, StyleState, style_with};
 use mithu_text::{FontBook, MeasureText};
 use mithu_url::{Url, UrlError};
 
+mod process;
+
 pub const TAB_H: f32 = 40.0;
-pub const TOOLBAR_H: f32 = 56.0;
-pub const CONTENT_TOP: f32 = TAB_H + TOOLBAR_H;
+pub const TOOLBAR_H: f32 = 48.0;
+pub const BOOKMARK_BAR_H: f32 = 32.0;
+pub const CONTENT_TOP: f32 = TAB_H + TOOLBAR_H + BOOKMARK_BAR_H;
 pub const FIND_H: f32 = 36.0;
 pub const STATUS_H: f32 = 26.0;
 
-const TOOLBAR: Color = Color::rgb(22, 52, 47);
-const BUTTON: Color = Color::rgb(32, 74, 66);
-const BUTTON_TEXT: Color = Color::rgb(244, 247, 244);
-const BUTTON_DISABLED: Color = Color::rgb(132, 156, 150);
-const ADDRESS: Color = Color::rgb(255, 253, 248);
-const ADDRESS_BORDER: Color = Color::rgb(196, 188, 170);
-const ADDRESS_FOCUS: Color = Color::rgb(244, 208, 122);
-const STATUS_BG: Color = Color::rgb(236, 232, 223);
-const STATUS_TEXT: Color = Color::rgb(62, 56, 48);
-const SELECTION: Color = Color::rgb(196, 220, 246);
+/// Chrome light theme. Tab strip `#DEE1E6`, toolbar white, omnibox `#F1F3F4`.
+const TAB_STRIP: Color = Color::rgb(222, 225, 230);
+const TOOLBAR: Color = Color::rgb(255, 255, 255);
+const ICON: Color = Color::rgb(60, 64, 67);
+const ICON_DISABLED: Color = Color::rgb(154, 160, 166);
+const OMNIBOX: Color = Color::rgb(241, 243, 244);
+const ADDRESS: Color = Color::rgb(255, 255, 255);
+const ADDRESS_BORDER: Color = Color::rgb(218, 220, 224);
+const ADDRESS_FOCUS: Color = Color::rgb(26, 115, 232);
+const STATUS_BG: Color = Color::rgb(248, 249, 250);
+const STATUS_TEXT: Color = Color::rgb(95, 99, 104);
+const SELECTION: Color = Color::rgb(232, 240, 254);
 const FIND_HIT: Color = Color::rgb(255, 214, 64);
 const FIND_ACTIVE: Color = Color::rgb(255, 140, 40);
 const FIND_BAR: Color = Color::rgb(255, 248, 220);
-const STAR: Color = Color::rgb(244, 196, 64);
-const ZOOMS: [f32; 17] = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0];
+const STAR: Color = Color::rgb(242, 180, 0);
+const BOOKMARKED: Color = Color::rgb(254, 239, 195);
+const SEPARATOR: Color = Color::rgb(218, 220, 224);
+const CHIP: Color = Color::rgb(241, 243, 244);
+const INK: Color = Color::rgb(32, 33, 36);
+const ZOOMS: [f32; 17] = [
+    0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0,
+];
 
 struct Page {
     history: Vec<Url>,
@@ -96,7 +107,14 @@ impl Page {
             status: String::new(),
             document: Document::new(),
             styles: Vec::new(),
-            layout: layout_tree(&Document::new(), &[], width, 600.0, &mithu_text::NaiveMetrics, &HashMap::new()),
+            layout: layout_tree(
+                &Document::new(),
+                &[],
+                width,
+                600.0,
+                &mithu_text::NaiveMetrics,
+                &HashMap::new(),
+            ),
             images: HashMap::new(),
             session: None,
             focused: None,
@@ -199,7 +217,11 @@ impl Browser {
     pub fn toggle_bookmark(&mut self) {
         let url = self.page().current.clone();
         let key = url.to_display();
-        if let Some(index) = self.bookmarks.iter().position(|item| item.url.to_display() == key) {
+        if let Some(index) = self
+            .bookmarks
+            .iter()
+            .position(|item| item.url.to_display() == key)
+        {
             self.bookmarks.remove(index);
             return;
         }
@@ -238,7 +260,9 @@ impl Browser {
 
     pub fn is_bookmarked(&self) -> bool {
         let key = self.page().current.to_display();
-        self.bookmarks.iter().any(|item| item.url.to_display() == key)
+        self.bookmarks
+            .iter()
+            .any(|item| item.url.to_display() == key)
     }
 
     pub fn zoom(&self) -> f32 {
@@ -260,9 +284,16 @@ impl Browser {
     fn step_zoom(&mut self, direction: i32) {
         let current = self.page().zoom;
         let next = if direction > 0 {
-            ZOOMS.into_iter().find(|level| *level > current + 0.001).unwrap_or(ZOOMS[ZOOMS.len() - 1])
+            ZOOMS
+                .into_iter()
+                .find(|level| *level > current + 0.001)
+                .unwrap_or(ZOOMS[ZOOMS.len() - 1])
         } else {
-            ZOOMS.into_iter().rev().find(|level| *level < current - 0.001).unwrap_or(ZOOMS[0])
+            ZOOMS
+                .into_iter()
+                .rev()
+                .find(|level| *level < current - 0.001)
+                .unwrap_or(ZOOMS[0])
         };
         self.set_zoom(next);
     }
@@ -302,7 +333,7 @@ impl Browser {
             page.index -= 1;
             page.history[page.index].clone()
         };
-        self.load_url(url);
+        self.load_url(url, false);
     }
 
     pub fn forward(&mut self) {
@@ -314,12 +345,12 @@ impl Browser {
             page.index += 1;
             page.history[page.index].clone()
         };
-        self.load_url(url);
+        self.load_url(url, false);
     }
 
     pub fn reload(&mut self) {
         let url = self.page().current.clone();
-        self.load_url(url);
+        self.load_url(url, true);
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -398,23 +429,31 @@ impl Browser {
             }
             return;
         }
-        if y < CONTENT_TOP {
+        if y < TAB_H + TOOLBAR_H {
             let (back, forward, reload, address) = chrome_rects(self.viewport_w);
+            let (star, menu) = bookmark_buttons(self.viewport_w);
             if back.contains(x, y) && self.can_back() {
                 self.back();
             } else if forward.contains(x, y) && self.can_forward() {
                 self.forward();
             } else if reload.contains(x, y) {
                 self.reload();
+            } else if star.contains(x, y) {
+                self.toggle_bookmark();
+            } else if menu.contains(x, y) {
+                self.open_app_menu();
             } else if address.contains(x, y) {
                 self.focus_omnibox();
-            } else {
-                let (star, list) = bookmark_buttons(self.viewport_w);
-                if star.contains(x, y) {
-                    self.toggle_bookmark();
-                } else if list.contains(x, y) {
-                    self.toggle_bookmark_list();
-                }
+            }
+            return;
+        }
+        if y < CONTENT_TOP {
+            let slots = bookmark_slots(self.viewport_w, self.bookmarks.len());
+            if let Some(index) = slots.iter().position(|rect| rect.contains(x, y))
+                && let Some(bookmark) = self.bookmarks.get(index)
+            {
+                let url = bookmark.url.clone();
+                self.navigate_url(url);
             }
             return;
         }
@@ -464,13 +503,36 @@ impl Browser {
             MenuAction::Forward => self.forward(),
             MenuAction::Reload => self.reload(),
             MenuAction::Bookmark => self.toggle_bookmark(),
+            MenuAction::NewTabPage => self.new_tab(),
+            MenuAction::Bookmarks => self.toggle_bookmark_list(),
         }
+    }
+
+    fn open_app_menu(&mut self) {
+        let menu = menu_button(self.viewport_w);
+        let mut items = vec![("New tab".to_string(), MenuAction::NewTabPage)];
+        if self.can_back() {
+            items.push(("Back".to_string(), MenuAction::Back));
+        }
+        if self.can_forward() {
+            items.push(("Forward".to_string(), MenuAction::Forward));
+        }
+        items.push(("Reload".to_string(), MenuAction::Reload));
+        items.push(("Bookmark this page".to_string(), MenuAction::Bookmark));
+        items.push(("Bookmarks".to_string(), MenuAction::Bookmarks));
+        self.menu = Some(Menu {
+            x: menu.x,
+            y: menu.bottom(),
+            items,
+        });
     }
 
     fn open_in_new_tab(&mut self, href: String) {
         let url = {
             let page = self.page();
-            page.base.resolve(&href).unwrap_or_else(|_| interpret(&href))
+            page.base
+                .resolve(&href)
+                .unwrap_or_else(|_| interpret(&href))
         };
         self.omnibox_focused = false;
         self.find_focused = false;
@@ -519,7 +581,11 @@ impl Browser {
         let Some(id) = self.page().focused else {
             return;
         };
-        let submission = self.page_mut().session.as_mut().and_then(|session| session.submission(id));
+        let submission = self
+            .page_mut()
+            .session
+            .as_mut()
+            .and_then(|session| session.submission(id));
         self.pull_page();
         if let Some(submission) = submission {
             self.send_form(submission);
@@ -744,14 +810,22 @@ impl Browser {
             .find(|item| item.url.to_display() == typed.to_display())
             .map(|item| item.title.clone())
             .unwrap_or_else(|| typed.to_display());
-        items.push(Suggestion { label: typed_label, url: typed });
+        items.push(Suggestion {
+            label: typed_label,
+            url: typed,
+        });
         let needle = query.to_ascii_lowercase();
         for bookmark in &self.bookmarks {
             if items.len() >= 8 {
                 break;
             }
-            let hay = format!("{} {}", bookmark.title, bookmark.url.to_display()).to_ascii_lowercase();
-            if hay.contains(&needle) && items.iter().all(|item| item.url.to_display() != bookmark.url.to_display()) {
+            let hay =
+                format!("{} {}", bookmark.title, bookmark.url.to_display()).to_ascii_lowercase();
+            if hay.contains(&needle)
+                && items
+                    .iter()
+                    .all(|item| item.url.to_display() != bookmark.url.to_display())
+            {
                 items.push(Suggestion {
                     label: bookmark.title.clone(),
                     url: bookmark.url.clone(),
@@ -763,8 +837,13 @@ impl Browser {
                 break;
             }
             let display = url.to_display();
-            if display.to_ascii_lowercase().contains(&needle) && items.iter().all(|item| item.url.to_display() != display) {
-                items.push(Suggestion { label: display, url: url.clone() });
+            if display.to_ascii_lowercase().contains(&needle)
+                && items.iter().all(|item| item.url.to_display() != display)
+            {
+                items.push(Suggestion {
+                    label: display,
+                    url: url.clone(),
+                });
             }
         }
         items
@@ -793,7 +872,7 @@ impl Browser {
             page.history.get(page.index) == Some(&url)
         };
         if same {
-            self.load_url(url);
+            self.load_url(url, true);
             return;
         }
         {
@@ -804,12 +883,12 @@ impl Browser {
             page.history.push(url.clone());
             page.index = page.history.len() - 1;
         }
-        self.load_url(url);
+        self.load_url(url, false);
     }
 
-    fn load_url(&mut self, url: Url) {
+    fn load_url(&mut self, url: Url, bypass_cache: bool) {
         self.page_mut().status = format!("Loading {}", url.to_display());
-        match retrieve(&url) {
+        match retrieve(&url, bypass_cache) {
             Ok(fetched) => self.install(fetched),
             Err(message) => self.install(Fetched {
                 html: error_page(&url, &message),
@@ -826,11 +905,16 @@ impl Browser {
         let layout_width = self.layout_width();
         let document = parse_html(&fetched.html);
         let base = match &document.base_href {
-            Some(href) => fetched.url.resolve(href).unwrap_or_else(|_| fetched.url.clone()),
+            Some(href) => fetched
+                .url
+                .resolve(href)
+                .unwrap_or_else(|_| fetched.url.clone()),
             None => fetched.url.clone(),
         };
         let module_base = base.clone();
-        let mut session = Session::open_at(document, &fetched.url.to_display(), move |src| fetch_text(&module_base, src));
+        let mut session = Session::open_at(document, &fetched.url.to_display(), move |src| {
+            fetch_text(&module_base, src)
+        });
         if let Some(next) = session.take_navigation() {
             self.navigate(&next);
             return;
@@ -861,14 +945,28 @@ impl Browser {
         );
         let images = load_images(&document, &base);
         let layout_height = self.layout_height();
-        let layout = layout_tree(&document, &styles, layout_width, layout_height, &self.fonts, &images);
+        let layout = layout_tree(
+            &document,
+            &styles,
+            layout_width,
+            layout_height,
+            &self.fonts,
+            &images,
+        );
         self.omnibox_focused = false;
         let page = self.page_mut();
-        page.title = if document.title.is_empty() {
-            fetched.url.to_display()
-        } else {
-            document.title.clone()
+        let committed = process::RendererToBrowser::Committed {
+            url: fetched.url.to_display(),
+            title: if document.title.is_empty() {
+                fetched.url.to_display()
+            } else {
+                document.title.clone()
+            },
         };
+        let process::RendererToBrowser::Committed { title, .. } = &committed else {
+            return;
+        };
+        page.title = title.clone();
         page.status = if logs.is_empty() {
             fetched.status
         } else {
@@ -917,7 +1015,10 @@ impl Browser {
     }
 
     pub fn next_timer_ms(&self) -> Option<u64> {
-        self.page().session.as_ref().and_then(|session| session.next_timer_ms())
+        self.page()
+            .session
+            .as_ref()
+            .and_then(|session| session.next_timer_ms())
     }
 
     fn layout_width(&self) -> f32 {
@@ -934,7 +1035,14 @@ impl Browser {
         let height = self.layout_height();
         let layout = {
             let page = self.tabs.page();
-            layout_tree(&page.document, &page.styles, width, height, &self.fonts, &page.images)
+            layout_tree(
+                &page.document,
+                &page.styles,
+                width,
+                height,
+                &self.fonts,
+                &page.images,
+            )
         };
         self.page_mut().layout = layout;
     }
@@ -961,7 +1069,14 @@ impl Browser {
         let viewport_width = self.layout_width();
         let styles = {
             let page = self.tabs.page();
-            style_with(&page.document, &page.author_css, StyleState { hover, viewport_width })
+            style_with(
+                &page.document,
+                &page.author_css,
+                StyleState {
+                    hover,
+                    viewport_width,
+                },
+            )
         };
         self.page_mut().styles = styles;
         self.relayout();
@@ -977,23 +1092,21 @@ impl Browser {
         {
             allow_default = session.dispatch(node, "click");
             let document = session.document();
-            if allow_default
-                && let Some(field) = nearest(&document, node, is_text_field)
-            {
+            if allow_default && let Some(field) = nearest(&document, node, is_text_field) {
                 focus_field = Some(field);
-            } else if allow_default
-                && let Some(control) = nearest(&document, node, is_checkbox)
-            {
+            } else if allow_default && let Some(control) = nearest(&document, node, is_checkbox) {
                 session.edit(|doc| toggle_checked(doc, control));
                 session.dispatch(control, "change");
-            } else if allow_default
-                && let Some(control) = nearest(&document, node, is_submit)
-            {
+            } else if allow_default && let Some(control) = nearest(&document, node, is_submit) {
                 submission = session.submission(control);
             }
         }
         self.pull_page();
-        let next = self.page_mut().session.as_mut().and_then(|session| session.take_navigation());
+        let next = self
+            .page_mut()
+            .session
+            .as_mut()
+            .and_then(|session| session.take_navigation());
         if let Some(next) = next {
             self.navigate(&next);
             return;
@@ -1003,7 +1116,8 @@ impl Browser {
             self.send_form(submission);
             return;
         }
-        if allow_default && focus_field.is_none()
+        if allow_default
+            && focus_field.is_none()
             && let Some(href) = self.hit_link(x, y)
         {
             self.follow(href);
@@ -1022,7 +1136,14 @@ impl Browser {
         let author = author_css(&document, &base);
         let hover = self.page().hover;
         let viewport_width = self.layout_width();
-        let styles = style_with(&document, &author, StyleState { hover, viewport_width });
+        let styles = style_with(
+            &document,
+            &author,
+            StyleState {
+                hover,
+                viewport_width,
+            },
+        );
         let images = load_images(&document, &base);
         {
             let page = self.page_mut();
@@ -1044,15 +1165,21 @@ impl Browser {
         let mut url = if submission.action.is_empty() {
             self.page().current.clone()
         } else {
-            self.page().base
+            self.page()
+                .base
                 .resolve(&submission.action)
                 .unwrap_or_else(|_| interpret(&submission.action))
         };
         if submission.method == "post" && url.is_network() {
-            match post(&url, "application/x-www-form-urlencoded", submission.query.as_bytes()) {
+            match post(
+                &url,
+                "application/x-www-form-urlencoded",
+                submission.query.as_bytes(),
+            ) {
                 Ok(response) => {
                     let status = format!("{} {}", response.status, response.url.to_display());
-                    let html = bytes_to_html(&response.url, response.content_type(), &response.body);
+                    let html =
+                        bytes_to_html(&response.url, response.content_type(), &response.body);
                     self.install(Fetched {
                         url: response.url,
                         html,
@@ -1069,7 +1196,9 @@ impl Browser {
         }
         if !submission.query.is_empty() {
             url.query = Some(match url.query.as_deref() {
-                Some(existing) if !existing.is_empty() => format!("{existing}&{}", submission.query),
+                Some(existing) if !existing.is_empty() => {
+                    format!("{existing}&{}", submission.query)
+                }
                 _ => submission.query,
             });
         }
@@ -1077,12 +1206,22 @@ impl Browser {
     }
 
     fn follow(&mut self, href: String) {
-        let url = self.page().base.resolve(&href).unwrap_or_else(|_| interpret(&href));
+        let url = self
+            .page()
+            .base
+            .resolve(&href)
+            .unwrap_or_else(|_| interpret(&href));
         self.navigate_url(url);
     }
 
     fn hit_link(&self, x: f32, y: f32) -> Option<String> {
-        self.page().layout.links.iter().rev().find(|link| link.rect.contains(x, y)).map(|link| link.href.clone())
+        self.page()
+            .layout
+            .links
+            .iter()
+            .rev()
+            .find(|link| link.rect.contains(x, y))
+            .map(|link| link.href.clone())
     }
 
     fn can_back(&self) -> bool {
@@ -1127,14 +1266,26 @@ impl Browser {
     fn paint_page(&self, pixels: &mut [u32], width: u32, height: u32, origin_y: f32) {
         let scroll = self.page().scroll;
         let find = if self.page().find_open { FIND_H } else { 0.0 };
-        let clip = Rect::new(0.0, origin_y, width as f32, (height as f32 - origin_y - STATUS_H - find).max(1.0));
+        let clip = Rect::new(
+            0.0,
+            origin_y,
+            width as f32,
+            (height as f32 - origin_y - STATUS_H - find).max(1.0),
+        );
         let mut canvas = Canvas {
             pixels,
             width: width as i32,
             height: height as i32,
         };
         self.paint_find_hits(&mut canvas, scroll, clip, origin_y);
-        paint_layout(&mut canvas, &self.tabs.page().layout, &self.fonts, clip, scroll, origin_y);
+        paint_layout(
+            &mut canvas,
+            &self.tabs.page().layout,
+            &self.fonts,
+            clip,
+            scroll,
+            origin_y,
+        );
     }
 
     fn paint_zoomed_page(&self, pixels: &mut [u32], width: u32, height: u32, zoom: f32) {
@@ -1143,7 +1294,8 @@ impl Browser {
         let device_h = (height as f32 - CONTENT_TOP - STATUS_H - find).max(1.0);
         let css_w = ((width as f32) / zoom).round().max(1.0) as i32;
         let css_h = (device_h / zoom).round().max(1.0) as i32;
-        let mut page_pixels = vec![self.page().layout.background.to_u32(); (css_w * css_h) as usize];
+        let mut page_pixels =
+            vec![self.page().layout.background.to_u32(); (css_w * css_h) as usize];
         let clip = Rect::new(0.0, 0.0, css_w as f32, css_h as f32);
         {
             let mut canvas = Canvas {
@@ -1152,7 +1304,14 @@ impl Browser {
                 height: css_h,
             };
             self.paint_find_hits(&mut canvas, scroll, clip, 0.0);
-            paint_layout(&mut canvas, &self.tabs.page().layout, &self.fonts, clip, scroll, 0.0);
+            paint_layout(
+                &mut canvas,
+                &self.tabs.page().layout,
+                &self.fonts,
+                clip,
+                scroll,
+                0.0,
+            );
         }
         blit_nearest(
             pixels,
@@ -1168,41 +1327,60 @@ impl Browser {
         let width = canvas.width as f32;
         let height = canvas.height as f32;
         let full = Rect::new(0.0, 0.0, width, height);
-        canvas.fill(Rect::new(0.0, 0.0, width, CONTENT_TOP), TOOLBAR, full);
-        self.paint_tabs(canvas);
-        let (back, forward, reload, address) = chrome_rects(width);
-        self.paint_button(canvas, back, "<", self.can_back());
-        self.paint_button(canvas, forward, ">", self.can_forward());
-        self.paint_button(canvas, reload, "R", true);
-        let (star, list) = bookmark_buttons(width);
-        self.paint_button(canvas, star, "*", self.is_bookmarked());
-        if self.is_bookmarked() {
-            canvas.fill(star, STAR, full);
-            canvas.text(
-                &self.fonts,
-                star.x + 11.0,
-                star.y + 21.0,
-                "*",
-                16.0,
-                Color::rgb(48, 32, 8),
-                true,
-                false,
-                false,
-                star,
-            );
-        }
-        self.paint_button(canvas, list, "B", self.bookmarks_open);
-        let border = if self.omnibox_focused { ADDRESS_FOCUS } else { ADDRESS_BORDER };
-        canvas.fill(address, border, full);
-        let inset = 2.0;
+        canvas.fill(Rect::new(0.0, 0.0, width, TAB_H), TAB_STRIP, full);
+        canvas.fill(Rect::new(0.0, TAB_H, width, TOOLBAR_H), TOOLBAR, full);
         canvas.fill(
-            Rect::new(address.x + inset, address.y + inset, address.width - inset * 2.0, address.height - inset * 2.0),
-            ADDRESS,
+            Rect::new(0.0, TAB_H + TOOLBAR_H, width, BOOKMARK_BAR_H),
+            TOOLBAR,
             full,
         );
-        let text_clip = Rect::new(address.x + 8.0, address.y + 4.0, (address.width - 16.0).max(1.0), address.height - 8.0);
+        self.paint_tabs(canvas);
+        let (back, forward, reload, address) = chrome_rects(width);
+        self.paint_button(canvas, back, "‹", self.can_back());
+        self.paint_button(canvas, forward, "›", self.can_forward());
+        self.paint_button(canvas, reload, "↻", true);
+        let (star, menu) = bookmark_buttons(width);
+        self.paint_bookmarks_bar(canvas);
+        let border = if self.omnibox_focused {
+            ADDRESS_FOCUS
+        } else {
+            OMNIBOX
+        };
+        canvas.fill_round(address, border, 16.0, full);
+        let inset = if self.omnibox_focused { 2.0 } else { 0.0 };
+        canvas.fill_round(
+            Rect::new(
+                address.x + inset,
+                address.y + inset,
+                address.width - inset * 2.0,
+                address.height - inset * 2.0,
+            ),
+            if self.omnibox_focused {
+                ADDRESS
+            } else {
+                OMNIBOX
+            },
+            16.0,
+            full,
+        );
+        if self.is_bookmarked() {
+            canvas.fill(star, BOOKMARKED, full);
+        }
+        self.paint_button(canvas, star, "★", true);
+        self.paint_button(canvas, menu, "⋮", true);
+        let text_clip = Rect::new(
+            address.x + 16.0,
+            address.y + 4.0,
+            (address.width - 56.0).max(1.0),
+            address.height - 8.0,
+        );
         let size = 16.0;
-        let prefix: String = self.page().omnibox.chars().take(self.page().cursor).collect();
+        let prefix: String = self
+            .page()
+            .omnibox
+            .chars()
+            .take(self.page().cursor)
+            .collect();
         let prefix_w = self.fonts.width(&prefix, size, false, false);
         let full_w = self.fonts.width(&self.page().omnibox, size, false, false);
         let mut shift = 0.0;
@@ -1212,7 +1390,11 @@ impl Browser {
         let text_x = text_clip.x - shift;
         let baseline = address.y + 22.0;
         if self.omnibox_focused && self.page().select_all && !self.page().omnibox.is_empty() {
-            canvas.fill(Rect::new(text_x - 2.0, address.y + 6.0, full_w + 4.0, 22.0), SELECTION, text_clip);
+            canvas.fill(
+                Rect::new(text_x - 2.0, address.y + 6.0, full_w + 4.0, 22.0),
+                SELECTION,
+                text_clip,
+            );
         }
         canvas.text(
             &self.fonts,
@@ -1220,16 +1402,24 @@ impl Browser {
             baseline,
             &self.page().omnibox,
             size,
-            Color::rgb(28, 26, 22),
+            INK,
             false,
             false,
             false,
             text_clip,
         );
         if self.omnibox_focused && !self.page().select_all {
-            canvas.fill(Rect::new(text_x + prefix_w, address.y + 8.0, 1.5, 18.0), Color::rgb(22, 52, 47), text_clip);
+            canvas.fill(
+                Rect::new(text_x + prefix_w, address.y + 8.0, 1.5, 18.0),
+                ADDRESS_FOCUS,
+                text_clip,
+            );
         }
-        canvas.fill(Rect::new(0.0, height - STATUS_H, width, STATUS_H), STATUS_BG, full);
+        canvas.fill(
+            Rect::new(0.0, height - STATUS_H, width, STATUS_H),
+            STATUS_BG,
+            full,
+        );
         let mut status = if self.page().title.is_empty() {
             self.page().status.clone()
         } else {
@@ -1267,17 +1457,22 @@ impl Browser {
     fn paint_menu(&self, canvas: &mut Canvas<'_>, menu: &Menu) {
         let bounds = menu_bounds(menu, canvas.width as f32, canvas.height as f32);
         let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
-        canvas.fill(bounds, Color::rgb(40, 36, 32), full);
+        canvas.fill(bounds, SEPARATOR, full);
         for (index, (label, _)) in menu.items.iter().enumerate() {
-            let row = Rect::new(bounds.x + 4.0, bounds.y + index as f32 * 32.0 + 2.0, bounds.width - 8.0, 28.0);
+            let row = Rect::new(
+                bounds.x + 1.0,
+                bounds.y + index as f32 * 32.0 + 1.0,
+                bounds.width - 2.0,
+                30.0,
+            );
             canvas.fill(row, ADDRESS, full);
             canvas.text(
                 &self.fonts,
                 row.x + 8.0,
-                row.y + 19.0,
+                row.y + 20.0,
                 label,
                 14.0,
-                Color::rgb(28, 26, 22),
+                INK,
                 false,
                 false,
                 false,
@@ -1293,18 +1488,27 @@ impl Browser {
         }
         let panel = suggestion_panel(canvas.width as f32, items.len());
         let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
-        canvas.fill(panel, Color::rgb(40, 36, 32), full);
+        canvas.fill(panel, SEPARATOR, full);
         for (index, item) in items.iter().enumerate() {
-            let row = Rect::new(panel.x + 4.0, panel.y + index as f32 * 32.0 + 2.0, panel.width - 8.0, 28.0);
-            let fill = if self.suggestion == Some(index) { SELECTION } else { ADDRESS };
+            let row = Rect::new(
+                panel.x + 1.0,
+                panel.y + index as f32 * 32.0 + 1.0,
+                panel.width - 2.0,
+                30.0,
+            );
+            let fill = if self.suggestion == Some(index) {
+                SELECTION
+            } else {
+                ADDRESS
+            };
             canvas.fill(row, fill, full);
             canvas.text(
                 &self.fonts,
                 row.x + 8.0,
-                row.y + 19.0,
+                row.y + 20.0,
                 &item.label,
                 14.0,
-                Color::rgb(28, 26, 22),
+                INK,
                 false,
                 false,
                 false,
@@ -1317,7 +1521,7 @@ impl Browser {
         let width = canvas.width as f32;
         let panel = bookmark_panel(width, self.bookmarks.len());
         let full = Rect::new(0.0, 0.0, width, canvas.height as f32);
-        canvas.fill(panel, Color::rgb(40, 36, 32), full);
+        canvas.fill(panel, SEPARATOR, full);
         if self.bookmarks.is_empty() {
             canvas.text(
                 &self.fonts,
@@ -1325,7 +1529,7 @@ impl Browser {
                 panel.y + 21.0,
                 "No bookmarks",
                 14.0,
-                BUTTON_TEXT,
+                ICON,
                 false,
                 false,
                 false,
@@ -1334,15 +1538,20 @@ impl Browser {
             return;
         }
         for (index, bookmark) in self.bookmarks.iter().enumerate().take(8) {
-            let row = Rect::new(panel.x + 4.0, panel.y + index as f32 * 32.0 + 2.0, panel.width - 8.0, 28.0);
+            let row = Rect::new(
+                panel.x + 1.0,
+                panel.y + index as f32 * 32.0 + 1.0,
+                panel.width - 2.0,
+                30.0,
+            );
             canvas.fill(row, ADDRESS, full);
             canvas.text(
                 &self.fonts,
                 row.x + 8.0,
-                row.y + 19.0,
+                row.y + 20.0,
                 &bookmark.title,
                 14.0,
-                Color::rgb(28, 26, 22),
+                INK,
                 false,
                 false,
                 false,
@@ -1355,7 +1564,11 @@ impl Browser {
         let hits = self.find_hits();
         let active = self.page().find_at;
         for (index, hit) in hits.iter().enumerate() {
-            let color = if index == active { FIND_ACTIVE } else { FIND_HIT };
+            let color = if index == active {
+                FIND_ACTIVE
+            } else {
+                FIND_HIT
+            };
             for rect in hit {
                 canvas.fill(
                     Rect::new(rect.x, rect.y - scroll + origin_y, rect.width, rect.height),
@@ -1371,16 +1584,28 @@ impl Browser {
         let height = canvas.height as f32;
         let bar = find_bar_rect(width, height);
         let full = Rect::new(0.0, 0.0, width, height);
-        let border = if self.find_focused { ADDRESS_FOCUS } else { ADDRESS_BORDER };
+        let border = if self.find_focused {
+            ADDRESS_FOCUS
+        } else {
+            ADDRESS_BORDER
+        };
         canvas.fill(bar, border, full);
-        canvas.fill(Rect::new(bar.x + 2.0, bar.y + 2.0, bar.width - 4.0, bar.height - 4.0), FIND_BAR, full);
+        canvas.fill(
+            Rect::new(bar.x + 2.0, bar.y + 2.0, bar.width - 4.0, bar.height - 4.0),
+            FIND_BAR,
+            full,
+        );
         let count = self.find_hits().len();
         let label = if self.page().find_query.is_empty() {
             "Find".to_string()
         } else if count == 0 {
             format!("{}   0/0", self.page().find_query)
         } else {
-            format!("{}   {}/{count}", self.page().find_query, self.page().find_at.min(count - 1) + 1)
+            format!(
+                "{}   {}/{count}",
+                self.page().find_query,
+                self.page().find_at.min(count - 1) + 1
+            )
         };
         canvas.text(
             &self.fonts,
@@ -1396,28 +1621,108 @@ impl Browser {
         );
     }
 
+    fn paint_bookmarks_bar(&self, canvas: &mut Canvas<'_>) {
+        let width = canvas.width as f32;
+        let y = TAB_H + TOOLBAR_H;
+        let full = Rect::new(0.0, 0.0, width, canvas.height as f32);
+        canvas.fill(
+            Rect::new(0.0, y + BOOKMARK_BAR_H - 1.0, width, 1.0),
+            SEPARATOR,
+            full,
+        );
+        if self.bookmarks.is_empty() {
+            canvas.text(
+                &self.fonts,
+                12.0,
+                y + 21.0,
+                "Bookmarks",
+                13.0,
+                ICON_DISABLED,
+                false,
+                false,
+                false,
+                Rect::new(8.0, y, width - 16.0, BOOKMARK_BAR_H),
+            );
+            return;
+        }
+        let slots = bookmark_slots(width, self.bookmarks.len());
+        for (slot, bookmark) in slots.iter().zip(self.bookmarks.iter()) {
+            canvas.fill_round(*slot, CHIP, 8.0, full);
+            canvas.text(
+                &self.fonts,
+                slot.x + 8.0,
+                slot.y + 16.0,
+                &bookmark.title,
+                13.0,
+                INK,
+                false,
+                false,
+                false,
+                *slot,
+            );
+        }
+    }
+
     fn paint_tabs(&self, canvas: &mut Canvas<'_>) {
         let (rects, plus) = tab_rects(canvas.width as f32, self.tabs.pages.len());
         let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
         for (index, rect) in rects.iter().enumerate() {
             let active = index == self.tabs.active;
-            canvas.fill(*rect, if active { ADDRESS } else { BUTTON }, full);
+            if active {
+                canvas.fill_round(*rect, Color::WHITE, 8.0, full);
+                canvas.fill(
+                    Rect::new(rect.x, rect.bottom() - 8.0, rect.width, 8.0),
+                    Color::WHITE,
+                    full,
+                );
+            }
             let title = {
                 let page = &self.tabs.pages[index];
-                if page.title.is_empty() { page.current.to_display() } else { page.title.clone() }
+                if page.title.is_empty() {
+                    page.current.to_display()
+                } else {
+                    page.title.clone()
+                }
             };
-            canvas.text(&self.fonts, rect.x + 8.0, rect.y + 18.0, &title, 13.0, Color::rgb(28, 26, 22), active, false, false, *rect);
+            let color = if active { INK } else { ICON };
+            canvas.text(
+                &self.fonts,
+                rect.x + 12.0,
+                rect.y + 18.0,
+                &title,
+                13.0,
+                color,
+                active,
+                false,
+                false,
+                *rect,
+            );
         }
-        canvas.fill(plus, BUTTON, full);
-        canvas.text(&self.fonts, plus.x + 8.0, plus.y + 18.0, "+", 16.0, BUTTON_TEXT, true, false, false, plus);
+        canvas.fill_round(plus, CHIP, 8.0, full);
+        canvas.text(
+            &self.fonts,
+            plus.x + 8.0,
+            plus.y + 18.0,
+            "+",
+            16.0,
+            ICON,
+            true,
+            false,
+            false,
+            plus,
+        );
     }
 
     fn paint_button(&self, canvas: &mut Canvas<'_>, rect: Rect, label: &str, enabled: bool) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
-        canvas.fill(rect, BUTTON, full);
         let size = 16.0;
         let width = self.fonts.width(label, size, true, false);
-        let color = if enabled { BUTTON_TEXT } else { BUTTON_DISABLED };
+        let color = if !enabled {
+            ICON_DISABLED
+        } else if label == "★" && self.is_bookmarked() {
+            STAR
+        } else {
+            ICON
+        };
         canvas.text(
             &self.fonts,
             rect.x + (rect.width - width) / 2.0,
@@ -1485,7 +1790,10 @@ fn text_matches(fonts: &FontBook, tree: &LayoutTree, query: &str) -> Vec<Vec<Rec
     let mut slots: Vec<Option<(usize, usize)>> = Vec::new();
     let mut folded = Vec::new();
     for (index, run) in runs.iter().enumerate() {
-        if index > 0 && (run.baseline - runs[index - 1].baseline).abs() < 0.5 && run.x > runs[index - 1].x + 0.5 {
+        if index > 0
+            && (run.baseline - runs[index - 1].baseline).abs() < 0.5
+            && run.x > runs[index - 1].x + 0.5
+        {
             folded.push(' ');
             slots.push(None);
         }
@@ -1512,17 +1820,30 @@ fn text_matches(fonts: &FontBook, tree: &LayoutTree, query: &str) -> Vec<Vec<Rec
             };
             let mut char_end = char_start + 1;
             cursor += 1;
-            while cursor < end && slots[cursor].is_some_and(|(next_run, next_char)| next_run == run_index && next_char == char_end)
+            while cursor < end
+                && slots[cursor].is_some_and(|(next_run, next_char)| {
+                    next_run == run_index && next_char == char_end
+                })
             {
                 char_end += 1;
                 cursor += 1;
             }
             let run = &runs[run_index];
             let prefix: String = run.text.chars().take(char_start).collect();
-            let slice: String = run.text.chars().skip(char_start).take(char_end - char_start).collect();
+            let slice: String = run
+                .text
+                .chars()
+                .skip(char_start)
+                .take(char_end - char_start)
+                .collect();
             let x = run.x + fonts.width(&prefix, run.size, run.bold, run.mono);
             let width = fonts.width(&slice, run.size, run.bold, run.mono).max(1.0);
-            rects.push(Rect::new(x, run.baseline - run.ascent, width, run.height.max(1.0)));
+            rects.push(Rect::new(
+                x,
+                run.baseline - run.ascent,
+                width,
+                run.height.max(1.0),
+            ));
         }
         if !rects.is_empty() {
             hits.push(rects);
@@ -1578,6 +1899,8 @@ enum MenuAction {
     Forward,
     Reload,
     Bookmark,
+    NewTabPage,
+    Bookmarks,
 }
 
 #[derive(Clone)]
@@ -1597,12 +1920,46 @@ fn menu_bounds(menu: &Menu, width: f32, height: f32) -> Rect {
 
 fn suggestion_panel(width: f32, count: usize) -> Rect {
     let (_, _, _, address) = chrome_rects(width);
-    Rect::new(address.x, address.bottom(), address.width, count.max(1) as f32 * 32.0)
+    Rect::new(
+        address.x,
+        address.bottom(),
+        address.width,
+        count.max(1) as f32 * 32.0,
+    )
+}
+
+fn toolbar_y() -> f32 {
+    TAB_H + (TOOLBAR_H - 32.0) / 2.0
+}
+
+fn menu_button(width: f32) -> Rect {
+    Rect::new(width - 44.0, toolbar_y(), 32.0, 32.0)
 }
 
 fn bookmark_buttons(width: f32) -> (Rect, Rect) {
-    let y = TAB_H + 12.0;
-    (Rect::new(width - 84.0, y, 32.0, 32.0), Rect::new(width - 44.0, y, 32.0, 32.0))
+    let (_, _, _, address) = chrome_rects(width);
+    let star = Rect::new(
+        (address.right() - 36.0).max(address.x),
+        address.y,
+        32.0,
+        32.0,
+    );
+    (star, menu_button(width))
+}
+
+fn bookmark_slots(width: f32, count: usize) -> Vec<Rect> {
+    let y = TAB_H + TOOLBAR_H + 4.0;
+    let mut x = 8.0;
+    let mut slots = Vec::new();
+    for _ in 0..count.min(12) {
+        let slot_w = 148.0;
+        if x + slot_w > width - 8.0 {
+            break;
+        }
+        slots.push(Rect::new(x, y, slot_w, BOOKMARK_BAR_H - 8.0));
+        x += slot_w + 8.0;
+    }
+    slots
 }
 
 fn bookmark_panel(width: f32, count: usize) -> Rect {
@@ -1612,18 +1969,19 @@ fn bookmark_panel(width: f32, count: usize) -> Rect {
 }
 
 fn chrome_rects(width: f32) -> (Rect, Rect, Rect, Rect) {
-    let y = TAB_H + 12.0;
+    let y = toolbar_y();
     let size = 32.0;
-    let address_w = (width - 136.0 - 96.0).max(40.0);
+    let address_x = 120.0;
+    let address_w = (width - address_x - 52.0).max(40.0);
     (
-        Rect::new(12.0, y, size, size),
-        Rect::new(52.0, y, size, size),
-        Rect::new(92.0, y, size, size),
-        Rect::new(136.0, y, address_w, size),
+        Rect::new(8.0, y, size, size),
+        Rect::new(40.0, y, size, size),
+        Rect::new(72.0, y, size, size),
+        Rect::new(address_x, y, address_w, size),
     )
 }
 
-fn retrieve(url: &Url) -> Result<Fetched, String> {
+fn retrieve(url: &Url, bypass_cache: bool) -> Result<Fetched, String> {
     match url.scheme.as_str() {
         "about" => {
             let (html, status) = match url.path.as_str() {
@@ -1647,7 +2005,12 @@ fn retrieve(url: &Url) -> Result<Fetched, String> {
             })
         }
         "http" | "https" => {
-            let response = get(url).map_err(|error| error.to_string())?;
+            let response = if bypass_cache {
+                mithu_net::reload(url)
+            } else {
+                get(url)
+            }
+            .map_err(|error| error.to_string())?;
             if response.body.is_empty() && response.status >= 400 {
                 return Err(format!("HTTP {}", response.status));
             }
@@ -1701,7 +2064,11 @@ fn load_images(document: &Document, base: &Url) -> HashMap<NodeId, Arc<Bitmap>> 
     images
 }
 
-fn nearest(document: &Document, id: NodeId, matches: fn(&Document, NodeId) -> bool) -> Option<NodeId> {
+fn nearest(
+    document: &Document,
+    id: NodeId,
+    matches: fn(&Document, NodeId) -> bool,
+) -> Option<NodeId> {
     let mut current = if document.element_name(id).is_some() {
         Some(id)
     } else {
@@ -1720,8 +2087,14 @@ fn is_text_field(document: &Document, id: NodeId) -> bool {
     match document.element_name(id) {
         Some("textarea") => true,
         Some("input") => {
-            let kind = document.attr(id, "type").unwrap_or("text").to_ascii_lowercase();
-            matches!(kind.as_str(), "text" | "search" | "email" | "password" | "url" | "tel" | "number")
+            let kind = document
+                .attr(id, "type")
+                .unwrap_or("text")
+                .to_ascii_lowercase();
+            matches!(
+                kind.as_str(),
+                "text" | "search" | "email" | "password" | "url" | "tel" | "number"
+            )
         }
         _ => false,
     }
@@ -1736,7 +2109,10 @@ fn is_checkbox(document: &Document, id: NodeId) -> bool {
 
 fn is_submit(document: &Document, id: NodeId) -> bool {
     match document.element_name(id) {
-        Some("button") => document.attr(id, "type").unwrap_or("submit").eq_ignore_ascii_case("submit"),
+        Some("button") => document
+            .attr(id, "type")
+            .unwrap_or("submit")
+            .eq_ignore_ascii_case("submit"),
         Some("input") => document
             .attr(id, "type")
             .is_some_and(|kind| kind.eq_ignore_ascii_case("submit")),
@@ -1802,7 +2178,13 @@ fn fetch_text(base: &Url, href: &str) -> Option<String> {
 }
 
 fn bytes_to_html(url: &Url, content_type: Option<&str>, body: &[u8]) -> String {
-    let mime = content_type.unwrap_or("").split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let mime = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let text = String::from_utf8_lossy(body);
     let trimmed = text.trim_start();
     if mime.contains("html") || mime.contains("xml") || trimmed.starts_with('<') {
@@ -1848,7 +2230,9 @@ fn search_url(text: &str) -> Url {
     let mut query = String::new();
     for byte in text.as_bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => query.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                query.push(*byte as char)
+            }
             b' ' => query.push('+'),
             _ => query.push_str(&format!("%{byte:02X}")),
         }
@@ -1857,7 +2241,9 @@ fn search_url(text: &str) -> Url {
 }
 
 fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn error_page(url: &Url, message: &str) -> String {
@@ -1873,29 +2259,26 @@ fn home_page() -> String {
 <html>
 <head>
 <meta charset="utf-8">
-<title>Mithu</title>
+<title>New Tab</title>
 <style>
-  body { margin: 0; background: #f3efe6; color: #1d1a16; }
-  .hero { background: #16342f; color: #f6f7f4; padding: 36px 40px; }
-  h1 { margin-top: 0; margin-bottom: 0; font-size: 40px; color: #f6f7f4; }
-  .sub { color: #d5e4df; font-size: 18px; }
-  .wrap { padding-left: 28px; padding-right: 28px; padding-bottom: 28px; }
-  .card { background: #fffdf8; padding-left: 20px; padding-right: 20px; padding-bottom: 8px; margin-top: 16px; }
-  a { color: #0b57d0; }
+  body { margin: 0; background: #f8f9fa; color: #202124; text-align: center; }
+  .wrap { padding-top: 72px; }
+  h1 { color: #202124; font-size: 44px; margin-bottom: 8px; }
+  .sub { color: #5f6368; font-size: 16px; }
+  .search { width: 520px; margin-left: auto; margin-right: auto; background: #ffffff; border: 1px solid #dfe1e5; border-radius: 24px; padding: 12px 20px; color: #5f6368; margin-top: 28px; text-align: left; }
+  .row { display: flex; justify-content: center; gap: 16px; margin-top: 36px; }
+  .tile { width: 96px; background: #ffffff; border: 1px solid #dadce0; border-radius: 8px; padding: 12px; }
+  a { color: #1a73e8; text-decoration: none; }
 </style>
 </head>
 <body>
-  <div class="hero">
-    <h1>Mithu</h1>
-    <p class="sub">Lightweight Rust browser. HTML, CSS, layout, and paint are written in this repo.</p>
-  </div>
   <div class="wrap">
-    <div class="card">
-      <h2>Open a page</h2>
-      <p>Type a URL in the address bar and press Enter. Click a link to open it.</p>
-      <p>Mithu is named for a rose-ringed parakeet who was part of a family, and who is gone.</p>
-      <p><a href="https://example.com/">example.com</a></p>
-      <p><a href="https://info.cern.ch/">The first website</a></p>
+    <h1>Mithu</h1>
+    <p class="sub">Search or type a URL in the address bar.</p>
+    <div class="search">Search the web</div>
+    <div class="row">
+      <div class="tile"><a href="https://example.com/">Example</a></div>
+      <div class="tile"><a href="https://info.cern.ch/">CERN</a></div>
     </div>
   </div>
 </body>
@@ -1912,6 +2295,8 @@ mod tests {
         let mut browser = Browser::new();
         let frame = browser.render(800.0, 600.0);
         assert_eq!(frame.len(), 800 * 600);
+        let strip = frame[4 * 800 + 4];
+        assert_eq!(strip, TAB_STRIP.to_u32());
         let toolbar_row = (TAB_H as usize + 8) * 800 + 10;
         assert_eq!(frame[toolbar_row], TOOLBAR.to_u32());
         let page = frame[400 * 800 + 20];
@@ -1960,7 +2345,12 @@ mod tests {
         let x = (laid.rect.x + laid.rect.width / 2.0).floor() as usize;
         let y = (laid.rect.y + laid.rect.height / 2.0 + CONTENT_TOP).floor() as usize;
         let frame = browser.render(800.0, 600.0);
-        assert_eq!(frame[y * 800 + x], 0x00FF_0000, "pixel {x},{y} is {:06x}", frame[y * 800 + x]);
+        assert_eq!(
+            frame[y * 800 + x],
+            0x00FF_0000,
+            "pixel {x},{y} is {:06x}",
+            frame[y * 800 + x]
+        );
     }
 
     #[test]
@@ -2036,7 +2426,11 @@ mod tests {
         browser.find_next();
         browser.find_next();
         assert_eq!(browser.find_active(), Some(2));
-        assert!(browser.page().scroll > 400.0, "scroll {}", browser.page().scroll);
+        assert!(
+            browser.page().scroll > 400.0,
+            "scroll {}",
+            browser.page().scroll
+        );
         browser.find_next();
         assert_eq!(browser.find_active(), Some(0));
         let frame = browser.render(800.0, 600.0);
@@ -2053,7 +2447,8 @@ mod tests {
         browser.resize(800.0, 600.0);
         browser.install(Fetched {
             url: Url::parse("about:test").unwrap(),
-            html: "<div style=\"width:100px;height:40px;background:#ff0000;margin:0\"></div>".to_string(),
+            html: "<div style=\"width:100px;height:40px;background:#ff0000;margin:0\"></div>"
+                .to_string(),
             status: "test".to_string(),
         });
         let y = (CONTENT_TOP + 20.0) as usize;
@@ -2065,7 +2460,12 @@ mod tests {
         }
         assert!((browser.zoom() - 2.0).abs() < 0.01);
         let frame = browser.render(800.0, 600.0);
-        assert_eq!(frame[y * 800 + 40], 0x00FF_0000, "scaled pixel {:06x}", frame[y * 800 + 40]);
+        assert_eq!(
+            frame[y * 800 + 40],
+            0x00FF_0000,
+            "scaled pixel {:06x}",
+            frame[y * 800 + 40]
+        );
         assert_eq!(frame[y * 800 + 150], 0x00FF_0000);
         browser.zoom_reset();
         assert!((browser.zoom() - 1.0).abs() < 0.01);
@@ -2090,13 +2490,17 @@ mod tests {
         let panel = bookmark_panel(800.0, browser.bookmark_count());
         browser.pointer_down(panel.x + 20.0, panel.y + 10.0);
         assert_eq!(browser.location(), "about:mithu");
-        assert_eq!(browser.title(), "Mithu");
+        assert_eq!(browser.title(), "New Tab");
         assert!(!browser.bookmarks_open());
         let (star, _) = bookmark_buttons(800.0);
         let frame = browser.render(800.0, 600.0);
         let sx = star.x as usize + 4;
         let sy = star.y as usize + 4;
-        assert_eq!(frame[sy * 800 + sx], STAR.to_u32());
+        assert_eq!(frame[sy * 800 + sx], BOOKMARKED.to_u32());
+        browser.navigate("about:blank");
+        let slots = bookmark_slots(800.0, browser.bookmark_count());
+        browser.pointer_down(slots[0].x + 12.0, slots[0].y + 8.0);
+        assert_eq!(browser.location(), "about:mithu");
     }
 
     #[test]
@@ -2109,7 +2513,10 @@ mod tests {
             browser.insert_char(ch);
         }
         let items = browser.suggestions();
-        let index = items.iter().position(|item| item.url.to_display() == "about:mithu").expect("suggestion");
+        let index = items
+            .iter()
+            .position(|item| item.url.to_display() == "about:mithu")
+            .expect("suggestion");
         assert!(index > 0);
         for _ in 0..=index {
             browser.move_suggestion(1);
@@ -2147,7 +2554,11 @@ mod tests {
             .rect;
         browser.context_menu(link.x + 2.0, link.y + 2.0 + CONTENT_TOP);
         let menu = browser.menu.as_ref().expect("menu");
-        let new_tab = menu.items.iter().position(|(label, _)| label == "Open in new tab").expect("item");
+        let new_tab = menu
+            .items
+            .iter()
+            .position(|(label, _)| label == "Open in new tab")
+            .expect("item");
         let bounds = menu_bounds(menu, 800.0, 600.0);
         browser.pointer_down(bounds.x + 12.0, bounds.y + new_tab as f32 * 32.0 + 10.0);
         assert_eq!(browser.tab_count(), 2);
@@ -2157,7 +2568,11 @@ mod tests {
         assert_eq!(browser.location(), "about:test");
         browser.context_menu(20.0, CONTENT_TOP + 20.0);
         let menu = browser.menu.as_ref().expect("menu");
-        let reload = menu.items.iter().position(|(label, _)| label == "Reload").expect("reload");
+        let reload = menu
+            .items
+            .iter()
+            .position(|(label, _)| label == "Reload")
+            .expect("reload");
         let bounds = menu_bounds(menu, 800.0, 600.0);
         browser.pointer_down(bounds.x + 12.0, bounds.y + reload as f32 * 32.0 + 10.0);
         assert_eq!(browser.location(), "about:test");
@@ -2168,7 +2583,10 @@ mod tests {
             let page = browser.page();
             let node = page.document.get_element_by_id(id).unwrap();
             if let Some(laid) = find_box(&page.layout.root, node) {
-                (laid.rect.x + laid.rect.width / 2.0, laid.rect.y + laid.rect.height / 2.0)
+                (
+                    laid.rect.x + laid.rect.width / 2.0,
+                    laid.rect.y + laid.rect.height / 2.0,
+                )
             } else if let Some(href) = page.document.attr(node, "href") {
                 let link = page
                     .layout

@@ -13,6 +13,22 @@ pub struct Bitmap {
     pub pixels: Vec<u32>,
 }
 
+/// Encode an `RGB` buffer as PNG. Used for headless screenshots. The same `image` crate that decodes page images writes the file, so the browser does not take on another dependency.
+pub fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || rgb.len() != width as usize * height as usize * 3 {
+        return None;
+    }
+    let image = image::RgbImage::from_raw(width, height, rgb.to_vec())?;
+    let mut bytes = Vec::new();
+    DynamicImage::ImageRgb8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .ok()?;
+    Some(bytes)
+}
+
 pub fn decode(bytes: &[u8]) -> Option<Bitmap> {
     let image = image::load_from_memory(bytes).ok()?;
     from_dynamic(image)
@@ -22,7 +38,9 @@ pub fn decode_data_url(url: &str) -> Option<Bitmap> {
     let rest = url.trim().strip_prefix("data:")?;
     let (meta, data) = rest.split_once(',')?;
     let bytes = if meta.to_ascii_lowercase().contains(";base64") {
-        base64::engine::general_purpose::STANDARD.decode(data.trim()).ok()?
+        base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .ok()?
     } else {
         percent_decode_bytes(data)
     };
@@ -86,7 +104,10 @@ mod tests {
         image.put_pixel(1, 0, Rgba([1, 2, 3, 128]));
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(image)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
             .expect("encode");
         let bitmap = decode(&bytes).expect("png");
         assert_eq!(bitmap.width, 2);
@@ -98,5 +119,13 @@ mod tests {
         let url = format!("data:image/png;base64,{encoded}");
         let again = decode_data_url(&url).expect("data url");
         assert_eq!(again.pixels, bitmap.pixels);
+    }
+
+    #[test]
+    fn encodes_a_png_round_trip() {
+        let png = encode_png(1, 1, &[255, 0, 0]).expect("png");
+        let bitmap = decode(&png).expect("decode");
+        assert_eq!(bitmap.width, 1);
+        assert_eq!(bitmap.pixels[0] & 0x00FF_FFFF, 0x00FF_0000);
     }
 }

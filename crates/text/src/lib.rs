@@ -104,7 +104,10 @@ impl FontBook {
                 width: (size * 0.45).max(1.0) as usize,
                 height: (size * 0.75).max(1.0) as usize,
                 advance: size * 0.5,
-                coverage: vec![255; ((size * 0.45).max(1.0) as usize) * ((size * 0.75).max(1.0) as usize)],
+                coverage: vec![
+                    255;
+                    ((size * 0.45).max(1.0) as usize) * ((size * 0.75).max(1.0) as usize)
+                ],
             },
         }
     }
@@ -117,7 +120,13 @@ impl FontBook {
     }
 
     fn face_for(&self, ch: char, bold: bool, mono: bool) -> &Face {
-        let primary = if mono { &self.mono } else if bold { &self.bold } else { &self.sans };
+        let primary = if mono {
+            &self.mono
+        } else if bold {
+            &self.bold
+        } else {
+            &self.sans
+        };
         if covers(primary, ch) {
             return primary;
         }
@@ -132,13 +141,19 @@ impl FontBook {
 
     fn metrics_face(&self, mono: bool) -> &Face {
         let face = if mono { &self.mono } else { &self.sans };
-        if matches!(face, Face::Fallback) { &self.sans } else { face }
+        if matches!(face, Face::Fallback) {
+            &self.sans
+        } else {
+            face
+        }
     }
 }
 
 impl MeasureText for FontBook {
     fn width(&self, text: &str, size: f32, bold: bool, mono: bool) -> f32 {
-        text.chars().map(|ch| self.advance(ch, size, bold, mono)).sum()
+        text.chars()
+            .map(|ch| self.advance(ch, size, bold, mono))
+            .sum()
     }
 
     fn line_height(&self, size: f32, mono: bool) -> f32 {

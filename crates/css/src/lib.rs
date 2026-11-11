@@ -414,7 +414,9 @@ impl CssParser {
                 if let Ok(b) = compact.parse::<i32>() {
                     return Pseudo::Nth(0, b);
                 }
-                parse_an_b(&compact).map(|(a, b)| Pseudo::Nth(a, b)).unwrap_or(Pseudo::Unmatched)
+                parse_an_b(&compact)
+                    .map(|(a, b)| Pseudo::Nth(a, b))
+                    .unwrap_or(Pseudo::Unmatched)
             }
         }
     }
@@ -815,7 +817,10 @@ fn split_media_list(prelude: &str) -> Vec<String> {
 
 fn media_bound(part: &str) -> Option<MediaBound> {
     let lower = part.to_ascii_lowercase();
-    if lower.split_whitespace().any(|word| word == "not" || word == "print") {
+    if lower
+        .split_whitespace()
+        .any(|word| word == "not" || word == "print")
+    {
         return None;
     }
     let mut min_width = None;
@@ -839,7 +844,10 @@ fn media_bound(part: &str) -> Option<MediaBound> {
             return None;
         }
     }
-    Some(MediaBound { min_width, max_width })
+    Some(MediaBound {
+        min_width,
+        max_width,
+    })
 }
 
 fn media_px(value: &str) -> Option<f32> {
@@ -847,7 +855,10 @@ fn media_px(value: &str) -> Option<f32> {
     if let Some(number) = value.strip_suffix("px") {
         return number.trim().parse().ok();
     }
-    if let Some(number) = value.strip_suffix("rem").or_else(|| value.strip_suffix("em")) {
+    if let Some(number) = value
+        .strip_suffix("rem")
+        .or_else(|| value.strip_suffix("em"))
+    {
         return number.trim().parse::<f32>().ok().map(|em| em * 16.0);
     }
     None
@@ -876,10 +887,7 @@ mod tests {
     fn parses_attribute_sibling_and_nth_selectors() {
         let sheet = parse_css(r#"a[href] + p[class~="note"]:nth-child(2n+1) { color: teal }"#);
         let selector = &sheet.rules[0].selectors[0];
-        assert_eq!(
-            selector.combinators,
-            vec![Combinator::NextSibling]
-        );
+        assert_eq!(selector.combinators, vec![Combinator::NextSibling]);
         assert_eq!(selector.compounds[0].attrs[0].name, "href");
         assert_eq!(selector.compounds[1].attrs[0].op, Some(AttrOp::Includes));
         assert_eq!(selector.compounds[1].pseudos, vec![Pseudo::Nth(2, 1)]);

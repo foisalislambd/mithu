@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use mithu_base::Color;
 use mithu_css::{
-    parse_css, parse_declarations, AttrOp, Combinator, Declaration, Pseudo, Selector, Stylesheet,
+    AttrOp, Combinator, Declaration, Pseudo, Selector, Stylesheet, parse_css, parse_declarations,
 };
 use mithu_dom::{Document, NodeId};
 
@@ -327,7 +327,16 @@ pub fn style_with(doc: &Document, author_css: &str, state: StyleState) -> Vec<Co
     let initial = ComputedStyle::initial();
     let vars = HashMap::new();
     for child in doc.node(doc.root).children.clone() {
-        compute(doc, child, &initial, &ua, &author, state, &vars, &mut styles);
+        compute(
+            doc,
+            child,
+            &initial,
+            &ua,
+            &author,
+            state,
+            &vars,
+            &mut styles,
+        );
     }
     styles
 }
@@ -370,7 +379,12 @@ fn cascade(
         for declaration in parse_declarations(inline) {
             if declaration.name.starts_with("--") {
                 let spec = 1_000 + if declaration.important { 100_000 } else { 0 };
-                rank_custom(&mut specified.custom, &declaration.name, declaration.value, spec);
+                rank_custom(
+                    &mut specified.custom,
+                    &declaration.name,
+                    declaration.value,
+                    spec,
+                );
             }
         }
     }
@@ -386,8 +400,14 @@ fn cascade(
     (specified, vars)
 }
 
-fn collect_custom(doc: &Document, id: NodeId, sheet: &Stylesheet, state: StyleState, specified: &mut Specified) {
-        for rule in &sheet.rules {
+fn collect_custom(
+    doc: &Document,
+    id: NodeId,
+    sheet: &Stylesheet,
+    state: StyleState,
+    specified: &mut Specified,
+) {
+    for rule in &sheet.rules {
         if !media_applies(rule.media.as_ref(), state.viewport_width) {
             continue;
         }
@@ -397,8 +417,14 @@ fn collect_custom(doc: &Document, id: NodeId, sheet: &Stylesheet, state: StyleSt
             }
             for declaration in &rule.declarations {
                 if declaration.name.starts_with("--") {
-                    let spec = selector.specificity() + if declaration.important { 100_000 } else { 0 };
-                    rank_custom(&mut specified.custom, &declaration.name, declaration.value.clone(), spec);
+                    let spec =
+                        selector.specificity() + if declaration.important { 100_000 } else { 0 };
+                    rank_custom(
+                        &mut specified.custom,
+                        &declaration.name,
+                        declaration.value.clone(),
+                        spec,
+                    );
                 }
             }
         }
@@ -415,7 +441,10 @@ fn rank_custom(map: &mut HashMap<String, Ranked<String>>, name: &str, value: Str
     }
 }
 
-fn resolve_custom(own: &HashMap<String, Ranked<String>>, parent: &HashMap<String, String>) -> HashMap<String, String> {
+fn resolve_custom(
+    own: &HashMap<String, Ranked<String>>,
+    parent: &HashMap<String, String>,
+) -> HashMap<String, String> {
     let mut resolved = parent.clone();
     for (name, ranked) in own {
         resolved.insert(name.clone(), ranked.value.clone());
@@ -511,7 +540,12 @@ fn apply_sheet(
     }
 }
 
-fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector, state: StyleState) -> bool {
+fn matches_selector(
+    doc: &Document,
+    id: NodeId,
+    selector: &mithu_css::Selector,
+    state: StyleState,
+) -> bool {
     let Some(last) = selector.compounds.last() else {
         return false;
     };
@@ -576,7 +610,12 @@ fn matches_selector(doc: &Document, id: NodeId, selector: &mithu_css::Selector, 
     true
 }
 
-fn matches_compound(doc: &Document, id: NodeId, compound: &mithu_css::Compound, state: StyleState) -> bool {
+fn matches_compound(
+    doc: &Document,
+    id: NodeId,
+    compound: &mithu_css::Compound,
+    state: StyleState,
+) -> bool {
     let Some(element) = doc.element(id) else {
         return false;
     };
@@ -604,7 +643,10 @@ fn matches_compound(doc: &Document, id: NodeId, compound: &mithu_css::Compound, 
     {
         return false;
     }
-    compound.pseudos.iter().all(|pseudo| matches_pseudo(doc, id, pseudo, state))
+    compound
+        .pseudos
+        .iter()
+        .all(|pseudo| matches_pseudo(doc, id, pseudo, state))
 }
 
 fn matches_attr(doc: &Document, id: NodeId, attr: &mithu_css::AttrSelector) -> bool {
@@ -618,7 +660,12 @@ fn matches_attr(doc: &Document, id: NodeId, attr: &mithu_css::AttrSelector) -> b
     match op {
         AttrOp::Exact => value == expected,
         AttrOp::Includes => value.split_whitespace().any(|part| part == expected),
-        AttrOp::Dash => value == expected || value.strip_prefix(expected).is_some_and(|rest| rest.starts_with('-')),
+        AttrOp::Dash => {
+            value == expected
+                || value
+                    .strip_prefix(expected)
+                    .is_some_and(|rest| rest.starts_with('-'))
+        }
         AttrOp::Prefix => value.starts_with(expected),
         AttrOp::Suffix => value.ends_with(expected),
         AttrOp::Substring => value.contains(expected),
@@ -666,11 +713,14 @@ fn nth_matches(a: i32, b: i32, index: usize) -> bool {
 }
 
 fn is_empty(doc: &Document, id: NodeId) -> bool {
-    doc.node(id).children.iter().all(|child| match &doc.node(*child).data {
-        mithu_dom::NodeData::Comment(_) => true,
-        mithu_dom::NodeData::Text(text) => text.trim().is_empty(),
-        _ => false,
-    })
+    doc.node(id)
+        .children
+        .iter()
+        .all(|child| match &doc.node(*child).data {
+            mithu_dom::NodeData::Comment(_) => true,
+            mithu_dom::NodeData::Text(text) => text.trim().is_empty(),
+            _ => false,
+        })
 }
 
 fn apply_declaration(
@@ -710,7 +760,11 @@ fn apply_declaration(
                 rank(&mut specified.bold, bold, spec);
             }
         }
-        "font-family" => rank(&mut specified.mono, value.to_ascii_lowercase().contains("mono"), spec),
+        "font-family" => rank(
+            &mut specified.mono,
+            value.to_ascii_lowercase().contains("mono"),
+            spec,
+        ),
         "text-align" => {
             if let Some(align) = parse_align(value) {
                 rank(&mut specified.text_align, align, spec);
@@ -834,7 +888,11 @@ fn apply_declaration(
         }
         "align-self" => {
             if value.trim().eq_ignore_ascii_case("auto") {
-                if specified.align_self.as_ref().is_none_or(|item| spec >= item.spec) {
+                if specified
+                    .align_self
+                    .as_ref()
+                    .is_none_or(|item| spec >= item.spec)
+                {
                     specified.align_self = None;
                 }
             } else if let Some(align) = parse_align_items(value) {
@@ -847,7 +905,10 @@ fn apply_declaration(
             }
         }
         "visibility" => {
-            let visible = !matches!(value.trim().to_ascii_lowercase().as_str(), "hidden" | "collapse");
+            let visible = !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "hidden" | "collapse"
+            );
             rank(&mut specified.visible, visible, spec);
         }
         "z-index" => {
@@ -883,11 +944,16 @@ fn apply_declaration(
             }
         }
         "overflow" | "overflow-x" | "overflow-y" => {
-            let hidden = matches!(value.trim().to_ascii_lowercase().as_str(), "hidden" | "clip" | "scroll");
+            let hidden = matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "hidden" | "clip" | "scroll"
+            );
             rank(&mut specified.overflow_hidden, hidden, spec);
         }
         "border-radius" => {
-            if let Some(Length::Px(px)) = parse_length(value.split_whitespace().next().unwrap_or(value)) {
+            if let Some(Length::Px(px)) =
+                parse_length(value.split_whitespace().next().unwrap_or(value))
+            {
                 rank(&mut specified.border_radius, px.max(0.0), spec);
             }
         }
@@ -931,14 +997,23 @@ fn zero_auto(length: Length) -> Length {
     }
 }
 
-fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &ComputedStyle) -> ComputedStyle {
+fn concretize(
+    doc: &Document,
+    id: NodeId,
+    specified: &Specified,
+    parent: &ComputedStyle,
+) -> ComputedStyle {
     let font_size = match specified.font_size.as_ref().map(|item| item.value) {
         Some(FontSize::Px(value)) => value.max(1.0),
         Some(FontSize::Em(value)) => (parent.font_size * value).max(1.0),
         Some(FontSize::Percent(value)) => (parent.font_size * value / 100.0).max(1.0),
         None => parent.font_size,
     };
-    let color = specified.color.as_ref().map(|item| item.value).unwrap_or(parent.color);
+    let color = specified
+        .color
+        .as_ref()
+        .map(|item| item.value)
+        .unwrap_or(parent.color);
     let mut computed = ComputedStyle {
         display: specified
             .display
@@ -952,8 +1027,16 @@ fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &Comput
             .map(|item| item.value)
             .unwrap_or(Color::TRANSPARENT),
         font_size,
-        bold: specified.bold.as_ref().map(|item| item.value).unwrap_or(parent.bold),
-        mono: specified.mono.as_ref().map(|item| item.value).unwrap_or(parent.mono),
+        bold: specified
+            .bold
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(parent.bold),
+        mono: specified
+            .mono
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(parent.mono),
         text_align: specified
             .text_align
             .as_ref()
@@ -969,11 +1052,23 @@ fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &Comput
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(parent.white_space),
-        width: specified.width.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
-        height: specified.height.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
+        width: specified
+            .width
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Length::Auto),
+        height: specified
+            .height
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Length::Auto),
         margin: take_sides(&specified.margin, Length::Px(0.0)),
         padding: take_sides(&specified.padding, Length::Px(0.0)),
-        border_width: specified.border_width.as_ref().map(|item| item.value).unwrap_or(0.0),
+        border_width: specified
+            .border_width
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(0.0),
         borders: border_sides(specified),
         before: None,
         after: None,
@@ -993,39 +1088,100 @@ fn concretize(doc: &Document, id: NodeId, specified: &Specified, parent: &Comput
             .map(|item| item.value)
             .unwrap_or(Position::Static),
         insets: take_sides(&specified.insets, Length::Auto),
-        min_width: specified.min_width.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
-        max_width: specified.max_width.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
-        min_height: specified.min_height.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
-        max_height: specified.max_height.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
-        opacity: specified.opacity.as_ref().map(|item| item.value).unwrap_or(1.0).clamp(0.0, 1.0),
+        min_width: specified
+            .min_width
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Length::Auto),
+        max_width: specified
+            .max_width
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Length::Auto),
+        min_height: specified
+            .min_height
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Length::Auto),
+        max_height: specified
+            .max_height
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Length::Auto),
+        opacity: specified
+            .opacity
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0),
         flex_direction: specified
             .flex_direction
             .as_ref()
             .map(|item| item.value.0)
             .unwrap_or(FlexDirection::Row),
-        flex_reverse: specified.flex_direction.as_ref().is_some_and(|item| item.value.1),
+        flex_reverse: specified
+            .flex_direction
+            .as_ref()
+            .is_some_and(|item| item.value.1),
         gap: specified.gap.as_ref().map(|item| item.value).unwrap_or(0.0),
-        row_gap: specified.row_gap.as_ref().map(|item| item.value).unwrap_or(0.0),
-        flex_wrap: specified.flex_wrap.as_ref().is_some_and(|item| item.value.0),
-        flex_wrap_reverse: specified.flex_wrap.as_ref().is_some_and(|item| item.value.1),
-        justify: specified.justify.as_ref().map(|item| item.value).unwrap_or(Justify::Start),
+        row_gap: specified
+            .row_gap
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(0.0),
+        flex_wrap: specified
+            .flex_wrap
+            .as_ref()
+            .is_some_and(|item| item.value.0),
+        flex_wrap_reverse: specified
+            .flex_wrap
+            .as_ref()
+            .is_some_and(|item| item.value.1),
+        justify: specified
+            .justify
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Justify::Start),
         align_items: specified
             .align_items
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(AlignItems::Stretch),
         align_self: specified.align_self.as_ref().map(|item| item.value),
-        flex_grow: specified.flex_grow.as_ref().map(|item| item.value).unwrap_or(0.0),
-        flex_basis: specified.flex_basis.as_ref().map(|item| item.value).unwrap_or(Length::Auto),
+        flex_grow: specified
+            .flex_grow
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(0.0),
+        flex_basis: specified
+            .flex_basis
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Length::Auto),
         box_sizing: specified
             .box_sizing
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(BoxSizing::ContentBox),
-        overflow_hidden: specified.overflow_hidden.as_ref().is_some_and(|item| item.value),
-        border_radius: specified.border_radius.as_ref().map(|item| item.value).unwrap_or(0.0),
-        visible: specified.visible.as_ref().map(|item| item.value).unwrap_or(true),
-        z_index: specified.z_index.as_ref().map(|item| item.value).unwrap_or(0),
+        overflow_hidden: specified
+            .overflow_hidden
+            .as_ref()
+            .is_some_and(|item| item.value),
+        border_radius: specified
+            .border_radius
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(0.0),
+        visible: specified
+            .visible
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(true),
+        z_index: specified
+            .z_index
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(0),
         text_transform: specified
             .text_transform
             .as_ref()
@@ -1059,17 +1215,36 @@ fn set_border_edge(specified: &mut Specified, index: usize, value: &str, spec: u
 }
 
 fn border_sides(specified: &Specified) -> [f32; 4] {
-    let uniform = specified.border_width.as_ref().map(|item| item.value).unwrap_or(0.0);
+    let uniform = specified
+        .border_width
+        .as_ref()
+        .map(|item| item.value)
+        .unwrap_or(0.0);
     [
-        specified.border_sides[0].as_ref().map(|item| item.value).unwrap_or(uniform),
-        specified.border_sides[1].as_ref().map(|item| item.value).unwrap_or(uniform),
-        specified.border_sides[2].as_ref().map(|item| item.value).unwrap_or(uniform),
-        specified.border_sides[3].as_ref().map(|item| item.value).unwrap_or(uniform),
+        specified.border_sides[0]
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(uniform),
+        specified.border_sides[1]
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(uniform),
+        specified.border_sides[2]
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(uniform),
+        specified.border_sides[3]
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(uniform),
     ]
 }
 
 fn parse_border_widths(value: &str) -> Option<[f32; 4]> {
-    let sides: Vec<f32> = value.split_whitespace().filter_map(parse_border_width).collect();
+    let sides: Vec<f32> = value
+        .split_whitespace()
+        .filter_map(parse_border_width)
+        .collect();
     match sides.as_slice() {
         [one] => Some([*one, *one, *one, *one]),
         [top, right] => Some([*top, *right, *top, *right]),
@@ -1179,8 +1354,14 @@ fn build_generated(
     };
     Some(Generated {
         text,
-        color: color.as_ref().map(|item| item.value).unwrap_or(element.color),
-        background: background.as_ref().map(|item| item.value).unwrap_or(Color::TRANSPARENT),
+        color: color
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(element.color),
+        background: background
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or(Color::TRANSPARENT),
         font_size,
         bold: bold.as_ref().map(|item| item.value).unwrap_or(element.bold),
         width: width.as_ref().and_then(|item| match item.value {
@@ -1201,14 +1382,23 @@ fn build_generated(
 fn strip_generated(selector: &mithu_css::Selector, before: bool) -> Option<mithu_css::Selector> {
     let mut selector = selector.clone();
     let last = selector.compounds.last_mut()?;
-    let wanted = if before { Pseudo::Before } else { Pseudo::After };
+    let wanted = if before {
+        Pseudo::Before
+    } else {
+        Pseudo::After
+    };
     if !last.pseudos.contains(&wanted) {
         return None;
     }
-    if last.pseudos.iter().any(|pseudo| matches!(pseudo, Pseudo::Before | Pseudo::After) && pseudo != &wanted) {
+    if last
+        .pseudos
+        .iter()
+        .any(|pseudo| matches!(pseudo, Pseudo::Before | Pseudo::After) && pseudo != &wanted)
+    {
         return None;
     }
-    last.pseudos.retain(|pseudo| !matches!(pseudo, Pseudo::Before | Pseudo::After));
+    last.pseudos
+        .retain(|pseudo| !matches!(pseudo, Pseudo::Before | Pseudo::After));
     Some(selector)
 }
 
@@ -1276,7 +1466,11 @@ fn apply_presentational_hints(doc: &Document, id: NodeId, style: &mut ComputedSt
     let Some(name) = doc.element_name(id) else {
         return;
     };
-    if name == "input" && doc.attr(id, "type").is_some_and(|kind| kind.eq_ignore_ascii_case("hidden")) {
+    if name == "input"
+        && doc
+            .attr(id, "type")
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("hidden"))
+    {
         style.display = Display::None;
         return;
     }
@@ -1437,7 +1631,11 @@ fn parse_box_sizing(value: &str) -> Option<BoxSizing> {
 fn parse_opacity(value: &str) -> Option<f32> {
     let value = value.trim();
     if let Some(percent) = value.strip_suffix('%') {
-        return percent.trim().parse::<f32>().ok().map(|number| number / 100.0);
+        return percent
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|number| number / 100.0);
     }
     value.parse().ok()
 }
@@ -1578,7 +1776,16 @@ fn parse_calc(value: &str) -> Option<Length> {
             continue;
         }
         let (factor, length) = term_length(term)?;
-        add_calc(&mut percent, &mut px, &mut em, &mut rem, &mut vw, &mut vh, length, sign * factor);
+        add_calc(
+            &mut percent,
+            &mut px,
+            &mut em,
+            &mut rem,
+            &mut vw,
+            &mut vh,
+            length,
+            sign * factor,
+        );
     }
     Some(simplify_calc(percent, px, em, rem, vw, vh))
 }
@@ -1608,14 +1815,25 @@ fn split_top<'a>(input: &'a str, op: char) -> Option<(&'a str, &'a str)> {
         match ch {
             '(' => depth += 1,
             ')' => depth -= 1,
-            _ if ch == op && depth == 0 => return Some((&input[..index], &input[index + ch.len_utf8()..])),
+            _ if ch == op && depth == 0 => {
+                return Some((&input[..index], &input[index + ch.len_utf8()..]));
+            }
             _ => {}
         }
     }
     None
 }
 
-fn add_calc(percent: &mut f32, px: &mut f32, em: &mut f32, rem: &mut f32, vw: &mut f32, vh: &mut f32, length: Length, factor: f32) {
+fn add_calc(
+    percent: &mut f32,
+    px: &mut f32,
+    em: &mut f32,
+    rem: &mut f32,
+    vw: &mut f32,
+    vh: &mut f32,
+    length: Length,
+    factor: f32,
+) {
     match length {
         Length::Px(value) => *px += value * factor,
         Length::Percent(value) => *percent += value * factor,
@@ -1656,7 +1874,14 @@ fn simplify_calc(percent: f32, px: f32, em: f32, rem: f32, vw: f32, vh: f32) -> 
     } else if percent == 0.0 && px == 0.0 && em == 0.0 && rem == 0.0 && vw == 0.0 {
         Length::Vh(vh)
     } else {
-        Length::Calc { percent, px, em, rem, vw, vh }
+        Length::Calc {
+            percent,
+            px,
+            em,
+            rem,
+            vw,
+            vh,
+        }
     }
 }
 
@@ -1665,7 +1890,9 @@ fn px_length(value: &str) -> Option<f32> {
         Length::Px(px) => Some(px.max(0.0)),
         Length::Em(em) => Some((em * 16.0).max(0.0)),
         Length::Rem(rem) => Some((rem * 16.0).max(0.0)),
-        Length::Percent(_) | Length::Vw(_) | Length::Vh(_) | Length::Calc { .. } | Length::Auto => None,
+        Length::Percent(_) | Length::Vw(_) | Length::Vh(_) | Length::Calc { .. } | Length::Auto => {
+            None
+        }
     }
 }
 
@@ -1683,7 +1910,8 @@ fn media_applies(media: Option<&mithu_css::Media>, width: f32) -> bool {
         return true;
     };
     media.alternatives.iter().any(|bound| {
-        bound.min_width.is_none_or(|min| width + 0.01 >= min) && bound.max_width.is_none_or(|max| width <= max + 0.01)
+        bound.min_width.is_none_or(|min| width + 0.01 >= min)
+            && bound.max_width.is_none_or(|max| width <= max + 0.01)
     })
 }
 
@@ -1753,7 +1981,11 @@ fn parse_border_width(value: &str) -> Option<f32> {
             Length::Px(px) => Some(px),
             Length::Em(em) => Some(em * 16.0),
             Length::Rem(rem) => Some(rem * 16.0),
-            Length::Percent(_) | Length::Vw(_) | Length::Vh(_) | Length::Calc { .. } | Length::Auto => None,
+            Length::Percent(_)
+            | Length::Vw(_)
+            | Length::Vh(_)
+            | Length::Calc { .. }
+            | Length::Auto => None,
         },
     }
 }
@@ -1854,8 +2086,18 @@ fn parse_hex(value: &str) -> Option<Color> {
         Some((digit << 4) | digit)
     };
     match chars.len() {
-        3 | 4 => Some(Color::rgba(nibble(0)?, nibble(1)?, nibble(2)?, if chars.len() == 4 { nibble(3)? } else { 255 })),
-        6 | 8 => Some(Color::rgba(pair(0)?, pair(2)?, pair(4)?, if chars.len() == 8 { pair(6)? } else { 255 })),
+        3 | 4 => Some(Color::rgba(
+            nibble(0)?,
+            nibble(1)?,
+            nibble(2)?,
+            if chars.len() == 4 { nibble(3)? } else { 255 },
+        )),
+        6 | 8 => Some(Color::rgba(
+            pair(0)?,
+            pair(2)?,
+            pair(4)?,
+            if chars.len() == 8 { pair(6)? } else { 255 },
+        )),
         _ => None,
     }
 }
@@ -1883,7 +2125,12 @@ fn parse_rgb(value: &str) -> Option<Color> {
         Some(token) => parse_alpha(token)?,
         None => 255,
     };
-    Some(Color::rgba(channel(numbers[0])?, channel(numbers[1])?, channel(numbers[2])?, alpha))
+    Some(Color::rgba(
+        channel(numbers[0])?,
+        channel(numbers[1])?,
+        channel(numbers[2])?,
+        alpha,
+    ))
 }
 
 fn parse_alpha(token: &str) -> Option<u8> {
@@ -1958,7 +2205,8 @@ mod tests {
 
     #[test]
     fn flex_position_and_attribute_selector() {
-        let doc = parse_html(r#"<div id="row" class="row"><b id="one">A</b><i id="two">B</i></div>"#);
+        let doc =
+            parse_html(r#"<div id="row" class="row"><b id="one">A</b><i id="two">B</i></div>"#);
         let styles = style_document(
             &doc,
             r#"
@@ -1993,7 +2241,9 @@ mod tests {
 
     #[test]
     fn custom_properties_calc_and_hover() {
-        let doc = parse_html(r#"<div id="box" style="--ink: hsl(0, 100%, 50%)"><p id="text">Hi</p></div>"#);
+        let doc = parse_html(
+            r#"<div id="box" style="--ink: hsl(0, 100%, 50%)"><p id="text">Hi</p></div>"#,
+        );
         let styles = style_document(
             &doc,
             "p { color: var(--ink); width: calc(100% - 20px) } #text { background: rgba(0, 0, 0, 0.5) }",
@@ -2003,7 +2253,14 @@ mod tests {
         assert_eq!(styles[text.0].background.a, 128);
         assert_eq!(
             styles[text.0].width,
-            Length::Calc { percent: 100.0, px: -20.0, em: 0.0, rem: 0.0, vw: 0.0, vh: 0.0 }
+            Length::Calc {
+                percent: 100.0,
+                px: -20.0,
+                em: 0.0,
+                rem: 0.0,
+                vw: 0.0,
+                vh: 0.0
+            }
         );
         let idle = style_document(&doc, "#box:hover { color: tomato }");
         let box_id = doc.get_element_by_id("box").unwrap();
@@ -2011,15 +2268,27 @@ mod tests {
         let hovered = style_with(
             &doc,
             "#box:hover { color: tomato }",
-            StyleState { hover: Some(text), ..StyleState::default() },
+            StyleState {
+                hover: Some(text),
+                ..StyleState::default()
+            },
         );
         assert_eq!(hovered[box_id.0].color, Color::rgb(255, 99, 71));
-        assert!(style_document(&doc, "#box { flex-wrap: wrap; visibility: hidden; z-index: 2 }")[box_id.0].flex_wrap);
+        assert!(
+            style_document(
+                &doc,
+                "#box { flex-wrap: wrap; visibility: hidden; z-index: 2 }"
+            )[box_id.0]
+                .flex_wrap
+        );
         assert!(!style_document(&doc, "#box { visibility: hidden }")[box_id.0].visible);
         let narrow = style_with(
             &doc,
             "@media (min-width: 900px) { #text { color: blue } } @media (max-width: 400px) { #text { color: gold } }",
-            StyleState { viewport_width: 320.0, ..StyleState::default() },
+            StyleState {
+                viewport_width: 320.0,
+                ..StyleState::default()
+            },
         );
         assert_eq!(narrow[text.0].color, Color::rgb(255, 215, 0));
         assert_eq!(

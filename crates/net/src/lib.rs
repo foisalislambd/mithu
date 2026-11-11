@@ -1,17 +1,53 @@
-//! Blocking HTTP/1.1 client with TLS.
+//! Blocking HTTP/1.1 client with TLS, cookies, and a small response cache.
 //!
 //! Mithu speaks HTTP itself: request formatting, content-length, chunked
-//! bodies, and redirects. TLS is provided by Rustls so the certificate check
-//! is a real one, not a hand-rolled cipher.
+//! bodies, redirects, and `Cookie` / `Set-Cookie`. TLS is provided by Rustls
+//! so the certificate check is a real one, not a hand-rolled cipher. One
+//! profile-wide jar and cache stand in for Chromium's network service.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use mithu_url::Url;
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
+
+mod cache;
+mod cookies;
+
+pub use cache::HttpCache;
+pub use cookies::{Cookie, CookieJar};
+
+/// How a navigation uses the profile cache. Reload bypasses it; other loads may reuse a fresh response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheMode {
+    Use,
+    Bypass,
+}
+
+struct Profile {
+    cookies: CookieJar,
+    cache: HttpCache,
+}
+
+fn profile() -> &'static Mutex<Profile> {
+    static PROFILE: OnceLock<Mutex<Profile>> = OnceLock::new();
+    PROFILE.get_or_init(|| {
+        Mutex::new(Profile {
+            cookies: CookieJar::new(),
+            cache: HttpCache::new(32),
+        })
+    })
+}
+
+fn with_profile<T>(body: impl FnOnce(&mut Profile) -> T) -> T {
+    let mut guard = profile()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    body(&mut guard)
+}
 
 #[derive(Debug)]
 pub enum NetError {
@@ -79,11 +115,16 @@ impl Response {
 }
 
 pub fn get(url: &Url) -> Result<Response, NetError> {
-    fetch("GET", url, None, &[], 0)
+    fetch("GET", url, None, &[], 0, CacheMode::Use)
+}
+
+/// GET that ignores a fresh cache entry. The reload button uses this.
+pub fn reload(url: &Url) -> Result<Response, NetError> {
+    fetch("GET", url, None, &[], 0, CacheMode::Bypass)
 }
 
 pub fn post(url: &Url, content_type: &str, body: &[u8]) -> Result<Response, NetError> {
-    fetch("POST", url, Some(content_type), body, 0)
+    fetch("POST", url, Some(content_type), body, 0, CacheMode::Bypass)
 }
 
 fn fetch(
@@ -92,6 +133,7 @@ fn fetch(
     content_type: Option<&str>,
     body: &[u8],
     redirects: u8,
+    cache_mode: CacheMode,
 ) -> Result<Response, NetError> {
     if redirects > 8 {
         return Err(NetError::TooManyRedirects);
@@ -102,33 +144,56 @@ fn fetch(
     if url.host.is_empty() {
         return Err(NetError::InvalidUrl);
     }
+    let key = cache::cache_key(method, url);
+    if method == "GET" && cache_mode == CacheMode::Use {
+        if let Some(hit) = with_profile(|profile| profile.cache.get(&key)) {
+            return Ok(hit);
+        }
+    }
+    let cookie = with_profile(|profile| profile.cookies.header_for(url));
     let port = url.effective_port().unwrap_or(80);
-    let request = build_request(method, url, content_type, body);
+    let request = build_request(method, url, content_type, body, cookie.as_deref());
     let raw = if url.scheme == "https" {
         https_exchange(&url.host, port, &request)?
     } else {
         tcp_exchange(&url.host, port, &request)?
     };
     let parsed = parse_http_message(&raw)?;
+    with_profile(|profile| profile.cookies.ingest(url, &parsed.headers));
     if matches!(parsed.status, 301 | 302 | 303 | 307 | 308)
         && let Some(location) = header(&parsed.headers, "location")
     {
-        let next = url.resolve(location).map_err(|_| NetError::InvalidRedirect)?;
+        let next = url
+            .resolve(location)
+            .map_err(|_| NetError::InvalidRedirect)?;
         let switch_to_get = matches!(parsed.status, 301 | 302 | 303);
         if switch_to_get {
-            return fetch("GET", &next, None, &[], redirects + 1);
+            return fetch("GET", &next, None, &[], redirects + 1, cache_mode);
         }
-        return fetch(method, &next, content_type, body, redirects + 1);
+        return fetch(method, &next, content_type, body, redirects + 1, cache_mode);
     }
-    Ok(Response {
+    let response = Response {
         status: parsed.status,
         headers: parsed.headers,
         body: parsed.body,
         url: url.clone(),
-    })
+    };
+    if method == "GET"
+        && response.status == 200
+        && let Some(max_age) = cache::max_age(&response.headers)
+    {
+        with_profile(|profile| profile.cache.insert(key, response.clone(), max_age));
+    }
+    Ok(response)
 }
 
-fn build_request(method: &str, url: &Url, content_type: Option<&str>, body: &[u8]) -> Vec<u8> {
+fn build_request(
+    method: &str,
+    url: &Url,
+    content_type: Option<&str>,
+    body: &[u8],
+    cookie: Option<&str>,
+) -> Vec<u8> {
     let host = match url.port {
         Some(port) if Url::default_port(&url.scheme) != Some(port) => {
             format!("{}:{port}", url.host)
@@ -140,7 +205,15 @@ fn build_request(method: &str, url: &Url, content_type: Option<&str>, body: &[u8
         url.request_target()
     );
     if let Some(content_type) = content_type {
-        head.push_str(&format!("Content-Type: {content_type}\r\nContent-Length: {}\r\n", body.len()));
+        head.push_str(&format!(
+            "Content-Type: {content_type}\r\nContent-Length: {}\r\n",
+            body.len()
+        ));
+    }
+    if let Some(cookie) = cookie {
+        head.push_str("Cookie: ");
+        head.push_str(cookie);
+        head.push_str("\r\n");
     }
     head.push_str("\r\n");
     let mut request = head.into_bytes();
@@ -160,8 +233,8 @@ fn https_exchange(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetE
     let config = tls_config()?;
     let name = ServerName::try_from(host.to_string())
         .map_err(|_| NetError::Tls(format!("invalid server name {host}")))?;
-    let mut connection = ClientConnection::new(config, name)
-        .map_err(|error| NetError::Tls(error.to_string()))?;
+    let mut connection =
+        ClientConnection::new(config, name).map_err(|error| NetError::Tls(error.to_string()))?;
     let mut tls = rustls::Stream::new(&mut connection, &mut socket);
     exchange(&mut tls, request)
 }
@@ -346,7 +419,8 @@ mod tests {
 
     #[test]
     fn parses_content_length_and_ignores_extra_bytes() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhelloEXTRA";
+        let raw =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhelloEXTRA";
         let message = parse_http_message(raw).unwrap();
         assert_eq!(message.status, 200);
         assert_eq!(message.body, b"hello");
@@ -358,5 +432,48 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         let message = parse_http_message(raw).unwrap();
         assert_eq!(message.body, b"hello");
+    }
+
+    #[test]
+    fn cookie_is_stored_and_a_fresh_response_is_reused() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0u8; 4096];
+                let size = stream.read(&mut buf).unwrap_or(0);
+                seen.push(String::from_utf8_lossy(&buf[..size]).into_owned());
+                let body = if index == 0 {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nSet-Cookie: sid{port}=abc; Path=/\r\n\r\npage"
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nCache-Control: max-age=120\r\n\r\ncached".to_string()
+                };
+                stream.write_all(body.as_bytes()).unwrap();
+            }
+            seen
+        });
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/cookie")).unwrap();
+        let first = get(&url).unwrap();
+        assert_eq!(first.text(), "page");
+        let second = get(&url).unwrap();
+        assert_eq!(second.text(), "cached");
+        let third = get(&url).unwrap();
+        assert_eq!(third.text(), "cached");
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 2, "the third load should come from the cache");
+        assert!(!seen[0].contains("Cookie:"), "{:?}", seen[0]);
+        assert!(seen[1].contains(&format!("sid{port}=abc")), "{:?}", seen[1]);
+        let fresh = reload(&url);
+        assert!(
+            fresh.is_err(),
+            "reload bypasses the cache and the server is gone"
+        );
     }
 }

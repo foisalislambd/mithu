@@ -10,11 +10,14 @@ CSS covers the box model, type, class, id, attribute, and structural selectors, 
 
 The goal is a full browser that stays small: pages, navigation, network, layout, and the web platform people actually use. It does not add a bundled assistant or an ad system on top of that.
 
+The frame follows Chrome's layout: tab strip, toolbar, omnibox, bookmarks bar, and a new-tab page. JavaScript stays on Boa. How that maps onto Chromium, and what is intentionally not ported, is written in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## Run
 
 ```bash
 cargo run -p mithu
 cargo run -p mithu -- https://example.com/
+cargo run -p mithu -- --screenshot frame.png https://example.com/
 cargo test --workspace
 ```
 
@@ -37,7 +40,7 @@ Folders are the browser layers. Package names keep a `mithu-` prefix so they sta
 | Folder | Package | Role |
 | --- | --- | --- |
 | `crates/url` | `mithu-url` | URL parser and relative resolution |
-| `crates/net` | `mithu-net` | HTTP/1.1, chunked bodies, redirects, TLS |
+| `crates/net` | `mithu-net` | HTTP/1.1, chunked bodies, redirects, TLS, cookies, memory cache |
 | `crates/dom` | `mithu-dom` | Document tree |
 | `crates/html` | `mithu-html` | Tokenizer and tree builder |
 | `crates/js` | `mithu-js` | In-process JavaScript machine and DOM bindings |

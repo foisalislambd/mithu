@@ -9,6 +9,7 @@ publish.workspace = true
 description = "Mithu browser window"
 
 [dependencies]
+mithu-image = { path = "../../crates/image" }
 mithu-shell = { path = "../../crates/shell" }
 softbuffer = "0.4"
 winit = "0.30"

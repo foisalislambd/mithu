@@ -12,12 +12,45 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 fn main() {
+    let mut args = std::env::args().skip(1);
+    if let Some(first) = args.next() {
+        if first == "--screenshot" {
+            let path = args.next().unwrap_or_else(|| "mithu.png".to_string());
+            let url = args.next();
+            if let Err(error) = dump_screenshot(&path, url.as_deref()) {
+                eprintln!("mithu: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        let event_loop = EventLoop::new().expect("create the event loop");
+        let mut app = App::new();
+        app.browser.navigate(&first);
+        event_loop.run_app(&mut app).expect("run the window");
+        return;
+    }
     let event_loop = EventLoop::new().expect("create the event loop");
     let mut app = App::new();
-    if let Some(argument) = std::env::args().nth(1) {
-        app.browser.navigate(&argument);
-    }
     event_loop.run_app(&mut app).expect("run the window");
+}
+
+fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
+    let mut browser = Browser::new();
+    if let Some(url) = url {
+        browser.navigate(url);
+    }
+    let width = 1280u32;
+    let height = 800u32;
+    let pixels = browser.render(width as f32, height as f32);
+    let mut rgb = Vec::with_capacity(pixels.len() * 3);
+    for pixel in pixels {
+        rgb.push(((pixel >> 16) & 255) as u8);
+        rgb.push(((pixel >> 8) & 255) as u8);
+        rgb.push((pixel & 255) as u8);
+    }
+    let png = mithu_image::encode_png(width, height, &rgb)
+        .ok_or_else(|| "could not encode the screenshot".to_string())?;
+    std::fs::write(path, png).map_err(|error| error.to_string())
 }
 
 struct App {
@@ -123,7 +156,8 @@ impl ApplicationHandler for App {
             }
         };
         let size = window.inner_size();
-        self.browser.resize(size.width.max(1) as f32, size.height.max(1) as f32);
+        self.browser
+            .resize(size.width.max(1) as f32, size.height.max(1) as f32);
         self.context = Some(context);
         self.surface = Some(surface);
         self.window = Some(window);
@@ -134,7 +168,8 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                self.browser.resize(size.width.max(1) as f32, size.height.max(1) as f32);
+                self.browser
+                    .resize(size.width.max(1) as f32, size.height.max(1) as f32);
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => self.redraw(),
@@ -174,21 +209,41 @@ impl ApplicationHandler for App {
                 let shift = self.modifiers.shift_key();
                 let focused = self.browser.omnibox_focused;
                 match event.logical_key {
-                    Key::Named(NamedKey::Enter) if self.browser.find_focused && shift => self.browser.find_previous(),
-                    Key::Named(NamedKey::Enter) if self.browser.find_focused => self.browser.find_next(),
+                    Key::Named(NamedKey::Enter) if self.browser.find_focused && shift => {
+                        self.browser.find_previous()
+                    }
+                    Key::Named(NamedKey::Enter) if self.browser.find_focused => {
+                        self.browser.find_next()
+                    }
                     Key::Named(NamedKey::Enter) if focused => self.browser.submit_omnibox(),
-                    Key::Named(NamedKey::Enter) if self.browser.field_focused() => self.browser.submit_field(),
-                    Key::Named(NamedKey::Escape) if self.browser.menu_open() => self.browser.close_menu(),
-                    Key::Named(NamedKey::Escape) if self.browser.bookmarks_open() => self.browser.close_bookmarks(),
-                    Key::Named(NamedKey::Escape) if self.browser.find_is_open() => self.browser.close_find(),
+                    Key::Named(NamedKey::Enter) if self.browser.field_focused() => {
+                        self.browser.submit_field()
+                    }
+                    Key::Named(NamedKey::Escape) if self.browser.menu_open() => {
+                        self.browser.close_menu()
+                    }
+                    Key::Named(NamedKey::Escape) if self.browser.bookmarks_open() => {
+                        self.browser.close_bookmarks()
+                    }
+                    Key::Named(NamedKey::Escape) if self.browser.find_is_open() => {
+                        self.browser.close_find()
+                    }
                     Key::Named(NamedKey::Escape) => self.browser.blur_page(),
-                    Key::Named(NamedKey::Backspace) if self.browser.find_focused => self.browser.find_backspace(),
+                    Key::Named(NamedKey::Backspace) if self.browser.find_focused => {
+                        self.browser.find_backspace()
+                    }
                     Key::Named(NamedKey::Backspace) if focused => self.browser.backspace(),
-                    Key::Named(NamedKey::Backspace) if self.browser.field_focused() => self.browser.field_backspace(),
+                    Key::Named(NamedKey::Backspace) if self.browser.field_focused() => {
+                        self.browser.field_backspace()
+                    }
                     Key::Named(NamedKey::ArrowDown) if focused => self.browser.move_suggestion(1),
                     Key::Named(NamedKey::ArrowUp) if focused => self.browser.move_suggestion(-1),
-                    Key::Named(NamedKey::ArrowLeft) if focused && !alt => self.browser.move_cursor(-1),
-                    Key::Named(NamedKey::ArrowRight) if focused && !alt => self.browser.move_cursor(1),
+                    Key::Named(NamedKey::ArrowLeft) if focused && !alt => {
+                        self.browser.move_cursor(-1)
+                    }
+                    Key::Named(NamedKey::ArrowRight) if focused && !alt => {
+                        self.browser.move_cursor(1)
+                    }
                     Key::Named(NamedKey::ArrowLeft) if alt => self.browser.back(),
                     Key::Named(NamedKey::ArrowRight) if alt => self.browser.forward(),
                     Key::Named(NamedKey::ArrowDown) if !focused => self.browser.scroll_by(64.0),
@@ -198,16 +253,34 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::Home) if !focused => self.browser.scroll_by(-1.0e9),
                     Key::Named(NamedKey::End) if !focused => self.browser.scroll_by(1.0e9),
                     Key::Named(NamedKey::Tab) if ctrl => self.browser.next_tab(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("t") => self.browser.new_tab(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("w") => self.browser.close_tab(),
-                    Key::Character(text) if ctrl && (text == "+" || text == "=") => self.browser.zoom_in(),
-                    Key::Character(text) if ctrl && (text == "-" || text == "_") => self.browser.zoom_out(),
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("t") => {
+                        self.browser.new_tab()
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("w") => {
+                        self.browser.close_tab()
+                    }
+                    Key::Character(text) if ctrl && (text == "+" || text == "=") => {
+                        self.browser.zoom_in()
+                    }
+                    Key::Character(text) if ctrl && (text == "-" || text == "_") => {
+                        self.browser.zoom_out()
+                    }
                     Key::Character(text) if ctrl && text == "0" => self.browser.zoom_reset(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("d") => self.browser.toggle_bookmark(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("b") => self.browser.toggle_bookmark_list(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("f") => self.browser.open_find(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("l") => self.browser.focus_omnibox(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("r") => self.browser.reload(),
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("d") => {
+                        self.browser.toggle_bookmark()
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("b") => {
+                        self.browser.toggle_bookmark_list()
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("f") => {
+                        self.browser.open_find()
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("l") => {
+                        self.browser.focus_omnibox()
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("r") => {
+                        self.browser.reload()
+                    }
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("a") && focused => {
                         self.browser.select_all_text();
                     }
@@ -226,7 +299,9 @@ impl ApplicationHandler for App {
                             self.browser.field_insert(ch);
                         }
                     }
-                    Key::Named(NamedKey::Space) if self.browser.field_focused() => self.browser.field_insert(' '),
+                    Key::Named(NamedKey::Space) if self.browser.field_focused() => {
+                        self.browser.field_insert(' ')
+                    }
                     Key::Named(NamedKey::Space) if !focused => self.browser.scroll_page(1.0),
                     _ => return,
                 }
@@ -244,7 +319,13 @@ impl ApplicationHandler for App {
             self.sync_title();
             self.request_redraw();
         }
-        let wait = self.browser.next_timer_ms().unwrap_or(60_000).clamp(1, 60_000);
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(wait)));
+        let wait = self
+            .browser
+            .next_timer_ms()
+            .unwrap_or(60_000)
+            .clamp(1, 60_000);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(wait),
+        ));
     }
 }

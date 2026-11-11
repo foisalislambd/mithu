@@ -1357,6 +1357,7 @@ dependencies = [
 name = "mithu"
 version = "0.1.0"
 dependencies = [
+ "mithu-image",
  "mithu-shell",
  "softbuffer",
  "winit",

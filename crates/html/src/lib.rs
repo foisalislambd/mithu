@@ -439,7 +439,10 @@ impl Parser {
     }
 
     fn starts_with(&self, text: &str) -> bool {
-        self.chars[self.pos..].iter().collect::<String>().starts_with(text)
+        self.chars[self.pos..]
+            .iter()
+            .collect::<String>()
+            .starts_with(text)
     }
 
     fn dispatch(&mut self, token: Token) {
@@ -506,10 +509,17 @@ impl Parser {
         match token {
             Token::Comment | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "title" | "style" | "script" | "textarea" | "noscript") => {
+            Token::Start { name, attrs, .. }
+                if matches!(
+                    name.as_str(),
+                    "title" | "style" | "script" | "textarea" | "noscript"
+                ) =>
+            {
                 self.start_raw(name, attrs);
             }
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "base" | "link" | "meta") => {
+            Token::Start { name, attrs, .. }
+                if matches!(name.as_str(), "base" | "link" | "meta") =>
+            {
                 let id = self.insert(&name);
                 self.apply_attrs(id, attrs);
                 self.stack.pop();
@@ -552,7 +562,12 @@ impl Parser {
                     self.apply_attrs(html, attrs);
                 }
             }
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "title" | "style" | "script" | "base" | "link" | "meta") => {
+            Token::Start { name, attrs, .. }
+                if matches!(
+                    name.as_str(),
+                    "title" | "style" | "script" | "base" | "link" | "meta"
+                ) =>
+            {
                 self.mode = Mode::InHead;
                 self.stack.push(self.head_id().unwrap_or(self.stack[0]));
                 self.reconsume(Token::Start {
@@ -578,7 +593,11 @@ impl Parser {
                     self.doc.append_text(parent, &text);
                 }
             }
-            Token::Start { name, attrs, self_closing } => self.start_in_body(name, attrs, self_closing),
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } => self.start_in_body(name, attrs, self_closing),
             Token::End { name } => self.end_in_body(name),
             Token::Eof => {}
         }
@@ -595,7 +614,18 @@ impl Parser {
             return;
         }
         self.reconstruct();
-        if matches!(name.as_str(), "title" | "style" | "script" | "textarea" | "iframe" | "noscript" | "noembed" | "noframes" | "xmp") {
+        if matches!(
+            name.as_str(),
+            "title"
+                | "style"
+                | "script"
+                | "textarea"
+                | "iframe"
+                | "noscript"
+                | "noembed"
+                | "noframes"
+                | "xmp"
+        ) {
             self.start_raw(name, attrs);
             return;
         }
@@ -605,10 +635,18 @@ impl Parser {
         if name == "li" && self.current_name() == Some("li") {
             self.stack.pop();
         }
-        if matches!(name.as_str(), "dd" | "dt") && self.current_name().is_some_and(|current| current == "dd" || current == "dt") {
+        if matches!(name.as_str(), "dd" | "dt")
+            && self
+                .current_name()
+                .is_some_and(|current| current == "dd" || current == "dt")
+        {
             self.stack.pop();
         }
-        if is_heading(&name) && self.current_name().is_some_and(|current| is_heading(current)) {
+        if is_heading(&name)
+            && self
+                .current_name()
+                .is_some_and(|current| is_heading(current))
+        {
             self.stack.pop();
         }
         if name == "a" && self.in_scope("a") {
@@ -691,18 +729,36 @@ impl Parser {
             Token::Start { name, attrs, .. } if name == "colgroup" => {
                 self.open_table_section("colgroup", attrs, Mode::InColumnGroup);
             }
-            Token::Start { name, attrs, self_closing } if name == "col" => {
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if name == "col" => {
                 self.insert("colgroup");
                 self.mode = Mode::InColumnGroup;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "tbody" | "thead" | "tfoot") => {
+            Token::Start { name, attrs, .. }
+                if matches!(name.as_str(), "tbody" | "thead" | "tfoot") =>
+            {
                 self.open_table_section(&name, attrs, Mode::InTableBody);
             }
-            Token::Start { name, attrs, self_closing } if matches!(name.as_str(), "td" | "th" | "tr") => {
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(name.as_str(), "td" | "th" | "tr") => {
                 self.insert("tbody");
                 self.mode = Mode::InTableBody;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
             Token::Start { name, attrs, .. } if matches!(name.as_str(), "style" | "script") => {
                 self.start_raw(name, attrs);
@@ -711,7 +767,21 @@ impl Parser {
                 self.pop_until("table");
                 self.mode = Mode::InBody;
             }
-            Token::End { name } if matches!(name.as_str(), "body" | "caption" | "col" | "colgroup" | "html" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") => {}
+            Token::End { name }
+                if matches!(
+                    name.as_str(),
+                    "body"
+                        | "caption"
+                        | "col"
+                        | "colgroup"
+                        | "html"
+                        | "tbody"
+                        | "td"
+                        | "tfoot"
+                        | "th"
+                        | "thead"
+                        | "tr"
+                ) => {}
             other => self.foster(other),
         }
     }
@@ -722,12 +792,22 @@ impl Parser {
                 self.pop_until("caption");
                 self.mode = Mode::InTable;
             }
-            Token::Start { name, attrs, self_closing }
-                if matches!(name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") =>
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(
+                name.as_str(),
+                "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr"
+            ) =>
             {
                 self.pop_until("caption");
                 self.mode = Mode::InTable;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
             Token::End { name } if name == "table" => {
                 self.pop_until("caption");
@@ -767,20 +847,38 @@ impl Parser {
             Token::Start { name, attrs, .. } if name == "tr" => {
                 self.open_table_section("tr", attrs, Mode::InRow);
             }
-            Token::Start { name, attrs, self_closing } if matches!(name.as_str(), "th" | "td") => {
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(name.as_str(), "th" | "td") => {
                 self.insert("tr");
                 self.mode = Mode::InRow;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
             Token::End { name } if matches!(name.as_str(), "tbody" | "thead" | "tfoot") => {
                 self.pop_until(&name);
                 self.mode = Mode::InTable;
             }
-            Token::Start { name, attrs, self_closing }
-                if matches!(name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead") =>
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(
+                name.as_str(),
+                "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead"
+            ) =>
             {
                 self.close_table_body();
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
             Token::End { name } if name == "table" => {
                 self.close_table_body();
@@ -799,14 +897,26 @@ impl Parser {
                 self.pop_until("tr");
                 self.mode = Mode::InTableBody;
             }
-            Token::Start { name, attrs, self_closing }
-                if matches!(name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead" | "tr") =>
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(
+                name.as_str(),
+                "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead" | "tr"
+            ) =>
             {
                 self.pop_until("tr");
                 self.mode = Mode::InTableBody;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
-            Token::End { name } if matches!(name.as_str(), "table" | "tbody" | "tfoot" | "thead") => {
+            Token::End { name }
+                if matches!(name.as_str(), "table" | "tbody" | "tfoot" | "thead") =>
+            {
                 self.pop_until("tr");
                 self.mode = Mode::InTableBody;
                 self.reconsume(Token::End { name });
@@ -821,13 +931,25 @@ impl Parser {
                 self.pop_until(&name);
                 self.mode = Mode::InRow;
             }
-            Token::Start { name, attrs, self_closing }
-                if matches!(name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") =>
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(
+                name.as_str(),
+                "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr"
+            ) =>
             {
                 self.close_cell();
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
-            Token::End { name } if matches!(name.as_str(), "table" | "tbody" | "tfoot" | "thead" | "tr") => {
+            Token::End { name }
+                if matches!(name.as_str(), "table" | "tbody" | "tfoot" | "thead" | "tr") =>
+            {
                 self.close_cell();
                 self.reconsume(Token::End { name });
             }
@@ -891,14 +1013,20 @@ impl Parser {
     }
 
     fn close_table_body(&mut self) {
-        if self.current_name().is_some_and(|name| matches!(name, "tbody" | "thead" | "tfoot")) {
+        if self
+            .current_name()
+            .is_some_and(|name| matches!(name, "tbody" | "thead" | "tfoot"))
+        {
             self.stack.pop();
         }
         self.mode = Mode::InTable;
     }
 
     fn close_cell(&mut self) {
-        if self.current_name().is_some_and(|name| name == "td" || name == "th") {
+        if self
+            .current_name()
+            .is_some_and(|name| name == "td" || name == "th")
+        {
             self.stack.pop();
         }
         self.mode = Mode::InRow;
@@ -913,7 +1041,11 @@ impl Parser {
                     self.doc.append_text(parent, &text);
                 }
             }
-            Token::Start { name, attrs, self_closing } => {
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } => {
                 let id = self.doc.create_element_detached(&name);
                 if let Some((parent, before)) = self.foster_slot() {
                     self.doc.insert_before(parent, id, before);
@@ -934,7 +1066,12 @@ impl Parser {
     }
 
     fn foster_slot(&self) -> Option<(NodeId, Option<NodeId>)> {
-        let table = self.stack.iter().rev().copied().find(|id| self.doc.element_name(*id) == Some("table"))?;
+        let table = self
+            .stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| self.doc.element_name(*id) == Some("table"))?;
         let parent = self.doc.nodes.get(table.0).and_then(|node| node.parent)?;
         Some((parent, Some(table)))
     }
@@ -966,7 +1103,11 @@ impl Parser {
                 break;
             };
             let name = self.doc.element_name(id).unwrap_or("span").to_string();
-            let attrs = self.doc.element(id).map(|element| element.attrs.clone()).unwrap_or_default();
+            let attrs = self
+                .doc
+                .element(id)
+                .map(|element| element.attrs.clone())
+                .unwrap_or_default();
             let clone = self.insert(&name);
             self.apply_attrs(clone, attrs);
             self.active[entry] = Some(clone);
@@ -976,7 +1117,9 @@ impl Parser {
 
     fn adoption_agency(&mut self, subject: &str) {
         if self.current_name() == Some(subject)
-            && self.current().is_some_and(|id| !self.active.contains(&Some(id)))
+            && self
+                .current()
+                .is_some_and(|id| !self.active.contains(&Some(id)))
         {
             self.stack.pop();
             return;
@@ -993,9 +1136,11 @@ impl Parser {
             if !self.in_scope(subject) {
                 return;
             }
-            let Some(block_pos) = ((fmt_pos + 1)..self.stack.len())
-                .find(|index| self.doc.element_name(self.stack[*index]).is_some_and(is_special))
-            else {
+            let Some(block_pos) = ((fmt_pos + 1)..self.stack.len()).find(|index| {
+                self.doc
+                    .element_name(self.stack[*index])
+                    .is_some_and(is_special)
+            }) else {
                 while let Some(id) = self.stack.pop() {
                     if id == formatting {
                         self.active.retain(|entry| *entry != Some(formatting));
@@ -1005,7 +1150,11 @@ impl Parser {
                 return;
             };
             let block = self.stack[block_pos];
-            let common = if fmt_pos == 0 { self.doc.root } else { self.stack[fmt_pos - 1] };
+            let common = if fmt_pos == 0 {
+                self.doc.root
+            } else {
+                self.stack[fmt_pos - 1]
+            };
             let mut node_pos = block_pos;
             let mut last = block;
             let mut inner = 0;
@@ -1051,7 +1200,8 @@ impl Parser {
             self.doc.append_child(block, new_element);
             self.active.retain(|entry| *entry != Some(formatting));
             self.active.push(Some(new_element));
-            self.stack.retain(|id| *id != formatting && *id != new_element);
+            self.stack
+                .retain(|id| *id != formatting && *id != new_element);
             self.stack.push(new_element);
             return;
         }
@@ -1061,7 +1211,11 @@ impl Parser {
         for entry in self.active.iter().rev() {
             match entry {
                 None => return None,
-                Some(id) if self.doc.element_name(*id) == Some(subject) && self.stack.contains(id) => return Some(*id),
+                Some(id)
+                    if self.doc.element_name(*id) == Some(subject) && self.stack.contains(id) =>
+                {
+                    return Some(*id);
+                }
                 Some(_) => {}
             }
         }
@@ -1070,7 +1224,11 @@ impl Parser {
 
     fn clone_element(&mut self, id: NodeId) -> NodeId {
         let name = self.doc.element_name(id).unwrap_or("span").to_string();
-        let attrs = self.doc.element(id).map(|element| element.attrs.clone()).unwrap_or_default();
+        let attrs = self
+            .doc
+            .element(id)
+            .map(|element| element.attrs.clone())
+            .unwrap_or_default();
         let clone = self.doc.create_element_detached(&name);
         self.apply_attrs(clone, attrs);
         clone
@@ -1182,7 +1340,9 @@ impl Parser {
                 self.doc.stylesheet_links.push(href.to_string());
             }
         }
-        if name == "base" && self.doc.base_href.is_none() && let Some(href) = self.doc.attr(id, "href")
+        if name == "base"
+            && self.doc.base_href.is_none()
+            && let Some(href) = self.doc.attr(id, "href")
         {
             self.doc.base_href = Some(href.to_string());
         }
@@ -1197,13 +1357,20 @@ impl Parser {
     }
 
     fn head_id(&self) -> Option<NodeId> {
-        self.doc.node(self.doc.root).children.iter().copied().find(|id| {
-            self.doc.element_name(*id) == Some("html")
-        }).and_then(|html| {
-            self.doc.node(html).children.iter().copied().find(|id| {
-                self.doc.element_name(*id) == Some("head")
+        self.doc
+            .node(self.doc.root)
+            .children
+            .iter()
+            .copied()
+            .find(|id| self.doc.element_name(*id) == Some("html"))
+            .and_then(|html| {
+                self.doc
+                    .node(html)
+                    .children
+                    .iter()
+                    .copied()
+                    .find(|id| self.doc.element_name(*id) == Some("head"))
             })
-        })
     }
 
     fn close_p_if_open(&mut self) {
@@ -1213,7 +1380,11 @@ impl Parser {
     }
 
     fn pop_until(&mut self, tag: &str) {
-        if !self.stack.iter().any(|id| self.doc.element_name(*id) == Some(tag)) {
+        if !self
+            .stack
+            .iter()
+            .any(|id| self.doc.element_name(*id) == Some(tag))
+        {
             return;
         }
         while let Some(id) = self.stack.pop() {
@@ -1236,7 +1407,19 @@ fn is_void(name: &str) -> bool {
 fn is_formatting(name: &str) -> bool {
     matches!(
         name,
-        "a" | "b" | "big" | "code" | "em" | "font" | "i" | "nobr" | "s" | "small" | "strike" | "strong" | "tt" | "u"
+        "a" | "b"
+            | "big"
+            | "code"
+            | "em"
+            | "font"
+            | "i"
+            | "nobr"
+            | "s"
+            | "small"
+            | "strike"
+            | "strong"
+            | "tt"
+            | "u"
     )
 }
 
@@ -1416,7 +1599,9 @@ mod tests {
 
     #[test]
     fn decodes_entities_and_keeps_raw_style() {
-        let doc = parse_html("<title>A &amp; B</title><style>div > p { color: red }</style><p>&lt;x&gt;</p>");
+        let doc = parse_html(
+            "<title>A &amp; B</title><style>div > p { color: red }</style><p>&lt;x&gt;</p>",
+        );
         assert_eq!(doc.title, "A & B");
         assert_eq!(doc.stylesheets[0], "div > p { color: red }");
         let body = doc
@@ -1438,16 +1623,26 @@ mod tests {
 
     #[test]
     fn an_image_before_body_is_not_hidden_in_head() {
-        let doc = parse_html("<link rel='stylesheet' href='app.css'><img id='pic' src='pixel.png'><p id='text'>Hi</p>");
+        let doc = parse_html(
+            "<link rel='stylesheet' href='app.css'><img id='pic' src='pixel.png'><p id='text'>Hi</p>",
+        );
         let html = doc.node(doc.root).children[0];
         let head = doc.node(html).children[0];
         let body = doc.node(html).children[1];
         assert_eq!(doc.element_name(head), Some("head"));
         assert_eq!(doc.element_name(body), Some("body"));
-        assert!(doc.node(head).children.iter().all(|id| doc.element_name(*id) != Some("img")));
+        assert!(
+            doc.node(head)
+                .children
+                .iter()
+                .all(|id| doc.element_name(*id) != Some("img"))
+        );
         let pic = doc.get_element_by_id("pic").unwrap();
         assert_eq!(doc.parent_element(pic), Some(body));
-        assert_eq!(doc.parent_element(doc.get_element_by_id("text").unwrap()), Some(body));
+        assert_eq!(
+            doc.parent_element(doc.get_element_by_id("text").unwrap()),
+            Some(body)
+        );
     }
 
     fn chain(doc: &Document, names: &[&str]) -> NodeId {
@@ -1466,9 +1661,16 @@ mod tests {
 
     #[test]
     fn table_implies_tbody_and_a_row() {
-        let doc = parse_html("<table id='grid'><tr><td id='cell'>Hi</td><th>Head</th></tr></table>");
+        let doc =
+            parse_html("<table id='grid'><tr><td id='cell'>Hi</td><th>Head</th></tr></table>");
         let table = doc.get_element_by_id("grid").unwrap();
-        let tbody = doc.node(table).children.iter().copied().find(|id| doc.element_name(*id) == Some("tbody")).unwrap();
+        let tbody = doc
+            .node(table)
+            .children
+            .iter()
+            .copied()
+            .find(|id| doc.element_name(*id) == Some("tbody"))
+            .unwrap();
         let row = doc.node(tbody).children[0];
         assert_eq!(doc.element_name(row), Some("tr"));
         let cell = doc.get_element_by_id("cell").unwrap();
@@ -1479,15 +1681,29 @@ mod tests {
 
     #[test]
     fn select_keeps_options_and_a_stray_table_child_moves_out() {
-        let doc = parse_html("<select id='menu'><option>One</option><option>Two</option></select><table><div id='out'>No</div><tr><td>Yes</td></tr></table>");
+        let doc = parse_html(
+            "<select id='menu'><option>One</option><option>Two</option></select><table><div id='out'>No</div><tr><td>Yes</td></tr></table>",
+        );
         let menu = doc.get_element_by_id("menu").unwrap();
-        let options: Vec<_> = doc.node(menu).children.iter().copied().filter(|id| doc.element_name(*id) == Some("option")).collect();
+        let options: Vec<_> = doc
+            .node(menu)
+            .children
+            .iter()
+            .copied()
+            .filter(|id| doc.element_name(*id) == Some("option"))
+            .collect();
         assert_eq!(options.len(), 2);
         assert_eq!(doc.text_content(options[1]), "Two");
         let out = doc.get_element_by_id("out").unwrap();
         let body = chain(&doc, &["body"]);
         assert_eq!(doc.parent_element(out), Some(body));
-        let table = doc.node(body).children.iter().copied().find(|id| doc.element_name(*id) == Some("table")).unwrap();
+        let table = doc
+            .node(body)
+            .children
+            .iter()
+            .copied()
+            .find(|id| doc.element_name(*id) == Some("table"))
+            .unwrap();
         let body_children = &doc.node(body).children;
         let out_at = body_children.iter().position(|id| *id == out).unwrap();
         let table_at = body_children.iter().position(|id| *id == table).unwrap();
@@ -1540,9 +1756,16 @@ mod tests {
 
     #[test]
     fn raw_text_elements_keep_their_markup_as_text() {
-        let doc = parse_html("<iframe id='frame'><p id='no'>Hi</p></iframe><noscript><div id='also'>x</div></noscript>");
+        let doc = parse_html(
+            "<iframe id='frame'><p id='no'>Hi</p></iframe><noscript><div id='also'>x</div></noscript>",
+        );
         let frame = doc.get_element_by_id("frame").unwrap();
-        assert!(doc.node(frame).children.iter().all(|id| doc.element_name(*id).is_none()));
+        assert!(
+            doc.node(frame)
+                .children
+                .iter()
+                .all(|id| doc.element_name(*id).is_none())
+        );
         assert!(doc.text_content(frame).contains("<p"));
         assert!(doc.get_element_by_id("no").is_none());
         assert!(doc.get_element_by_id("also").is_none());

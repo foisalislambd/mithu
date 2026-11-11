@@ -13,15 +13,17 @@ use boa_engine::object::builtins::{JsArray, JsPromise};
 use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
 use boa_engine::property::Attribute;
 use boa_engine::{
-    Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
-    Source, Trace, js_string,
+    Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue,
+    NativeFunction, Source, Trace, js_string,
 };
-use mithu_css::{parse_css, parse_declarations, Declaration};
+use mithu_css::{Declaration, parse_css, parse_declarations};
 use mithu_dom::{Document, NodeData, NodeId};
 use mithu_html::parse_html;
 use mithu_style::matches_element;
 
-const ATTR: Attribute = Attribute::WRITABLE.union(Attribute::ENUMERABLE).union(Attribute::CONFIGURABLE);
+const ATTR: Attribute = Attribute::WRITABLE
+    .union(Attribute::ENUMERABLE)
+    .union(Attribute::CONFIGURABLE);
 
 #[derive(Clone)]
 struct Host {
@@ -80,13 +82,21 @@ impl Session {
         Self::open_at(doc, "about:blank", fetch)
     }
 
-    pub fn open_at(doc: Document, href: &str, fetch: impl FnMut(&str) -> Option<String> + 'static) -> Self {
+    pub fn open_at(
+        doc: Document,
+        href: &str,
+        fetch: impl FnMut(&str) -> Option<String> + 'static,
+    ) -> Self {
         let log = Rc::new(RefCell::new(Vec::new()));
         let prevented = Rc::new(Cell::new(false));
         let shared = Rc::new(RefCell::new(doc));
         let location = Rc::new(RefCell::new(href.to_string()));
         let navigation = Rc::new(RefCell::new(None));
-        let clock = Rc::new(RefCell::new(Clock { now: 0, next: 0, queue: Vec::new() }));
+        let clock = Rc::new(RefCell::new(Clock {
+            now: 0,
+            next: 0,
+            queue: Vec::new(),
+        }));
         let loader = Rc::new(PageLoader {
             fetch: RefCell::new(Box::new(fetch)),
             cache: RefCell::new(HashMap::new()),
@@ -124,14 +134,22 @@ impl Session {
                 }
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if script.module {
-                        run_module(&mut context, &code, script.src.as_deref().unwrap_or("inline-module.js"))
+                        run_module(
+                            &mut context,
+                            &code,
+                            script.src.as_deref().unwrap_or("inline-module.js"),
+                        )
                     } else if let Err(error) = context.eval(Source::from_bytes(code.as_str())) {
                         Err(error)
                     } else {
                         context.run_jobs()
                     }
                 }))
-                .unwrap_or_else(|_| Err(JsNativeError::typ().with_message("the script stopped the engine").into()));
+                .unwrap_or_else(|_| {
+                    Err(JsNativeError::typ()
+                        .with_message("the script stopped the engine")
+                        .into())
+                });
                 if let Err(error) = result {
                     log.borrow_mut().push(format!("JavaScript error: {error}"));
                 }
@@ -161,7 +179,10 @@ impl Session {
     }
 
     pub fn take_navigation(&mut self) -> Option<String> {
-        self.context.get_data::<Host>().cloned().and_then(|host| host.navigation.borrow_mut().take())
+        self.context
+            .get_data::<Host>()
+            .cloned()
+            .and_then(|host| host.navigation.borrow_mut().take())
     }
 
     /// Moves the page clock forward and runs timers whose delay has elapsed.
@@ -169,7 +190,9 @@ impl Session {
         match run_due_timers(&mut self.context, ms) {
             Ok(ran) => ran,
             Err(error) => {
-                self.log.borrow_mut().push(format!("JavaScript error: {error}"));
+                self.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: {error}"));
                 false
             }
         }
@@ -178,7 +201,11 @@ impl Session {
     pub fn next_timer_ms(&self) -> Option<u64> {
         let host = self.context.get_data::<Host>().cloned()?;
         let clock = host.clock.borrow();
-        clock.queue.iter().map(|timer| timer.due.saturating_sub(clock.now)).min()
+        clock
+            .queue
+            .iter()
+            .map(|timer| timer.due.saturating_sub(clock.now))
+            .min()
     }
 
     /// Runs listeners from the target up through its ancestors.
@@ -215,7 +242,10 @@ impl Session {
         }
         let doc = self.document();
         let action = doc.attr(form, "action").unwrap_or("").to_string();
-        let method = doc.attr(form, "method").unwrap_or("get").to_ascii_lowercase();
+        let method = doc
+            .attr(form, "method")
+            .unwrap_or("get")
+            .to_ascii_lowercase();
         let method = if method == "post" { "post" } else { "get" };
         Some(Submission {
             action,
@@ -229,7 +259,9 @@ impl Session {
         let functions = match listener_functions(&mut self.context, current, event) {
             Ok(functions) => functions,
             Err(error) => {
-                self.log.borrow_mut().push(format!("JavaScript error: {error}"));
+                self.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: {error}"));
                 return;
             }
         };
@@ -244,13 +276,17 @@ impl Session {
         let event_value = match event_object(target, event, &mut self.context) {
             Ok(value) => value,
             Err(error) => {
-                self.log.borrow_mut().push(format!("JavaScript error: {error}"));
+                self.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: {error}"));
                 return;
             }
         };
         for function in functions {
             if let Err(error) = function.call(&this, &[event_value.clone()], &mut self.context) {
-                self.log.borrow_mut().push(format!("JavaScript error: {error}"));
+                self.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: {error}"));
             }
         }
     }
@@ -263,7 +299,9 @@ impl Session {
         let functions = match read_listeners(&mut self.context, &format!("win:{event}")) {
             Ok(functions) => functions,
             Err(error) => {
-                self.log.borrow_mut().push(format!("JavaScript error: {error}"));
+                self.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: {error}"));
                 return;
             }
         };
@@ -273,14 +311,18 @@ impl Session {
         let event_value = match event_object(target, event, &mut self.context) {
             Ok(value) => value,
             Err(error) => {
-                self.log.borrow_mut().push(format!("JavaScript error: {error}"));
+                self.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: {error}"));
                 return;
             }
         };
         let this = JsValue::from(self.context.global_object().clone());
         for function in functions {
             if let Err(error) = function.call(&this, &[event_value.clone()], &mut self.context) {
-                self.log.borrow_mut().push(format!("JavaScript error: {error}"));
+                self.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: {error}"));
             }
         }
     }
@@ -288,7 +330,9 @@ impl Session {
     fn ensure_attribute_handler(&mut self, id: NodeId, event: &str) {
         let code = {
             let doc = self.doc.borrow();
-            doc.attr(id, &format!("on{event}")).unwrap_or("").to_string()
+            doc.attr(id, &format!("on{event}"))
+                .unwrap_or("")
+                .to_string()
         };
         if code.trim().is_empty() {
             return;
@@ -301,10 +345,15 @@ impl Session {
         match self.context.eval(Source::from_bytes(source.as_str())) {
             Ok(value) => {
                 if let Err(error) = push_listener(&mut self.context, &key, &value, false) {
-                    self.log.borrow_mut().push(format!("JavaScript error: {error}"));
+                    self.log
+                        .borrow_mut()
+                        .push(format!("JavaScript error: {error}"));
                 }
             }
-            Err(error) => self.log.borrow_mut().push(format!("JavaScript error: {error}")),
+            Err(error) => self
+                .log
+                .borrow_mut()
+                .push(format!("JavaScript error: {error}")),
         }
     }
 }
@@ -315,7 +364,10 @@ pub struct Submission {
     pub query: String,
 }
 
-pub fn run_scripts(doc: &mut Document, fetch: impl FnMut(&str) -> Option<String> + 'static) -> Vec<String> {
+pub fn run_scripts(
+    doc: &mut Document,
+    fetch: impl FnMut(&str) -> Option<String> + 'static,
+) -> Vec<String> {
     let session = Session::open(std::mem::take(doc), fetch);
     let logs = session.logs();
     *doc = session.document();
@@ -338,20 +390,56 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("window"), window, flags)?;
     context.register_global_property(js_string!("navigator"), navigator, flags)?;
     context.register_global_property(js_string!("location"), location, flags)?;
-    context.register_global_callable(js_string!("setTimeout"), 2, NativeFunction::from_fn_ptr(set_timeout))?;
-    context.register_global_callable(js_string!("setInterval"), 2, NativeFunction::from_fn_ptr(set_interval))?;
-    context.register_global_callable(js_string!("clearTimeout"), 1, NativeFunction::from_fn_ptr(clear_timer))?;
-    context.register_global_callable(js_string!("clearInterval"), 1, NativeFunction::from_fn_ptr(clear_timer))?;
-    context.register_global_callable(js_string!("addEventListener"), 2, NativeFunction::from_fn_ptr(window_listener))?;
-    context.register_global_callable(js_string!("fetch"), 1, NativeFunction::from_fn_ptr(fetch_resource))?;
+    context.register_global_callable(
+        js_string!("setTimeout"),
+        2,
+        NativeFunction::from_fn_ptr(set_timeout),
+    )?;
+    context.register_global_callable(
+        js_string!("setInterval"),
+        2,
+        NativeFunction::from_fn_ptr(set_interval),
+    )?;
+    context.register_global_callable(
+        js_string!("clearTimeout"),
+        1,
+        NativeFunction::from_fn_ptr(clear_timer),
+    )?;
+    context.register_global_callable(
+        js_string!("clearInterval"),
+        1,
+        NativeFunction::from_fn_ptr(clear_timer),
+    )?;
+    context.register_global_callable(
+        js_string!("addEventListener"),
+        2,
+        NativeFunction::from_fn_ptr(window_listener),
+    )?;
+    context.register_global_callable(
+        js_string!("fetch"),
+        1,
+        NativeFunction::from_fn_ptr(fetch_resource),
+    )?;
     Ok(())
 }
 
 fn console_object(context: &mut Context) -> JsResult<JsObject> {
     let mut object = ObjectInitializer::new(context);
-    object.function(NativeFunction::from_fn_ptr(console_log), js_string!("log"), 1);
-    object.function(NativeFunction::from_fn_ptr(console_log), js_string!("warn"), 1);
-    object.function(NativeFunction::from_fn_ptr(console_log), js_string!("error"), 1);
+    object.function(
+        NativeFunction::from_fn_ptr(console_log),
+        js_string!("log"),
+        1,
+    );
+    object.function(
+        NativeFunction::from_fn_ptr(console_log),
+        js_string!("warn"),
+        1,
+    );
+    object.function(
+        NativeFunction::from_fn_ptr(console_log),
+        js_string!("error"),
+        1,
+    );
     Ok(object.build())
 }
 
@@ -377,17 +465,54 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let head_get = native(context, "get head", 0, get_head);
     let mut object = ObjectInitializer::new(context);
     object
-        .function(NativeFunction::from_fn_ptr(get_element_by_id), js_string!("getElementById"), 1)
-        .function(NativeFunction::from_fn_ptr(query_selector), js_string!("querySelector"), 1)
-        .function(NativeFunction::from_fn_ptr(query_selector_all), js_string!("querySelectorAll"), 1)
-        .function(NativeFunction::from_fn_ptr(create_element), js_string!("createElement"), 1)
-        .function(NativeFunction::from_fn_ptr(create_text_node), js_string!("createTextNode"), 1)
-        .function(NativeFunction::from_fn_ptr(get_elements_by_tag_name), js_string!("getElementsByTagName"), 1)
-        .function(NativeFunction::from_fn_ptr(get_elements_by_class_name), js_string!("getElementsByClassName"), 1)
-        .function(NativeFunction::from_fn_ptr(document_listener), js_string!("addEventListener"), 2)
+        .function(
+            NativeFunction::from_fn_ptr(get_element_by_id),
+            js_string!("getElementById"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(query_selector),
+            js_string!("querySelector"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(query_selector_all),
+            js_string!("querySelectorAll"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_element),
+            js_string!("createElement"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_text_node),
+            js_string!("createTextNode"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_elements_by_tag_name),
+            js_string!("getElementsByTagName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_elements_by_class_name),
+            js_string!("getElementsByClassName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(document_listener),
+            js_string!("addEventListener"),
+            2,
+        )
         .accessor(js_string!("title"), Some(title_get), Some(title_set), ATTR)
         .accessor(js_string!("body"), Some(body_get), None, ATTR)
-        .accessor(js_string!("documentElement"), Some(document_get), None, ATTR)
+        .accessor(
+            js_string!("documentElement"),
+            Some(document_get),
+            None,
+            ATTR,
+        )
         .accessor(js_string!("head"), Some(head_get), None, ATTR);
     Ok(object.build())
 }
@@ -440,7 +565,11 @@ fn get_body(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResu
     }
 }
 
-fn get_element_by_id(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_element_by_id(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = arg_string(args, 0, context)?;
     let found = host.doc.borrow().get_element_by_id(&id);
@@ -464,7 +593,11 @@ fn query_selector(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     }
 }
 
-fn query_selector_all(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn query_selector_all(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     let selector = arg_string(args, 0, context)?;
     let scope = node_of(this).unwrap_or(NodeId(0));
@@ -472,18 +605,30 @@ fn query_selector_all(this: &JsValue, args: &[JsValue], context: &mut Context) -
         let doc = host.doc.borrow();
         query_all(&doc, scope, &selector, node_of(this).is_some())
     };
-    let values = ids.into_iter().map(|id| element_value(id.0, context)).collect::<Vec<_>>();
+    let values = ids
+        .into_iter()
+        .map(|id| element_value(id.0, context))
+        .collect::<Vec<_>>();
     Ok(JsObject::from(JsArray::from_iter(values, context)).into())
 }
 
-fn get_elements_by_tag_name(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_elements_by_tag_name(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = arg_string(args, 0, context)?.to_ascii_lowercase();
     collect_named(this, context, |doc, id| {
-        doc.element_name(id).is_some_and(|element| name == "*" || element == name)
+        doc.element_name(id)
+            .is_some_and(|element| name == "*" || element == name)
     })
 }
 
-fn get_elements_by_class_name(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_elements_by_class_name(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let class = arg_string(args, 0, context)?;
     collect_named(this, context, move |doc, id| doc.has_class(id, &class))
 }
@@ -506,11 +651,19 @@ fn collect_named(
         }
         ids
     };
-    let values = ids.into_iter().map(|id| element_value(id.0, context)).collect::<Vec<_>>();
+    let values = ids
+        .into_iter()
+        .map(|id| element_value(id.0, context))
+        .collect::<Vec<_>>();
     Ok(JsObject::from(JsArray::from_iter(values, context)).into())
 }
 
-fn collect_matching(doc: &Document, id: NodeId, keep: &mut impl FnMut(&Document, NodeId) -> bool, out: &mut Vec<NodeId>) {
+fn collect_matching(
+    doc: &Document,
+    id: NodeId,
+    keep: &mut impl FnMut(&Document, NodeId) -> bool,
+    out: &mut Vec<NodeId>,
+) {
     if keep(doc, id) {
         out.push(id);
     }
@@ -545,7 +698,12 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
     let class_list = class_list_object(id, context);
     let parent_get = native(context, "get parentElement", 0, get_parent);
     let next_get = native(context, "get nextElementSibling", 0, get_next_sibling);
-    let previous_get = native(context, "get previousElementSibling", 0, get_previous_sibling);
+    let previous_get = native(
+        context,
+        "get previousElementSibling",
+        0,
+        get_previous_sibling,
+    );
     let children_get = native(context, "get children", 0, get_children);
     let nodes_get = native(context, "get childNodes", 0, get_child_nodes);
     let first_get = native(context, "get firstChild", 0, get_first_child);
@@ -563,47 +721,150 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
     let href_set = native(context, "set href", 1, set_href);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
-        .function(NativeFunction::from_fn_ptr(get_attribute), js_string!("getAttribute"), 1)
-        .function(NativeFunction::from_fn_ptr(set_attribute), js_string!("setAttribute"), 2)
-        .function(NativeFunction::from_fn_ptr(remove_attribute), js_string!("removeAttribute"), 1)
-        .function(NativeFunction::from_fn_ptr(has_attribute), js_string!("hasAttribute"), 1)
-        .function(NativeFunction::from_fn_ptr(query_selector), js_string!("querySelector"), 1)
-        .function(NativeFunction::from_fn_ptr(query_selector_all), js_string!("querySelectorAll"), 1)
-        .function(NativeFunction::from_fn_ptr(get_elements_by_tag_name), js_string!("getElementsByTagName"), 1)
-        .function(NativeFunction::from_fn_ptr(get_elements_by_class_name), js_string!("getElementsByClassName"), 1)
-        .function(NativeFunction::from_fn_ptr(matches_selector), js_string!("matches"), 1)
-        .function(NativeFunction::from_fn_ptr(closest_selector), js_string!("closest"), 1)
-        .function(NativeFunction::from_fn_ptr(contains_node), js_string!("contains"), 1)
-        .function(NativeFunction::from_fn_ptr(dispatch_event), js_string!("dispatchEvent"), 1)
-        .function(NativeFunction::from_fn_ptr(append_child), js_string!("appendChild"), 1)
-        .function(NativeFunction::from_fn_ptr(insert_before_child), js_string!("insertBefore"), 2)
-        .function(NativeFunction::from_fn_ptr(remove_child), js_string!("removeChild"), 1)
-        .function(NativeFunction::from_fn_ptr(add_event_listener), js_string!("addEventListener"), 2)
-        .function(NativeFunction::from_fn_ptr(remove_event_listener), js_string!("removeEventListener"), 2)
+        .function(
+            NativeFunction::from_fn_ptr(get_attribute),
+            js_string!("getAttribute"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(set_attribute),
+            js_string!("setAttribute"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(remove_attribute),
+            js_string!("removeAttribute"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(has_attribute),
+            js_string!("hasAttribute"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(query_selector),
+            js_string!("querySelector"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(query_selector_all),
+            js_string!("querySelectorAll"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_elements_by_tag_name),
+            js_string!("getElementsByTagName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_elements_by_class_name),
+            js_string!("getElementsByClassName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(matches_selector),
+            js_string!("matches"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(closest_selector),
+            js_string!("closest"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(contains_node),
+            js_string!("contains"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(dispatch_event),
+            js_string!("dispatchEvent"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(append_child),
+            js_string!("appendChild"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(insert_before_child),
+            js_string!("insertBefore"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(remove_child),
+            js_string!("removeChild"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(add_event_listener),
+            js_string!("addEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(remove_event_listener),
+            js_string!("removeEventListener"),
+            2,
+        )
         .accessor(js_string!("onclick"), None, Some(click_set), ATTR)
         .accessor(js_string!("oninput"), None, Some(input_set), ATTR)
         .accessor(js_string!("onchange"), None, Some(change_set), ATTR)
         .accessor(js_string!("onsubmit"), None, Some(submit_set), ATTR)
-        .accessor(js_string!("textContent"), Some(text_get), Some(text_set), ATTR)
-        .accessor(js_string!("innerText"), Some(inner_get), Some(inner_set), ATTR)
-        .accessor(js_string!("innerHTML"), Some(html_get), Some(html_set), ATTR)
+        .accessor(
+            js_string!("textContent"),
+            Some(text_get),
+            Some(text_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("innerText"),
+            Some(inner_get),
+            Some(inner_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("innerHTML"),
+            Some(html_get),
+            Some(html_set),
+            ATTR,
+        )
         .accessor(js_string!("id"), Some(id_get), Some(id_set), ATTR)
-        .accessor(js_string!("className"), Some(class_get), Some(class_set), ATTR)
+        .accessor(
+            js_string!("className"),
+            Some(class_get),
+            Some(class_set),
+            ATTR,
+        )
         .accessor(js_string!("parentElement"), Some(parent_get), None, ATTR)
         .accessor(js_string!("nextElementSibling"), Some(next_get), None, ATTR)
-        .accessor(js_string!("previousElementSibling"), Some(previous_get), None, ATTR)
+        .accessor(
+            js_string!("previousElementSibling"),
+            Some(previous_get),
+            None,
+            ATTR,
+        )
         .accessor(js_string!("children"), Some(children_get), None, ATTR)
         .accessor(js_string!("childNodes"), Some(nodes_get), None, ATTR)
         .accessor(js_string!("firstChild"), Some(first_get), None, ATTR)
         .accessor(js_string!("lastChild"), Some(last_get), None, ATTR)
         .accessor(js_string!("nextSibling"), Some(next_node_get), None, ATTR)
-        .accessor(js_string!("previousSibling"), Some(previous_node_get), None, ATTR)
+        .accessor(
+            js_string!("previousSibling"),
+            Some(previous_node_get),
+            None,
+            ATTR,
+        )
         .accessor(js_string!("parentNode"), Some(parent_node_get), None, ATTR)
         .accessor(js_string!("nodeType"), Some(type_get), None, ATTR)
         .accessor(js_string!("nodeName"), Some(name_get.clone()), None, ATTR)
         .accessor(js_string!("tagName"), Some(name_get), None, ATTR)
         .accessor(js_string!("value"), Some(value_get), Some(value_set), ATTR)
-        .accessor(js_string!("checked"), Some(checked_get), Some(checked_set), ATTR)
+        .accessor(
+            js_string!("checked"),
+            Some(checked_get),
+            Some(checked_set),
+            ATTR,
+        )
         .accessor(js_string!("href"), Some(href_get), Some(href_set), ATTR)
         .property(js_string!("classList"), class_list, ATTR)
         .property(js_string!("style"), style, ATTR);
@@ -646,21 +907,70 @@ fn style_object(id: usize, context: &mut Context) -> JsObject {
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .accessor(js_string!("cssText"), Some(css_get), Some(css_set), ATTR)
-        .function(NativeFunction::from_fn_ptr(set_property), js_string!("setProperty"), 2)
+        .function(
+            NativeFunction::from_fn_ptr(set_property),
+            js_string!("setProperty"),
+            2,
+        )
         .accessor(js_string!("color"), Some(color_get), Some(color_set), ATTR)
-        .accessor(js_string!("backgroundColor"), Some(background_get), Some(background_set), ATTR)
-        .accessor(js_string!("display"), Some(display_get), Some(display_set), ATTR)
+        .accessor(
+            js_string!("backgroundColor"),
+            Some(background_get),
+            Some(background_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("display"),
+            Some(display_get),
+            Some(display_set),
+            ATTR,
+        )
         .accessor(js_string!("width"), Some(width_get), Some(width_set), ATTR)
-        .accessor(js_string!("height"), Some(height_get), Some(height_set), ATTR)
+        .accessor(
+            js_string!("height"),
+            Some(height_get),
+            Some(height_set),
+            ATTR,
+        )
         .accessor(js_string!("fontSize"), Some(font_get), Some(font_set), ATTR)
-        .accessor(js_string!("margin"), Some(margin_get), Some(margin_set), ATTR)
-        .accessor(js_string!("padding"), Some(padding_get), Some(padding_set), ATTR)
-        .accessor(js_string!("textAlign"), Some(align_get), Some(align_set), ATTR)
-        .accessor(js_string!("position"), Some(position_get), Some(position_set), ATTR)
+        .accessor(
+            js_string!("margin"),
+            Some(margin_get),
+            Some(margin_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("padding"),
+            Some(padding_get),
+            Some(padding_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("textAlign"),
+            Some(align_get),
+            Some(align_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("position"),
+            Some(position_get),
+            Some(position_set),
+            ATTR,
+        )
         .accessor(js_string!("top"), Some(top_get), Some(top_set), ATTR)
         .accessor(js_string!("left"), Some(left_get), Some(left_set), ATTR)
-        .accessor(js_string!("opacity"), Some(opacity_get), Some(opacity_set), ATTR)
-        .accessor(js_string!("flexDirection"), Some(flex_get), Some(flex_set), ATTR)
+        .accessor(
+            js_string!("opacity"),
+            Some(opacity_get),
+            Some(opacity_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("flexDirection"),
+            Some(flex_get),
+            Some(flex_set),
+            ATTR,
+        )
         .accessor(js_string!("gap"), Some(gap_get), Some(gap_set), ATTR);
     object.build()
 }
@@ -677,7 +987,11 @@ macro_rules! style_fns {
 }
 
 style_fns!(get_style_color, set_style_color, "color");
-style_fns!(get_style_background, set_style_background, "background-color");
+style_fns!(
+    get_style_background,
+    set_style_background,
+    "background-color"
+);
 style_fns!(get_style_display, set_style_display, "display");
 style_fns!(get_style_width, set_style_width, "width");
 style_fns!(get_style_height, set_style_height, "height");
@@ -689,13 +1003,22 @@ style_fns!(get_style_position, set_style_position, "position");
 style_fns!(get_style_top, set_style_top, "top");
 style_fns!(get_style_left, set_style_left, "left");
 style_fns!(get_style_opacity, set_style_opacity, "opacity");
-style_fns!(get_style_flex_direction, set_style_flex_direction, "flex-direction");
+style_fns!(
+    get_style_flex_direction,
+    set_style_flex_direction,
+    "flex-direction"
+);
 style_fns!(get_style_gap, set_style_gap, "gap");
 
 fn get_css_text(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
-    let text = host.doc.borrow().attr(id, "style").unwrap_or("").to_string();
+    let text = host
+        .doc
+        .borrow()
+        .attr(id, "style")
+        .unwrap_or("")
+        .to_string();
     Ok(js_string!(text).into())
 }
 
@@ -715,7 +1038,12 @@ fn set_property(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 fn read_style(this: &JsValue, name: &str, context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
-    let text = host.doc.borrow().attr(id, "style").unwrap_or("").to_string();
+    let text = host
+        .doc
+        .borrow()
+        .attr(id, "style")
+        .unwrap_or("")
+        .to_string();
     let value = parse_declarations(&text)
         .into_iter()
         .rev()
@@ -725,14 +1053,22 @@ fn read_style(this: &JsValue, name: &str, context: &mut Context) -> JsResult<JsV
     Ok(js_string!(value).into())
 }
 
-fn write_style(this: &JsValue, name: &str, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn write_style(
+    this: &JsValue,
+    name: &str,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let value = arg_string(args, 0, context)?;
     let mut doc = host.doc.borrow_mut();
     let current = doc.attr(id, "style").unwrap_or("").to_string();
     let mut declarations = parse_declarations(&current);
-    if let Some(existing) = declarations.iter_mut().find(|declaration| declaration.name == name) {
+    if let Some(existing) = declarations
+        .iter_mut()
+        .find(|declaration| declaration.name == name)
+    {
         existing.value = value;
         existing.important = false;
     } else {
@@ -805,7 +1141,14 @@ fn set_id(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<J
 fn get_class(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
-    Ok(js_string!(host.doc.borrow().attr(id, "class").unwrap_or("").to_string()).into())
+    Ok(js_string!(
+        host.doc
+            .borrow()
+            .attr(id, "class")
+            .unwrap_or("")
+            .to_string()
+    )
+    .into())
 }
 
 fn set_class(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -838,10 +1181,26 @@ fn set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 fn class_list_object(id: usize, context: &mut Context) -> JsObject {
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
-        .function(NativeFunction::from_fn_ptr(class_list_add), js_string!("add"), 1)
-        .function(NativeFunction::from_fn_ptr(class_list_remove), js_string!("remove"), 1)
-        .function(NativeFunction::from_fn_ptr(class_list_toggle), js_string!("toggle"), 1)
-        .function(NativeFunction::from_fn_ptr(class_list_contains), js_string!("contains"), 1);
+        .function(
+            NativeFunction::from_fn_ptr(class_list_add),
+            js_string!("add"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(class_list_remove),
+            js_string!("remove"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(class_list_toggle),
+            js_string!("toggle"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(class_list_contains),
+            js_string!("contains"),
+            1,
+        );
     object.build()
 }
 
@@ -898,7 +1257,11 @@ fn class_list_toggle(this: &JsValue, args: &[JsValue], context: &mut Context) ->
     Ok(JsValue::from(!present))
 }
 
-fn class_list_contains(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn class_list_contains(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let token = arg_string(args, 0, context)?;
@@ -910,7 +1273,11 @@ fn sibling_value(this: &JsValue, context: &mut Context, next: bool) -> JsResult<
     let id = node_of(this).ok_or_else(type_error)?;
     let sibling = {
         let doc = host.doc.borrow();
-        if next { doc.next_element_sibling(id) } else { doc.previous_element_sibling(id) }
+        if next {
+            doc.next_element_sibling(id)
+        } else {
+            doc.previous_element_sibling(id)
+        }
     };
     match sibling {
         Some(node) => Ok(element_value(node.0, context)),
@@ -931,7 +1298,11 @@ fn get_next_sibling(this: &JsValue, _args: &[JsValue], context: &mut Context) ->
     sibling_value(this, context, true)
 }
 
-fn get_previous_sibling(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_previous_sibling(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     sibling_value(this, context, false)
 }
 
@@ -947,7 +1318,10 @@ fn get_children(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsR
             .filter(|child| doc.element_name(*child).is_some())
             .collect::<Vec<_>>()
     };
-    let values = ids.into_iter().map(|child| element_value(child.0, context)).collect::<Vec<_>>();
+    let values = ids
+        .into_iter()
+        .map(|child| element_value(child.0, context))
+        .collect::<Vec<_>>();
     Ok(JsObject::from(JsArray::from_iter(values, context)).into())
 }
 
@@ -973,7 +1347,11 @@ fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     Ok(child_value)
 }
 
-fn add_event_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn add_event_listener(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let id = node_of(this).ok_or_else(type_error)?;
     let event = arg_string(args, 0, context)?;
     let handler = args.get(1).cloned().unwrap_or(JsValue::undefined());
@@ -997,7 +1375,12 @@ fn set_onsubmit(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     set_handler(this, "submit", args, context)
 }
 
-fn set_handler(this: &JsValue, event: &str, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn set_handler(
+    this: &JsValue,
+    event: &str,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let id = node_of(this).ok_or_else(type_error)?;
     let handler = args.first().cloned().unwrap_or(JsValue::undefined());
     push_listener(context, &format!("on:{}:{event}", id.0), &handler, true)?;
@@ -1021,8 +1404,17 @@ fn event_object(target: NodeId, event: &str, context: &mut Context) -> JsResult<
         .property(js_string!("target"), target_value, ATTR)
         .property(js_string!("bubbles"), JsValue::from(true), ATTR)
         .accessor(js_string!("currentTarget"), Some(current_get), None, ATTR)
-        .accessor(js_string!("defaultPrevented"), Some(prevented_get), None, ATTR)
-        .function(NativeFunction::from_fn_ptr(prevent_default), js_string!("preventDefault"), 0);
+        .accessor(
+            js_string!("defaultPrevented"),
+            Some(prevented_get),
+            None,
+            ATTR,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(prevent_default),
+            js_string!("preventDefault"),
+            0,
+        );
     Ok(object.build().into())
 }
 
@@ -1046,7 +1438,10 @@ fn read_listeners(context: &mut Context, key: &str) -> JsResult<Vec<JsObject>> {
     let Some(list) = current.as_object() else {
         return Ok(Vec::new());
     };
-    let length = list.get(js_string!("length"), context)?.as_number().unwrap_or(0.0) as usize;
+    let length = list
+        .get(js_string!("length"), context)?
+        .as_number()
+        .unwrap_or(0.0) as usize;
     let mut functions = Vec::new();
     for index in 0..length {
         let item = list.get(js_string!(index.to_string()), context)?;
@@ -1078,7 +1473,10 @@ fn push_listener(context: &mut Context, key: &str, value: &JsValue, replace: boo
             JsObject::from(JsArray::new(context)?)
         }
     };
-    let length = list.get(js_string!("length"), context)?.as_number().unwrap_or(0.0);
+    let length = list
+        .get(js_string!("length"), context)?
+        .as_number()
+        .unwrap_or(0.0);
     list.set(length as u32, function, true, context)?;
     bag.set(js_string!(key), list, true, context)?;
     Ok(())
@@ -1117,7 +1515,11 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
         ran = true;
         let repeat = {
             let mut clock = host.clock.borrow_mut();
-            let repeat = clock.queue.iter().find(|timer| timer.id == id).and_then(|timer| timer.repeat);
+            let repeat = clock
+                .queue
+                .iter()
+                .find(|timer| timer.id == id)
+                .and_then(|timer| timer.repeat);
             if let Some(every) = repeat {
                 let due = clock.now.saturating_add(every);
                 if let Some(timer) = clock.queue.iter_mut().find(|timer| timer.id == id) {
@@ -1154,7 +1556,12 @@ fn forget_timer(context: &mut Context, id: u32) -> JsResult<()> {
     let global = context.global_object();
     let bag = global.get(js_string!("__mithuTimers"), context)?;
     if let Some(bag) = bag.as_object() {
-        bag.set(js_string!(id.to_string()), JsValue::undefined(), true, context)?;
+        bag.set(
+            js_string!(id.to_string()),
+            JsValue::undefined(),
+            true,
+            context,
+        )?;
     }
     Ok(())
 }
@@ -1165,7 +1572,11 @@ fn schedule_timer(context: &mut Context, args: &[JsValue], repeat: bool) -> JsRe
     let Some(function) = function.as_object().filter(|object| object.is_callable()) else {
         return Ok(JsValue::from(0));
     };
-    let delay = args.get(1).and_then(|value| value.as_number()).unwrap_or(0.0).max(0.0) as u64;
+    let delay = args
+        .get(1)
+        .and_then(|value| value.as_number())
+        .unwrap_or(0.0)
+        .max(0.0) as u64;
     let delay = if repeat { delay.max(1) } else { delay };
     let id = {
         let mut clock = host.clock.borrow_mut();
@@ -1193,14 +1604,16 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     let host = host(context)?;
     let location = host.location.borrow().clone();
     let outcome = resolve_request(&location, &spec).and_then(|url| {
-        mithu_net::get(&url).map_err(|error| error.to_string()).map(|response| {
-            (
-                response.status,
-                (200..300).contains(&response.status),
-                response.url.to_string(),
-                response.text(),
-            )
-        })
+        mithu_net::get(&url)
+            .map_err(|error| error.to_string())
+            .map(|response| {
+                (
+                    response.status,
+                    (200..300).contains(&response.status),
+                    response.url.to_string(),
+                    response.text(),
+                )
+            })
     });
     match outcome {
         Ok((status, ok, url, body)) => {
@@ -1221,17 +1634,31 @@ fn resolve_request(location: &str, spec: &str) -> Result<mithu_url::Url, String>
 
 fn reject_promise(context: &mut Context, message: &str) -> JsResult<JsValue> {
     let (promise, resolvers) = JsPromise::new_pending(context);
-    resolvers.reject.call(&JsValue::undefined(), &[js_string!(message).into()], context)?;
+    resolvers.reject.call(
+        &JsValue::undefined(),
+        &[js_string!(message).into()],
+        context,
+    )?;
     Ok(promise.into())
 }
 
-fn response_object(status: u16, ok: bool, url: String, body: String, context: &mut Context) -> JsValue {
+fn response_object(
+    status: u16,
+    ok: bool,
+    url: String,
+    body: String,
+    context: &mut Context,
+) -> JsValue {
     let mut object = ObjectInitializer::with_native_data(ResponseKey { body }, context);
     object
         .property(js_string!("status"), JsValue::from(i32::from(status)), ATTR)
         .property(js_string!("ok"), JsValue::from(ok), ATTR)
         .property(js_string!("url"), js_string!(url), ATTR)
-        .function(NativeFunction::from_fn_ptr(response_text), js_string!("text"), 0);
+        .function(
+            NativeFunction::from_fn_ptr(response_text),
+            js_string!("text"),
+            0,
+        );
     object.build().into()
 }
 
@@ -1239,7 +1666,10 @@ fn response_text(this: &JsValue, _args: &[JsValue], context: &mut Context) -> Js
     let Some(object) = this.as_object() else {
         return Ok(JsPromise::resolve(JsValue::undefined(), context)?.into());
     };
-    let body = object.downcast_ref::<ResponseKey>().map(|key| key.body.clone()).unwrap_or_default();
+    let body = object
+        .downcast_ref::<ResponseKey>()
+        .map(|key| key.body.clone())
+        .unwrap_or_default();
     Ok(JsPromise::resolve(js_string!(body), context)?.into())
 }
 
@@ -1249,7 +1679,9 @@ fn contains_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let Some(node) = args.first().and_then(node_of) else {
         return Ok(JsValue::from(false));
     };
-    Ok(JsValue::from(host.doc.borrow().contains_node(ancestor, node)))
+    Ok(JsValue::from(
+        host.doc.borrow().contains_node(ancestor, node),
+    ))
 }
 
 fn dispatch_event(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1306,7 +1738,10 @@ fn set_interval(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 
 fn clear_timer(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
-    let id = args.first().and_then(|value| value.as_number()).unwrap_or(0.0) as u32;
+    let id = args
+        .first()
+        .and_then(|value| value.as_number())
+        .unwrap_or(0.0) as u32;
     host.clock.borrow_mut().queue.retain(|timer| timer.id != id);
     forget_timer(context, id)?;
     Ok(JsValue::undefined())
@@ -1319,7 +1754,11 @@ fn window_listener(_this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     Ok(JsValue::undefined())
 }
 
-fn document_listener(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn document_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     let Some(html) = find_tag(&host.doc.borrow(), "html") else {
         return Ok(JsValue::undefined());
@@ -1345,14 +1784,22 @@ fn set_location(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     Ok(JsValue::undefined())
 }
 
-fn get_document_element(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_document_element(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
-    Ok(find_tag(&host.doc.borrow(), "html").map(|id| element_value(id.0, context)).unwrap_or(JsValue::null()))
+    Ok(find_tag(&host.doc.borrow(), "html")
+        .map(|id| element_value(id.0, context))
+        .unwrap_or(JsValue::null()))
 }
 
 fn get_head(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
-    Ok(find_tag(&host.doc.borrow(), "head").map(|id| element_value(id.0, context)).unwrap_or(JsValue::null()))
+    Ok(find_tag(&host.doc.borrow(), "head")
+        .map(|id| element_value(id.0, context))
+        .unwrap_or(JsValue::null()))
 }
 
 fn create_text_node(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1363,7 +1810,9 @@ fn create_text_node(_this: &JsValue, args: &[JsValue], context: &mut Context) ->
 }
 
 fn node_value(id: usize, context: &mut Context) -> JsValue {
-    let element = host(context).ok().is_some_and(|host| host.doc.borrow().element_name(NodeId(id)).is_some());
+    let element = host(context)
+        .ok()
+        .is_some_and(|host| host.doc.borrow().element_name(NodeId(id)).is_some());
     if element {
         element_value(id, context)
     } else {
@@ -1381,7 +1830,12 @@ fn text_node(id: usize, context: &mut Context) -> JsValue {
     object
         .accessor(js_string!("nodeType"), Some(type_get), None, ATTR)
         .accessor(js_string!("nodeName"), Some(name_get), None, ATTR)
-        .accessor(js_string!("textContent"), Some(text_get), Some(text_set), ATTR)
+        .accessor(
+            js_string!("textContent"),
+            Some(text_get),
+            Some(text_set),
+            ATTR,
+        )
         .accessor(js_string!("parentNode"), Some(parent_get), None, ATTR);
     object.build().into()
 }
@@ -1432,7 +1886,12 @@ fn attr_value(this: &JsValue, name: &str, context: &mut Context) -> JsResult<JsV
     Ok(js_string!(host.doc.borrow().attr(id, name).unwrap_or("").to_string()).into())
 }
 
-fn write_attr(this: &JsValue, name: &str, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn write_attr(
+    this: &JsValue,
+    name: &str,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let value = arg_string(args, 0, context)?;
@@ -1443,13 +1902,18 @@ fn write_attr(this: &JsValue, name: &str, args: &[JsValue], context: &mut Contex
 fn get_checked(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
-    Ok(JsValue::from(host.doc.borrow().attr(id, "checked").is_some()))
+    Ok(JsValue::from(
+        host.doc.borrow().attr(id, "checked").is_some(),
+    ))
 }
 
 fn set_checked(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
-    let on = args.first().and_then(|value| value.as_boolean()).unwrap_or(false);
+    let on = args
+        .first()
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false);
     let mut doc = host.doc.borrow_mut();
     if on {
         doc.set_attr(id, "checked", "");
@@ -1478,7 +1942,11 @@ fn matches_selector(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let selector = arg_string(args, 0, context)?;
-    Ok(JsValue::from(selector_hits(&host.doc.borrow(), id, &selector)))
+    Ok(JsValue::from(selector_hits(
+        &host.doc.borrow(),
+        id,
+        &selector,
+    )))
 }
 
 fn closest_selector(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1497,7 +1965,9 @@ fn closest_selector(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
         }
         found
     };
-    Ok(found.map(|id| element_value(id.0, context)).unwrap_or(JsValue::null()))
+    Ok(found
+        .map(|id| element_value(id.0, context))
+        .unwrap_or(JsValue::null()))
 }
 
 fn selector_hits(doc: &Document, id: NodeId, selector: &str) -> bool {
@@ -1505,10 +1975,18 @@ fn selector_hits(doc: &Document, id: NodeId, selector: &str) -> bool {
         return false;
     }
     let sheet = parse_css(&format!("{selector}{{}}"));
-    sheet.rules.iter().flat_map(|rule| &rule.selectors).any(|selector| matches_element(doc, id, selector))
+    sheet
+        .rules
+        .iter()
+        .flat_map(|rule| &rule.selectors)
+        .any(|selector| matches_element(doc, id, selector))
 }
 
-fn insert_before_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn insert_before_child(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     let parent = node_of(this).ok_or_else(type_error)?;
     let child_value = args.first().cloned().unwrap_or(JsValue::undefined());
@@ -1518,7 +1996,11 @@ fn insert_before_child(this: &JsValue, args: &[JsValue], context: &mut Context) 
     Ok(child_value)
 }
 
-fn remove_event_listener(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn remove_event_listener(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let id = node_of(this).ok_or_else(type_error)?;
     let event = arg_string(args, 0, context)?;
     let handler = args.get(1).cloned().unwrap_or(JsValue::undefined());
@@ -1542,15 +2024,25 @@ fn edge_child(this: &JsValue, context: &mut Context, first: bool) -> JsResult<Js
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let children = host.doc.borrow().node(id).children.clone();
-    let child = if first { children.first().copied() } else { children.last().copied() };
-    Ok(child.map(|id| node_value(id.0, context)).unwrap_or(JsValue::null()))
+    let child = if first {
+        children.first().copied()
+    } else {
+        children.last().copied()
+    };
+    Ok(child
+        .map(|id| node_value(id.0, context))
+        .unwrap_or(JsValue::null()))
 }
 
 fn get_next_node(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     sibling_node(this, context, true)
 }
 
-fn get_previous_node(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_previous_node(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     sibling_node(this, context, false)
 }
 
@@ -1569,10 +2061,14 @@ fn sibling_node(this: &JsValue, context: &mut Context, next: bool) -> JsResult<J
         if next {
             children.get(index + 1).copied()
         } else {
-            index.checked_sub(1).and_then(|index| children.get(index).copied())
+            index
+                .checked_sub(1)
+                .and_then(|index| children.get(index).copied())
         }
     };
-    Ok(sibling.map(|id| node_value(id.0, context)).unwrap_or(JsValue::null()))
+    Ok(sibling
+        .map(|id| node_value(id.0, context))
+        .unwrap_or(JsValue::null()))
 }
 
 fn get_parent_node(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1580,22 +2076,42 @@ fn get_parent_node(this: &JsValue, _args: &[JsValue], context: &mut Context) -> 
     let id = node_of(this).ok_or_else(type_error)?;
     let parent = {
         let doc = host.doc.borrow();
-        doc.node(id).parent.filter(|parent| doc.element_name(*parent).is_some())
+        doc.node(id)
+            .parent
+            .filter(|parent| doc.element_name(*parent).is_some())
     };
-    Ok(parent.map(|id| element_value(id.0, context)).unwrap_or(JsValue::null()))
+    Ok(parent
+        .map(|id| element_value(id.0, context))
+        .unwrap_or(JsValue::null()))
 }
 
-fn get_current_target(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_current_target(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
-    Ok(host.event_current.get().map(|id| node_value(id, context)).unwrap_or(JsValue::null()))
+    Ok(host
+        .event_current
+        .get()
+        .map(|id| node_value(id, context))
+        .unwrap_or(JsValue::null()))
 }
 
-fn get_default_prevented(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_default_prevented(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     Ok(JsValue::from(host.prevented.get()))
 }
 
-fn listed_children(this: &JsValue, context: &mut Context, elements_only: bool) -> JsResult<JsValue> {
+fn listed_children(
+    this: &JsValue,
+    context: &mut Context,
+    elements_only: bool,
+) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let children = host.doc.borrow().node(id).children.clone();
@@ -1618,7 +2134,12 @@ fn drop_listener(context: &mut Context, key: &str, value: &JsValue) -> JsResult<
         .get(js_string!("__mithuListeners"), context)?
         .as_object()
         .ok_or_else(type_error)?;
-    bag.set(js_string!(key), JsObject::from(JsArray::from_iter(kept, context)), true, context)?;
+    bag.set(
+        js_string!(key),
+        JsObject::from(JsArray::from_iter(kept, context)),
+        true,
+        context,
+    )?;
     Ok(())
 }
 
@@ -1635,12 +2156,18 @@ impl ModuleLoader for PageLoader {
                 return Ok(module);
             }
             let code = (self.fetch.borrow_mut())(&specifier).ok_or_else(|| {
-                JsError::from(JsNativeError::typ().with_message(format!("module not found: {specifier}")))
+                JsError::from(
+                    JsNativeError::typ().with_message(format!("module not found: {specifier}")),
+                )
             })?;
             let path = PathBuf::from(&specifier);
             let module = {
                 let mut context = context.borrow_mut();
-                Module::parse(Source::from_bytes(code.as_str()).with_path(&path), None, &mut context)?
+                Module::parse(
+                    Source::from_bytes(code.as_str()).with_path(&path),
+                    None,
+                    &mut context,
+                )?
             };
             self.cache.borrow_mut().insert(specifier, module.clone());
             Ok(module)
@@ -1692,7 +2219,10 @@ fn control_pair(doc: &Document, id: NodeId) -> Option<String> {
         "select" => doc.text_content(id),
         "input" => {
             let kind = doc.attr(id, "type").unwrap_or("text").to_ascii_lowercase();
-            if matches!(kind.as_str(), "submit" | "button" | "reset" | "image" | "file") {
+            if matches!(
+                kind.as_str(),
+                "submit" | "button" | "reset" | "image" | "file"
+            ) {
                 return None;
             }
             if matches!(kind.as_str(), "checkbox" | "radio") && doc.attr(id, "checked").is_none() {
@@ -1713,7 +2243,9 @@ fn form_encode(text: &str) -> String {
     let mut out = String::new();
     for byte in text.as_bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => out.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(*byte as char)
+            }
             b' ' => out.push('+'),
             _ => out.push_str(&format!("%{byte:02X}")),
         }
@@ -1726,7 +2258,9 @@ fn host(context: &mut Context) -> JsResult<Host> {
 }
 
 fn type_error() -> JsError {
-    JsNativeError::typ().with_message("DOM object is missing").into()
+    JsNativeError::typ()
+        .with_message("DOM object is missing")
+        .into()
 }
 
 fn arg_string(args: &[JsValue], index: usize, context: &mut Context) -> JsResult<String> {
@@ -1741,11 +2275,20 @@ fn node_of(value: &JsValue) -> Option<NodeId> {
 }
 
 fn find_tag(doc: &Document, name: &str) -> Option<NodeId> {
-    (0..doc.nodes.len()).map(NodeId).find(|id| doc.element_name(*id) == Some(name))
+    (0..doc.nodes.len())
+        .map(NodeId)
+        .find(|id| doc.element_name(*id) == Some(name))
 }
 
-fn query_first(doc: &Document, scope: NodeId, selector: &str, descendants_only: bool) -> Option<NodeId> {
-    query_all(doc, scope, selector, descendants_only).into_iter().next()
+fn query_first(
+    doc: &Document,
+    scope: NodeId,
+    selector: &str,
+    descendants_only: bool,
+) -> Option<NodeId> {
+    query_all(doc, scope, selector, descendants_only)
+        .into_iter()
+        .next()
 }
 
 fn query_all(doc: &Document, scope: NodeId, selector: &str, descendants_only: bool) -> Vec<NodeId> {
@@ -1758,7 +2301,10 @@ fn query_all(doc: &Document, scope: NodeId, selector: &str, descendants_only: bo
         nodes.push(scope);
     }
     collect_elements(doc, scope, &mut nodes);
-    nodes.into_iter().filter(|id| matches_element(doc, *id, parsed)).collect()
+    nodes
+        .into_iter()
+        .filter(|id| matches_element(doc, *id, parsed))
+        .collect()
 }
 
 fn collect_elements(doc: &Document, id: NodeId, out: &mut Vec<NodeId>) {
@@ -1830,7 +2376,10 @@ fn write_html(doc: &Document, id: NodeId, out: &mut String) {
 }
 
 fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -1853,7 +2402,12 @@ mod tests {
             </script>"##,
         );
         let log = run_scripts(&mut doc, |_| None);
-        assert_eq!(doc.get_element_by_id("msg").map(|id| doc.text_content(id)).as_deref(), Some("after"));
+        assert_eq!(
+            doc.get_element_by_id("msg")
+                .map(|id| doc.text_content(id))
+                .as_deref(),
+            Some("after")
+        );
         assert_eq!(doc.title, "Changed");
         let host_node = doc.get_element_by_id("host").unwrap();
         assert!(doc.has_class(host_node, "on"));
@@ -1865,9 +2419,11 @@ mod tests {
 
     #[test]
     fn inner_html_builds_elements() {
-        let mut doc = parse_html(r##"<div id="host"></div><script>
+        let mut doc = parse_html(
+            r##"<div id="host"></div><script>
             document.getElementById("host").innerHTML = "<b id='yes'>Hi</b>";
-        </script>"##);
+        </script>"##,
+        );
         run_scripts(&mut doc, |_| None);
         let yes = doc.get_element_by_id("yes").unwrap();
         assert_eq!(doc.text_content(yes), "Hi");
@@ -1932,8 +2488,14 @@ mod tests {
         let host = doc.get_element_by_id("box").unwrap();
         assert!(doc.has_class(host, "two"));
         assert!(!doc.has_class(host, "one"));
-        assert!(doc.parent_element(doc.get_element_by_id("b").unwrap()).is_none());
-        assert_eq!(doc.parent_element(doc.get_element_by_id("a").unwrap()), Some(host));
+        assert!(
+            doc.parent_element(doc.get_element_by_id("b").unwrap())
+                .is_none()
+        );
+        assert_eq!(
+            doc.parent_element(doc.get_element_by_id("a").unwrap()),
+            Some(host)
+        );
     }
 
     #[test]
@@ -1987,7 +2549,10 @@ mod tests {
         );
         let mut session = Session::open_at(doc, "https://example.com/", |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
-        assert_eq!(session.take_navigation().as_deref(), Some("https://example.com/next"));
+        assert_eq!(
+            session.take_navigation().as_deref(),
+            Some("https://example.com/next")
+        );
         let document = session.document();
         let host_node = document.get_element_by_id("box").unwrap();
         assert_eq!(document.node(host_node).children.len(), 2);
