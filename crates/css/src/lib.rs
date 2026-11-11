@@ -2,8 +2,10 @@
 //!
 //! Selectors support type, class, id, attributes, structural and link
 //! pseudos, and the descendant, child, and sibling combinators. `@media`
-//! keeps `min-width` and `max-width` queries. Other at-rules are skipped.
-//! Declarations stay as strings so the style crate can interpret them.
+//! keeps `min-width` and `max-width` queries. `@layer` and `@supports`
+//! are transparent wrappers so the rules inside still apply. Other
+//! at-rules are skipped. Declarations stay as strings so the style
+//! crate can interpret them.
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stylesheet {
@@ -70,6 +72,7 @@ pub enum Pseudo {
     Empty,
     Not(Box<Compound>),
     Hover,
+    Root,
     Before,
     After,
     /// `:focus`, `:active`, and other pseudos that the style engine does not match yet.
@@ -152,35 +155,7 @@ struct CssParser {
 impl CssParser {
     fn parse_stylesheet(&mut self) -> Stylesheet {
         let mut rules = Vec::new();
-        while self.pos < self.chars.len() {
-            self.skip_ws();
-            if self.pos >= self.chars.len() {
-                break;
-            }
-            if self.peek() == Some('@') {
-                if let Some(media) = self.parse_media_rule() {
-                    self.parse_rule_list(&mut rules, Some(media));
-                } else {
-                    self.skip_at_rule();
-                }
-                continue;
-            }
-            let selectors = self.parse_selector_list();
-            self.skip_ws();
-            if self.peek() != Some('{') {
-                self.skip_until_recovery();
-                continue;
-            }
-            self.bump();
-            let declarations = self.parse_declaration_block();
-            if !selectors.is_empty() && !declarations.is_empty() {
-                rules.push(Rule {
-                    selectors,
-                    declarations,
-                    media: None,
-                });
-            }
-        }
+        self.parse_rule_list(&mut rules, None);
         Stylesheet { rules }
     }
 
@@ -328,6 +303,7 @@ impl CssParser {
                         "link" | "visited" => compound.pseudos.push(Pseudo::Link),
                         "empty" => compound.pseudos.push(Pseudo::Empty),
                         "hover" => compound.pseudos.push(Pseudo::Hover),
+                        "root" => compound.pseudos.push(Pseudo::Root),
                         "focus" | "active" => compound.pseudos.push(Pseudo::Unmatched),
                         "nth-child" => compound.pseudos.push(self.parse_nth()),
                         "not" => {
@@ -565,31 +541,47 @@ impl CssParser {
         })
     }
 
-    fn parse_media_rule(&mut self) -> Option<Media> {
+    fn take_at_rule(&mut self) -> AtRule {
         let start = self.pos;
         if self.peek() != Some('@') {
-            return None;
+            return AtRule::Done;
         }
         self.bump();
         let name = self.read_ident().to_ascii_lowercase();
-        if name != "media" {
-            self.pos = start;
-            return None;
-        }
-        self.skip_ws();
-        let mut prelude = String::new();
-        while let Some(ch) = self.peek() {
-            if ch == '{' {
-                break;
+        if name == "media" {
+            self.skip_ws();
+            let mut prelude = String::new();
+            while let Some(ch) = self.peek() {
+                if ch == '{' {
+                    break;
+                }
+                prelude.push(ch);
+                self.bump();
             }
-            prelude.push(ch);
-            self.bump();
-        }
-        let media = media_from_prelude(&prelude);
-        if media.is_none() {
+            if let Some(media) = media_from_prelude(&prelude) {
+                return AtRule::Media(media);
+            }
             self.skip_balanced_block();
+            return AtRule::Done;
         }
-        media
+        if name == "layer" || name == "supports" {
+            while let Some(ch) = self.peek() {
+                if ch == '{' || ch == ';' {
+                    break;
+                }
+                self.bump();
+            }
+            if self.peek() == Some('{') {
+                return AtRule::Enter;
+            }
+            if self.peek() == Some(';') {
+                self.bump();
+            }
+            return AtRule::Done;
+        }
+        self.pos = start;
+        self.skip_at_rule();
+        AtRule::Done
     }
 
     fn parse_rule_list(&mut self, rules: &mut Vec<Rule>, media: Option<Media>) {
@@ -604,7 +596,13 @@ impl CssParser {
                 break;
             }
             if self.peek() == Some('@') {
-                self.skip_at_rule();
+                match self.take_at_rule() {
+                    AtRule::Media(inner) => {
+                        self.parse_rule_list(rules, Some(combine_media(media.clone(), inner)));
+                    }
+                    AtRule::Enter => self.parse_rule_list(rules, media.clone()),
+                    AtRule::Done => {}
+                }
                 continue;
             }
             let selectors = self.parse_selector_list();
@@ -685,10 +683,61 @@ impl CssParser {
 
     fn read_ident(&mut self) -> String {
         let mut out = String::new();
-        while self.peek().is_some_and(is_ident_char) {
-            out.push(self.bump().unwrap());
+        loop {
+            if self.peek() == Some('\\') {
+                match self.read_escape() {
+                    Escape::Char(ch) => out.push(ch),
+                    Escape::Ignore => {}
+                    Escape::End => break,
+                }
+                continue;
+            }
+            if self.peek().is_some_and(is_ident_char) {
+                out.push(self.bump().unwrap());
+                continue;
+            }
+            break;
         }
         out
+    }
+
+    fn read_escape(&mut self) -> Escape {
+        if self.peek() != Some('\\') {
+            return Escape::End;
+        }
+        self.bump();
+        let Some(ch) = self.peek() else {
+            return Escape::End;
+        };
+        if ch == '\n' {
+            self.bump();
+            return Escape::Ignore;
+        }
+        if ch == '\r' {
+            self.bump();
+            if self.peek() == Some('\n') {
+                self.bump();
+            }
+            return Escape::Ignore;
+        }
+        if ch.is_ascii_hexdigit() {
+            let mut hex = String::new();
+            while hex.len() < 6 && self.peek().is_some_and(|digit| digit.is_ascii_hexdigit()) {
+                hex.push(self.bump().unwrap());
+            }
+            if self
+                .peek()
+                .is_some_and(|digit| digit == ' ' || digit == '\t' || digit == '\n')
+            {
+                self.bump();
+            }
+            let code = u32::from_str_radix(&hex, 16).unwrap_or(0);
+            return char::from_u32(code)
+                .filter(|decoded| *decoded != '\0')
+                .map(Escape::Char)
+                .unwrap_or(Escape::Ignore);
+        }
+        Escape::Char(self.bump().unwrap())
     }
 
     fn skip_ws(&mut self) -> bool {
@@ -733,6 +782,41 @@ fn parse_an_b(text: &str) -> Option<(i32, i32)> {
         tail.parse().ok()?
     };
     Some((a, b))
+}
+
+enum AtRule {
+    Media(Media),
+    /// `@layer` or `@supports` whose block still needs to be parsed.
+    Enter,
+    Done,
+}
+
+enum Escape {
+    Char(char),
+    Ignore,
+    End,
+}
+
+fn combine_media(outer: Option<Media>, inner: Media) -> Media {
+    let Some(outer) = outer else {
+        return inner;
+    };
+    let mut alternatives = Vec::new();
+    for left in &outer.alternatives {
+        for right in &inner.alternatives {
+            alternatives.push(MediaBound {
+                min_width: match (left.min_width, right.min_width) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    (left, right) => left.or(right),
+                },
+                max_width: match (left.max_width, right.max_width) {
+                    (Some(left), Some(right)) => Some(left.min(right)),
+                    (left, right) => left.or(right),
+                },
+            });
+        }
+    }
+    Media { alternatives }
 }
 
 fn is_ident_start(ch: char) -> bool {
@@ -892,5 +976,54 @@ mod tests {
         assert_eq!(selector.compounds[1].attrs[0].op, Some(AttrOp::Includes));
         assert_eq!(selector.compounds[1].pseudos, vec![Pseudo::Nth(2, 1)]);
         assert!(selector.specificity() >= 30);
+    }
+
+    #[test]
+    fn layer_and_supports_keep_the_rules_inside() {
+        let sheet = parse_css(
+            r#"
+            @layer a, b;
+            .keep { color: red }
+            @layer utilities {
+              .sm\:flex { display: flex }
+              .bg-background\/80 { color: blue }
+            }
+            @supports (display: grid) {
+              .box { display: grid }
+            }
+            @media (hover: hover) { .skip { color: red } }
+            @media (min-width: 40rem) { .lg\:flex { display: flex } }
+            "#,
+        );
+        let classes = |name: &str| {
+            sheet.rules.iter().any(|rule| {
+                rule.selectors.iter().any(|selector| {
+                    selector
+                        .compounds
+                        .iter()
+                        .any(|compound| compound.classes.iter().any(|class| class == name))
+                })
+            })
+        };
+        assert!(classes("keep"));
+        assert!(classes("sm:flex"));
+        assert!(classes("bg-background/80"));
+        assert!(classes("box"));
+        assert!(classes("lg:flex"));
+        assert!(!classes("skip"));
+        let responsive = sheet.rules.iter().find(|rule| {
+            rule.selectors.iter().any(|selector| {
+                selector
+                    .compounds
+                    .iter()
+                    .any(|compound| compound.classes.iter().any(|class| class == "lg:flex"))
+            })
+        });
+        assert_eq!(
+            responsive
+                .and_then(|rule| rule.media.as_ref())
+                .map(|media| { media.alternatives[0].min_width }),
+            Some(Some(640.0))
+        );
     }
 }

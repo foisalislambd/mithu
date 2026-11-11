@@ -1349,7 +1349,7 @@ fn synthetic_text(doc: &Document, id: NodeId) -> Option<String> {
             Some(value)
         }
         "img" | "iframe" | "video" | "canvas" | "svg" | "audio" => {
-            Some(doc.attr(id, "alt").unwrap_or(name).to_string())
+            Some(doc.attr(id, "alt").unwrap_or("").to_string())
         }
         _ => None,
     }

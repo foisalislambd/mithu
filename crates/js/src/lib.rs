@@ -387,13 +387,26 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("console"), console, flags)?;
     let navigator = navigator_object(context)?;
     let location = location_object(context)?;
-    context.register_global_property(js_string!("window"), window, flags)?;
+    context.register_global_property(js_string!("window"), window.clone(), flags)?;
+    context.register_global_property(js_string!("self"), window, flags)?;
+    let performance = performance_object(context)?;
+    context.register_global_property(js_string!("performance"), performance, flags)?;
     context.register_global_property(js_string!("navigator"), navigator, flags)?;
     context.register_global_property(js_string!("location"), location, flags)?;
     context.register_global_callable(
         js_string!("setTimeout"),
         2,
         NativeFunction::from_fn_ptr(set_timeout),
+    )?;
+    context.register_global_callable(
+        js_string!("requestAnimationFrame"),
+        1,
+        NativeFunction::from_fn_ptr(request_animation_frame),
+    )?;
+    context.register_global_callable(
+        js_string!("cancelAnimationFrame"),
+        1,
+        NativeFunction::from_fn_ptr(clear_timer),
     )?;
     context.register_global_callable(
         js_string!("setInterval"),
@@ -925,6 +938,14 @@ fn style_object(id: usize, context: &mut Context) -> JsObject {
     let flex_set = native(context, "set flexDirection", 1, set_style_flex_direction);
     let gap_get = native(context, "get gap", 0, get_style_gap);
     let gap_set = native(context, "set gap", 1, set_style_gap);
+    let right_get = native(context, "get right", 0, get_style_right);
+    let right_set = native(context, "set right", 1, set_style_right);
+    let bottom_get = native(context, "get bottom", 0, get_style_bottom);
+    let bottom_set = native(context, "set bottom", 1, set_style_bottom);
+    let visibility_get = native(context, "get visibility", 0, get_style_visibility);
+    let visibility_set = native(context, "set visibility", 1, set_style_visibility);
+    let border_get = native(context, "get border", 0, get_style_border);
+    let border_set = native(context, "set border", 1, set_style_border);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .accessor(js_string!("cssText"), Some(css_get), Some(css_set), ATTR)
@@ -992,7 +1013,26 @@ fn style_object(id: usize, context: &mut Context) -> JsObject {
             Some(flex_set),
             ATTR,
         )
-        .accessor(js_string!("gap"), Some(gap_get), Some(gap_set), ATTR);
+        .accessor(js_string!("gap"), Some(gap_get), Some(gap_set), ATTR)
+        .accessor(js_string!("right"), Some(right_get), Some(right_set), ATTR)
+        .accessor(
+            js_string!("bottom"),
+            Some(bottom_get),
+            Some(bottom_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("visibility"),
+            Some(visibility_get),
+            Some(visibility_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("border"),
+            Some(border_get),
+            Some(border_set),
+            ATTR,
+        );
     object.build()
 }
 
@@ -1030,6 +1070,10 @@ style_fns!(
     "flex-direction"
 );
 style_fns!(get_style_gap, set_style_gap, "gap");
+style_fns!(get_style_right, set_style_right, "right");
+style_fns!(get_style_bottom, set_style_bottom, "bottom");
+style_fns!(get_style_visibility, set_style_visibility, "visibility");
+style_fns!(get_style_border, set_style_border, "border");
 
 fn get_css_text(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
@@ -1878,6 +1922,33 @@ fn set_timeout(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     schedule_timer(context, args, false)
 }
 
+fn request_animation_frame(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let mut timed = args.to_vec();
+    if timed.len() < 2 {
+        timed.push(JsValue::from(0));
+    }
+    schedule_timer(context, &timed, false)
+}
+
+fn performance_object(context: &mut Context) -> JsResult<JsObject> {
+    let mut object = ObjectInitializer::new(context);
+    object.function(
+        NativeFunction::from_fn_ptr(performance_now),
+        js_string!("now"),
+        0,
+    );
+    Ok(object.build())
+}
+
+fn performance_now(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    Ok(JsValue::from(host.clock.borrow().now as f64))
+}
+
 fn set_interval(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     schedule_timer(context, args, true)
 }
@@ -1971,18 +2042,30 @@ fn text_node(id: usize, context: &mut Context) -> JsValue {
     let name_get = native(context, "get nodeName", 0, get_node_name);
     let text_get = native(context, "get textContent", 0, get_text);
     let text_set = native(context, "set textContent", 1, set_text);
+    let data_get = native(context, "get data", 0, get_text);
+    let data_set = native(context, "set data", 1, set_text);
     let parent_get = native(context, "get parentNode", 0, get_parent_node);
+    let next_get = native(context, "get nextSibling", 0, get_next_node);
+    let previous_get = native(context, "get previousSibling", 0, get_previous_node);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .accessor(js_string!("nodeType"), Some(type_get), None, ATTR)
         .accessor(js_string!("nodeName"), Some(name_get), None, ATTR)
+        .accessor(js_string!("data"), Some(data_get), Some(data_set), ATTR)
         .accessor(
             js_string!("textContent"),
             Some(text_get),
             Some(text_set),
             ATTR,
         )
-        .accessor(js_string!("parentNode"), Some(parent_get), None, ATTR);
+        .accessor(js_string!("parentNode"), Some(parent_get), None, ATTR)
+        .accessor(js_string!("nextSibling"), Some(next_get), None, ATTR)
+        .accessor(
+            js_string!("previousSibling"),
+            Some(previous_get),
+            None,
+            ATTR,
+        );
     object.build().into()
 }
 
@@ -2566,6 +2649,63 @@ mod tests {
         assert!(style.contains("color: navy"), "{style}");
         assert!(style.contains("display: flex"), "{style}");
         assert_eq!(log, vec!["ready".to_string()]);
+    }
+
+    #[test]
+    fn self_matches_window_and_frames_run() {
+        let mut doc = parse_html(
+            r#"<!doctype html><body><script>
+            self.__next_f = self.__next_f || [];
+            self.__next_f.push([0]);
+            if (self !== window) throw new Error("self");
+            var frame = document.createElement("iframe");
+            frame.style.visibility = "hidden";
+            frame.style.border = "none";
+            document.body.appendChild(frame);
+            requestAnimationFrame(function () {
+              document.body.setAttribute("data-raf", String(performance.now()));
+            });
+            </script></body>"#,
+        );
+        let log = run_scripts(&mut doc, |_| None);
+        assert!(log.is_empty(), "{log:?}");
+        let body = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("body")).then_some(NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(doc.attr(body, "data-raf"), Some("0"));
+        let frame = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("iframe")).then_some(NodeId(index))
+            })
+            .unwrap();
+        let style = doc.attr(frame, "style").unwrap_or("");
+        assert!(style.contains("visibility: hidden"), "{style}");
+        assert!(style.contains("border: none"), "{style}");
+    }
+
+    #[test]
+    fn comment_data_is_the_previous_sibling() {
+        let mut doc = parse_html(
+            "<div id='host'><!--$?--><span id='el'></span></div><script>
+            var el = document.getElementById('el');
+            var mark = el.previousSibling;
+            if (!mark || mark.nodeType !== 8 || mark.data !== '$?') throw new Error(String(mark && mark.data));
+            mark.data = '$~';
+            </script>",
+        );
+        let log = run_scripts(&mut doc, |_| None);
+        assert!(log.is_empty(), "{log:?}");
+        let host = doc.get_element_by_id("host").unwrap();
+        let comment = doc.node(host).children[0];
+        assert_eq!(doc.text_content(comment), "$~");
     }
 
     #[test]

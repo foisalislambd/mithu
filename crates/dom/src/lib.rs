@@ -126,7 +126,7 @@ impl Document {
                 .iter()
                 .map(|child| self.text_content(*child))
                 .collect(),
-            NodeData::Comment(_) => String::new(),
+            NodeData::Comment(text) => text.clone(),
         }
     }
 
@@ -202,6 +202,19 @@ impl Document {
         }
     }
 
+    pub fn append_comment(&mut self, parent: NodeId, text: &str) -> NodeId {
+        let id = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            parent: Some(parent),
+            children: Vec::new(),
+            data: NodeData::Comment(text.to_string()),
+        });
+        if let Some(parent) = self.nodes.get_mut(parent.0) {
+            parent.children.push(id);
+        }
+        id
+    }
+
     pub fn create_text_detached(&mut self, text: &str) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node {
@@ -243,7 +256,7 @@ impl Document {
         if self.nodes.get(id.0).is_none() {
             return;
         }
-        if let NodeData::Text(existing) = &mut self.nodes[id.0].data {
+        if let NodeData::Text(existing) | NodeData::Comment(existing) = &mut self.nodes[id.0].data {
             *existing = text.to_string();
             return;
         }

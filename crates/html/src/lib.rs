@@ -29,7 +29,7 @@ enum Token {
         name: String,
     },
     Text(String),
-    Comment,
+    Comment(String),
     Eof,
 }
 
@@ -215,7 +215,7 @@ impl Parser {
             Some(c) if c.is_ascii_alphabetic() => self.read_start_tag(),
             Some('?') => {
                 self.skip_until_gt();
-                Token::Comment
+                Token::Comment(String::new())
             }
             _ => {
                 self.pos = start + 1;
@@ -227,17 +227,20 @@ impl Parser {
     fn tokenize_markup(&mut self) -> Token {
         if self.starts_with("--") {
             self.pos += 2;
+            let start = self.pos;
             while self.pos < self.chars.len() {
                 if self.chars[self.pos] == '-'
                     && self.chars.get(self.pos + 1) == Some(&'-')
                     && self.chars.get(self.pos + 2) == Some(&'>')
                 {
+                    let text: String = self.chars[start..self.pos].iter().collect();
                     self.pos += 3;
-                    break;
+                    return Token::Comment(text);
                 }
                 self.pos += 1;
             }
-            return Token::Comment;
+            let text: String = self.chars[start..].iter().collect();
+            return Token::Comment(text);
         }
         let rest: String = self.chars[self.pos..].iter().take(7).collect();
         if rest.to_ascii_lowercase().starts_with("doctype") {
@@ -245,7 +248,7 @@ impl Parser {
             return Token::Doctype;
         }
         self.skip_until_gt();
-        Token::Comment
+        Token::Comment(String::new())
     }
 
     fn read_start_tag(&mut self) -> Token {
@@ -446,6 +449,11 @@ impl Parser {
     }
 
     fn dispatch(&mut self, token: Token) {
+        if let Token::Comment(text) = &token {
+            let parent = self.current().unwrap_or(self.doc.root);
+            self.doc.append_comment(parent, text);
+            return;
+        }
         match self.mode {
             Mode::BeforeHtml => self.before_html(token),
             Mode::BeforeHead => self.before_head(token),
@@ -466,7 +474,7 @@ impl Parser {
 
     fn before_html(&mut self, token: Token) {
         match token {
-            Token::Doctype | Token::Comment => {}
+            Token::Doctype | Token::Comment(_) => {}
             Token::Start { name, attrs, .. } if name == "html" => {
                 let id = self.insert("html");
                 self.apply_attrs(id, attrs);
@@ -484,7 +492,7 @@ impl Parser {
 
     fn before_head(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. } if name == "html" => {
                 if let Some(html) = self.stack.first().copied() {
@@ -507,7 +515,7 @@ impl Parser {
 
     fn in_head(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. }
                 if matches!(
@@ -550,7 +558,7 @@ impl Parser {
 
     fn after_head(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. } if name == "body" => {
                 let id = self.insert("body");
@@ -586,7 +594,7 @@ impl Parser {
 
     fn in_body(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) => {
                 self.reconstruct();
                 if let Some(parent) = self.current() {
@@ -721,7 +729,7 @@ impl Parser {
 
     fn in_table(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. } if name == "caption" => {
                 self.open_table_section("caption", attrs, Mode::InCaption);
@@ -820,7 +828,7 @@ impl Parser {
 
     fn in_column_group(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. } if name == "col" => {
                 let id = self.insert("col");
@@ -959,7 +967,7 @@ impl Parser {
 
     fn in_select(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) => {
                 if let Some(parent) = self.current() {
                     self.doc.append_text(parent, &text);
@@ -1265,7 +1273,7 @@ impl Parser {
 
     fn after_body(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::End { name } if name == "html" => {}
             other => {
@@ -1769,5 +1777,26 @@ mod tests {
         assert!(doc.text_content(frame).contains("<p"));
         assert!(doc.get_element_by_id("no").is_none());
         assert!(doc.get_element_by_id("also").is_none());
+    }
+
+    #[test]
+    fn comments_stay_in_the_tree() {
+        let doc = parse_html("<div id='host'><!--$?--><span id='el'></span><!--/$--></div>");
+        let host = doc.get_element_by_id("host").unwrap();
+        let kids: Vec<_> = doc
+            .node(host)
+            .children
+            .iter()
+            .map(|id| match &doc.node(*id).data {
+                mithu_dom::NodeData::Comment(text) => format!("c:{text}"),
+                mithu_dom::NodeData::Element(element) => format!("e:{}", element.name),
+                mithu_dom::NodeData::Text(text) => format!("t:{text}"),
+                mithu_dom::NodeData::Document => "d".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            kids,
+            vec!["c:$?".to_string(), "e:span".to_string(), "c:/$".to_string()]
+        );
     }
 }

@@ -14,6 +14,7 @@ footer, form, h1, h2, h3, h4, h5, h6, header, hr, main, nav, ol, p, pre, section
 table, ul, dd, dt { display: block; }
 li { display: list-item; }
 head, style, script, title, meta, link, base, template, noscript { display: none; }
+[hidden] { display: none; }
 span, a, b, strong, i, em, code, label, small, sup, sub { display: inline; }
 img, br, button, input, textarea, select, iframe, video, canvas, svg, audio { display: inline-block; }
 body { margin: 8px; color: #000000; background-color: #ffffff; font-size: 16px; }
@@ -720,6 +721,7 @@ fn matches_pseudo(doc: &Document, id: NodeId, pseudo: &Pseudo, state: StyleState
         Pseudo::Link => doc.element_name(id) == Some("a") && doc.attr(id, "href").is_some(),
         Pseudo::Empty => is_empty(doc, id),
         Pseudo::Hover => is_hovered(doc, id, state.hover),
+        Pseudo::Root => doc.parent_element(id).is_none(),
         Pseudo::Before | Pseudo::After => false,
         Pseudo::Not(inner) => !matches_compound(doc, id, inner, state),
         Pseudo::Unmatched => false,
@@ -835,6 +837,8 @@ fn apply_declaration(
         "margin-right" => set_side(&mut specified.margin, 1, value, spec),
         "margin-bottom" => set_side(&mut specified.margin, 2, value, spec),
         "margin-left" => set_side(&mut specified.margin, 3, value, spec),
+        "margin-inline" => set_logical(&mut specified.margin, 3, 1, value, spec, false),
+        "margin-block" => set_logical(&mut specified.margin, 0, 2, value, spec, false),
         "padding" => {
             if let Some(sides) = parse_sides(value) {
                 for (slot, side) in specified.padding.iter_mut().zip(sides) {
@@ -846,6 +850,8 @@ fn apply_declaration(
         "padding-right" => set_padding(&mut specified.padding, 1, value, spec),
         "padding-bottom" => set_padding(&mut specified.padding, 2, value, spec),
         "padding-left" => set_padding(&mut specified.padding, 3, value, spec),
+        "padding-inline" => set_logical(&mut specified.padding, 3, 1, value, spec, true),
+        "padding-block" => set_logical(&mut specified.padding, 0, 2, value, spec, true),
         "border" => {
             if let Some((width, color)) = parse_border(value) {
                 rank_uniform_border(specified, width, spec);
@@ -889,6 +895,15 @@ fn apply_declaration(
         "right" => set_side(&mut specified.insets, 1, value, spec),
         "bottom" => set_side(&mut specified.insets, 2, value, spec),
         "left" => set_side(&mut specified.insets, 3, value, spec),
+        "inset" => {
+            if let Some(sides) = parse_sides(value) {
+                for (slot, side) in specified.insets.iter_mut().zip(sides) {
+                    rank(slot, side, spec);
+                }
+            }
+        }
+        "inset-inline" => set_logical(&mut specified.insets, 3, 1, value, spec, false),
+        "inset-block" => set_logical(&mut specified.insets, 0, 2, value, spec, false),
         "min-width" => set_optional_length(&mut specified.min_width, value, spec),
         "max-width" => set_optional_length(&mut specified.max_width, value, spec),
         "min-height" => set_optional_length(&mut specified.min_height, value, spec),
@@ -1044,6 +1059,27 @@ fn set_optional_length(slot: &mut Option<Ranked<Length>>, value: &str, spec: u32
     if let Some(length) = parse_length(value) {
         rank(slot, length, spec);
     }
+}
+
+fn set_logical(
+    sides: &mut [Option<Ranked<Length>>; 4],
+    start: usize,
+    end: usize,
+    value: &str,
+    spec: u32,
+    padding: bool,
+) {
+    let parts: Vec<Length> = value.split_whitespace().filter_map(parse_length).collect();
+    let (first, second) = match parts.as_slice() {
+        [first] => (*first, *first),
+        [first, second, ..] => (*first, *second),
+        _ => return,
+    };
+    let normalize = |length: Length| {
+        if padding { zero_auto(length) } else { length }
+    };
+    rank(&mut sides[start], normalize(first), spec);
+    rank(&mut sides[end], normalize(second), spec);
 }
 
 fn set_padding(sides: &mut [Option<Ranked<Length>>; 4], index: usize, value: &str, spec: u32) {
@@ -2494,5 +2530,40 @@ mod tests {
             style_document(&doc, "#text { text-transform: uppercase }")[text.0].text_transform,
             TextTransform::Uppercase
         );
+    }
+
+    #[test]
+    fn root_variables_and_logical_spacing() {
+        let doc = parse_html(r#"<div id="bar" class="mx-auto h-14 flex"></div>"#);
+        let styles = style_document(
+            &doc,
+            r#"
+            @layer theme { :root { --spacing: .25rem; --ink: 210 40% 98%; } }
+            @layer utilities {
+              .mx-auto { margin-inline: auto }
+              .h-14 { height: calc(var(--spacing) * 14) }
+              .flex { display: flex }
+              .bg { background-color: hsl(var(--ink)) }
+            }
+            "#,
+        );
+        let bar = doc.get_element_by_id("bar").unwrap();
+        assert_eq!(styles[bar.0].display, Display::Flex);
+        assert_eq!(styles[bar.0].margin[1], Length::Auto);
+        assert_eq!(styles[bar.0].margin[3], Length::Auto);
+        assert_eq!(styles[bar.0].height, Length::Rem(3.5));
+        let html = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("html")).then_some(index)
+            })
+            .unwrap();
+        let painted = style_document(
+            &doc,
+            "@layer theme { :root { --ink: 210 40% 98% } } html { background: hsl(var(--ink)) }",
+        );
+        assert_eq!(painted[html].background, Color::rgb(248, 250, 252));
     }
 }
