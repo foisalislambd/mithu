@@ -35,10 +35,12 @@ blockquote { margin: 16px 40px; }
 a { color: #1a0dab; text-decoration: underline; }
 strong, b { font-weight: bold; }
 hr { border-width: 1px; border-color: #cccccc; margin-top: 8px; margin-bottom: 8px; height: 0px; }
-img, iframe, video, canvas, svg, audio { background-color: #ececec; border-width: 1px; border-color: #bdbdbd; }
+img, iframe, video, canvas, audio { background-color: #ececec; border-width: 1px; border-color: #bdbdbd; }
+svg { overflow: hidden; }
 button, input, textarea, select {
   border-width: 1px; border-color: #888888; background-color: #ffffff;
   padding-top: 4px; padding-right: 8px; padding-bottom: 4px; padding-left: 8px; color: #111111;
+  white-space: nowrap;
 }
 "#;
 
@@ -49,6 +51,8 @@ pub enum Display {
     InlineBlock,
     ListItem,
     Flex,
+    /// `inline-flex`: a flex container that shrinks to its contents.
+    InlineFlex,
     Grid,
     None,
 }
@@ -168,6 +172,7 @@ pub struct ComputedStyle {
     pub font_size: f32,
     pub bold: bool,
     pub mono: bool,
+    pub font_family: String,
     pub text_align: TextAlign,
     pub underline: bool,
     pub white_space: WhiteSpace,
@@ -233,6 +238,7 @@ impl ComputedStyle {
             font_size: 16.0,
             bold: false,
             mono: false,
+            font_family: String::new(),
             text_align: TextAlign::Left,
             underline: false,
             white_space: WhiteSpace::Normal,
@@ -310,6 +316,7 @@ struct Specified {
     font_size: Option<Ranked<FontSize>>,
     bold: Option<Ranked<bool>>,
     mono: Option<Ranked<bool>>,
+    font_family: Option<Ranked<String>>,
     text_align: Option<Ranked<TextAlign>>,
     underline: Option<Ranked<bool>>,
     white_space: Option<Ranked<WhiteSpace>>,
@@ -364,6 +371,15 @@ pub fn matches_element(doc: &Document, id: NodeId, selector: &Selector) -> bool 
 
 pub fn style_document(doc: &Document, author_css: &str) -> Vec<ComputedStyle> {
     style_with(doc, author_css, StyleState::default())
+}
+
+/// `(family, url)` pairs from `@font-face` rules.
+pub fn font_faces(css: &str) -> Vec<(String, String)> {
+    parse_css(css)
+        .font_faces
+        .into_iter()
+        .map(|face| (face.family, face.url))
+        .collect()
 }
 
 pub fn style_with(doc: &Document, author_css: &str, state: StyleState) -> Vec<ComputedStyle> {
@@ -830,11 +846,23 @@ fn apply_declaration(
                 rank(&mut specified.bold, bold, spec);
             }
         }
-        "font-family" => rank(
-            &mut specified.mono,
-            value.to_ascii_lowercase().contains("mono"),
-            spec,
-        ),
+        "font-family" => {
+            rank(
+                &mut specified.mono,
+                value.to_ascii_lowercase().contains("mono"),
+                spec,
+            );
+            let family = value
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|ch| ch == '"' || ch == '\'')
+                .to_string();
+            if !family.is_empty() {
+                rank(&mut specified.font_family, family, spec);
+            }
+        }
         "text-align" => {
             if let Some(align) = parse_align(value) {
                 rank(&mut specified.text_align, align, spec);
@@ -1167,6 +1195,11 @@ fn concretize(
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(parent.mono),
+        font_family: specified
+            .font_family
+            .as_ref()
+            .map(|item| item.value.clone())
+            .unwrap_or_else(|| parent.font_family.clone()),
         text_align: specified
             .text_align
             .as_ref()
@@ -1703,7 +1736,8 @@ fn parse_display(value: &str) -> Option<Display> {
         "inline" => Display::Inline,
         "inline-block" => Display::InlineBlock,
         "list-item" => Display::ListItem,
-        "flex" | "inline-flex" => Display::Flex,
+        "flex" => Display::Flex,
+        "inline-flex" => Display::InlineFlex,
         "grid" | "inline-grid" => Display::Grid,
         "none" => Display::None,
         _ => return None,
@@ -1768,11 +1802,20 @@ fn parse_clear(value: &str) -> Option<Clear> {
 
 fn parse_grid_span(value: &str) -> Option<u16> {
     let value = value.trim().to_ascii_lowercase();
-    let token = value
-        .strip_prefix("span")
-        .map(str::trim)
-        .unwrap_or(value.as_str());
-    let span = token.split_whitespace().next()?.parse::<u16>().ok()?;
+    // `span 12`, `7 / span 12`, and `1 / 13`.
+    if let Some(index) = value.find("span") {
+        let rest = value[index + 4..].trim();
+        let span = rest.split_whitespace().next()?.parse::<u16>().ok()?;
+        return Some(span.max(1));
+    }
+    if let Some((start, end)) = value.split_once('/') {
+        let start: i32 = start.trim().parse().ok()?;
+        let end: i32 = end.trim().parse().ok()?;
+        if end > start {
+            return Some((end - start) as u16);
+        }
+    }
+    let span = value.split_whitespace().next()?.parse::<u16>().ok()?;
     Some(span.max(1))
 }
 

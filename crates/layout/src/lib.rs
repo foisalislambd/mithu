@@ -17,6 +17,8 @@ use mithu_style::{
 };
 use mithu_text::MeasureText;
 
+mod svg;
+
 #[derive(Clone, Debug)]
 pub struct LayoutTree {
     pub root: LayoutBox,
@@ -56,6 +58,16 @@ pub struct LayoutBox {
     pub borders: [f32; 4],
     pub fixed: bool,
     pub gradient: Option<(mithu_base::Color, mithu_base::Color)>,
+    pub shapes: Vec<VectorShape>,
+}
+
+/// One filled or stroked contour in the border box's local coordinates.
+#[derive(Clone, Debug)]
+pub struct VectorShape {
+    pub fill: Option<mithu_base::Color>,
+    pub stroke: Option<mithu_base::Color>,
+    pub stroke_width: f32,
+    pub points: Vec<(f32, f32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +93,7 @@ pub struct TextFragment {
     pub size: f32,
     pub bold: bool,
     pub mono: bool,
+    pub family: String,
     pub underline: bool,
     pub href: Option<String>,
     pub width: f32,
@@ -163,6 +176,23 @@ fn layout_node(
         return None;
     }
     let href = own_href(doc, id).or(inherited_href);
+    if doc.element_name(id) == Some("table") {
+        return layout_table(
+            doc,
+            styles,
+            measure,
+            images,
+            id,
+            containing_x,
+            margin_y,
+            containing_width,
+            href,
+            view,
+        );
+    }
+    if doc.element_name(id) == Some("svg") {
+        svg::apply_size(&mut style, doc, id);
+    }
     let font = style.font_size;
     let borders = [
         style.borders[0].max(0.0),
@@ -208,7 +238,8 @@ fn layout_node(
         (left, right, content)
     };
 
-    let shrink = width_is_auto && (display == Display::InlineBlock || shrink_to_fit);
+    let shrink = width_is_auto
+        && (display == Display::InlineBlock || display == Display::InlineFlex || shrink_to_fit);
     let border_x = containing_x + margin_left;
     let border_y = margin_y + margin_top;
     let content_x = border_x + borders[3] + padding.left;
@@ -229,8 +260,9 @@ fn layout_node(
         synthetic_text(doc, id)
     };
     let blockish = synthetic.is_none() && has_block_child(doc, styles, id);
-    let (lines, mut children, flowed) = if display == Display::Flex {
-        layout_flex(
+    let inline_flex = display == Display::InlineFlex;
+    let (lines, mut children, flowed) = if display == Display::Flex || inline_flex {
+        let mut laid = layout_flex(
             doc,
             styles,
             measure,
@@ -242,7 +274,33 @@ fn layout_node(
             content_w,
             href.clone(),
             view,
-        )
+        );
+        if inline_flex && width_is_auto {
+            let gaps = style.gap.max(0.0) * laid.1.len().saturating_sub(1) as f32;
+            let used = laid
+                .1
+                .iter()
+                .map(|child| child.margin.left + child.rect.width + child.margin.right)
+                .sum::<f32>()
+                + gaps;
+            if used + 0.5 < content_w {
+                content_w = used.max(0.0);
+                laid = layout_flex(
+                    doc,
+                    styles,
+                    measure,
+                    images,
+                    id,
+                    &style,
+                    content_x,
+                    content_y,
+                    content_w,
+                    href.clone(),
+                    view,
+                );
+            }
+        }
+        laid
     } else if display == Display::Grid {
         layout_grid(
             doc,
@@ -289,7 +347,12 @@ fn layout_node(
         };
         items = surround_items(items, &style, measure, href.clone(), id, content_w);
         if shrink && !items.is_empty() {
-            content_w = preferred_width(&items, content_w);
+            let cap = if style.white_space == WhiteSpace::Nowrap {
+                f32::MAX / 4.0
+            } else {
+                content_w
+            };
+            content_w = preferred_width(&items, cap);
             content_w = limit_content(
                 &style,
                 content_w,
@@ -374,7 +437,23 @@ fn layout_node(
         } else {
             style.z_index
         },
+        shapes: Vec::new(),
     };
+    if doc.element_name(id) == Some("svg") {
+        let shapes = svg::shapes(
+            doc,
+            id,
+            laid_out.rect.width,
+            laid_out.rect.height,
+            style.color,
+        );
+        if !shapes.is_empty() {
+            laid_out.background = mithu_base::Color::TRANSPARENT;
+            laid_out.border_width = 0.0;
+            laid_out.borders = [0.0; 4];
+            laid_out.shapes = shapes;
+        }
+    }
     if style.position == Position::Relative {
         let dx = resolve_length(style.insets[3], font, containing_width, view)
             .or_else(|| {
@@ -817,6 +896,7 @@ fn collect_node(
                     | Display::ListItem
                     | Display::InlineBlock
                     | Display::Flex
+                    | Display::InlineFlex
                     | Display::Grid
             ) || synthetic_text(doc, id).is_some()
             {
@@ -940,6 +1020,7 @@ fn place_items(
                         size: word.size,
                         bold: word.bold,
                         mono: word.mono,
+                        family: word.family.clone(),
                         underline: word.underline,
                         href: word.href.clone(),
                         width: word.width,
@@ -1104,16 +1185,29 @@ fn push_runs(
         }
         let text = std::mem::take(current);
         if spaces {
-            let width = measure.width(&text, style.font_size, style.bold, style.mono);
+            let width = measure.width_family(
+                &text,
+                style.font_size,
+                style.bold,
+                style.mono,
+                &style.font_family,
+            );
             items.push(Item::Space { width, sticky });
         } else {
-            let width = measure.width(&text, style.font_size, style.bold, style.mono);
+            let width = measure.width_family(
+                &text,
+                style.font_size,
+                style.bold,
+                style.mono,
+                &style.font_family,
+            );
             items.push(Item::Word(Word {
                 text,
                 color: style.color,
                 size: style.font_size,
                 bold: style.bold,
                 mono: style.mono,
+                family: style.font_family.clone(),
                 underline: style.underline,
                 href: href.clone(),
                 width,
@@ -1157,6 +1251,7 @@ struct Word {
     size: f32,
     bold: bool,
     mono: bool,
+    family: String,
     underline: bool,
     href: Option<String>,
     width: f32,
@@ -1521,6 +1616,13 @@ fn layout_flex(
         } else {
             matches!(child_style.width, Length::Auto) && style.align_items != AlignItems::Stretch
         };
+        // nowrap labels (buttons) are measured at max-content. The flex line
+        // may shrink them afterwards, but not below that label.
+        let available = if shrink && child_style.white_space == WhiteSpace::Nowrap {
+            content_w.max(100_000.0)
+        } else {
+            content_w
+        };
         if let Some(mut layout) = layout_node(
             doc,
             styles,
@@ -1529,7 +1631,7 @@ fn layout_flex(
             child,
             0.0,
             0.0,
-            content_w,
+            available,
             href.clone(),
             shrink,
             view,
@@ -1678,8 +1780,13 @@ fn place_flex_line(
             extra[index] = free * grow / grow_sum;
         }
     } else if row && free < 0.0 && shrink_weight > 0.0 {
-        for (index, ((_, _, shrink), base)) in items.iter().zip(bases.iter()).enumerate() {
-            extra[index] = (free * shrink.max(0.0) * base / shrink_weight).max(-base);
+        for (index, ((layout, _, shrink), base)) in items.iter().zip(bases.iter()).enumerate() {
+            let proposed = free * shrink.max(0.0) * base / shrink_weight;
+            // Automatic minimum size: a flex item does not shrink below its
+            // min-content contribution (CSS flexbox §4.5).
+            let floor = content_floor(layout) + layout.margin.left + layout.margin.right;
+            let limit = (floor - base).min(0.0);
+            extra[index] = proposed.max(limit).max(-base);
         }
     }
     let leftover = if row && free > 0.0 && grow_sum == 0.0 {
@@ -1792,6 +1899,7 @@ fn text_flex_item(
         z_index: 0,
         borders: [0.0; 4],
         fixed: false,
+        shapes: Vec::new(),
     }
 }
 
@@ -1978,6 +2086,7 @@ fn generated_block(
         z_index: 0,
         borders: [0.0; 4],
         fixed: false,
+        shapes: Vec::new(),
     })
 }
 
@@ -2017,7 +2126,23 @@ fn empty_box(node: NodeId) -> LayoutBox {
         z_index: 0,
         borders: [0.0; 4],
         fixed: false,
+        shapes: Vec::new(),
     }
+}
+
+fn content_floor(layout: &LayoutBox) -> f32 {
+    let mut floor = 0.0_f32;
+    for line in &layout.lines {
+        let width = line.fragments.iter().map(|fragment| fragment.width).sum();
+        floor = floor.max(width);
+    }
+    let mut across = 0.0_f32;
+    for child in &layout.children {
+        let child_floor = content_floor(child);
+        floor = floor.max(child_floor);
+        across += child_floor;
+    }
+    floor.max(across)
 }
 
 fn apply_intrinsic(style: &mut ComputedStyle, bitmap: &Bitmap) {
@@ -2065,6 +2190,294 @@ fn hit_box(box_: &LayoutBox, x: f32, y: f32) -> Option<NodeId> {
         return Some(box_.node);
     }
     None
+}
+
+#[derive(Clone)]
+struct TableCell {
+    id: NodeId,
+    column: usize,
+    colspan: usize,
+    rowspan: usize,
+}
+
+fn layout_table(
+    doc: &Document,
+    styles: &[ComputedStyle],
+    measure: &dyn MeasureText,
+    images: &HashMap<NodeId, Arc<Bitmap>>,
+    id: NodeId,
+    containing_x: f32,
+    margin_y: f32,
+    containing_width: f32,
+    href: Option<String>,
+    view: View,
+) -> Option<LayoutBox> {
+    let style = style_of(styles, id);
+    let font = style.font_size;
+    let borders = [
+        style.borders[0].max(0.0),
+        style.borders[1].max(0.0),
+        style.borders[2].max(0.0),
+        style.borders[3].max(0.0),
+    ];
+    let border_w = borders[1] + borders[3];
+    let border_h = borders[0] + borders[2];
+    let padding = resolve_edges(&style.padding, font, containing_width, view);
+    let margin_top = resolve_length(style.margin[0], font, containing_width, view)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let margin_bottom = resolve_length(style.margin[2], font, containing_width, view)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let margin_left = resolve_length(style.margin[3], font, containing_width, view)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let available =
+        (containing_width - margin_left - padding.left - padding.right - border_w).max(0.0);
+    let specified = resolve_length(style.width, font, containing_width, view).map(|width| {
+        if style.box_sizing == BoxSizing::BorderBox {
+            (width - padding.left - padding.right - border_w).max(0.0)
+        } else {
+            width.max(0.0)
+        }
+    });
+    let rows = table_rows(doc, id);
+    let mut grid: Vec<Vec<TableCell>> = Vec::new();
+    let mut occupied: Vec<Vec<bool>> = Vec::new();
+    let mut columns = 0usize;
+    for (row_index, row) in rows.iter().enumerate() {
+        if occupied.len() <= row_index {
+            occupied.push(Vec::new());
+        }
+        let mut placed = Vec::new();
+        let mut column = 0usize;
+        for cell in row {
+            while occupied[row_index].get(column) == Some(&true) {
+                column += 1;
+            }
+            let colspan = doc
+                .attr(*cell, "colspan")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(1);
+            let rowspan = doc
+                .attr(*cell, "rowspan")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(1);
+            for extra in 0..rowspan {
+                let target = row_index + extra;
+                if occupied.len() <= target {
+                    occupied.resize_with(target + 1, Vec::new);
+                }
+                let row_occ = &mut occupied[target];
+                let end = column + colspan;
+                if row_occ.len() < end {
+                    row_occ.resize(end, false);
+                }
+                for slot in column..end {
+                    row_occ[slot] = true;
+                }
+            }
+            placed.push(TableCell {
+                id: *cell,
+                column,
+                colspan,
+                rowspan,
+            });
+            column += colspan;
+        }
+        columns = columns.max(column);
+        grid.push(placed);
+    }
+    let mut min_w = vec![0.0f32; columns];
+    let mut max_w = vec![0.0f32; columns];
+    for row in &grid {
+        for cell in row {
+            if cell.colspan == 0 {
+                continue;
+            }
+            let cell_style = style_of(styles, cell.id);
+            let text = doc.text_content(cell.id);
+            let mut longest = 0.0f32;
+            for word in text.split_whitespace() {
+                longest = longest.max(measure.width_family(
+                    word,
+                    cell_style.font_size,
+                    cell_style.bold,
+                    cell_style.mono,
+                    &cell_style.font_family,
+                ));
+            }
+            let pad = resolve_edges(&cell_style.padding, cell_style.font_size, available, view);
+            let cell_border = cell_style.borders[1].max(0.0) + cell_style.borders[3].max(0.0);
+            let min = longest + pad.left + pad.right + cell_border;
+            let max = layout_node(
+                doc,
+                styles,
+                measure,
+                images,
+                cell.id,
+                0.0,
+                0.0,
+                10_000.0,
+                href.clone(),
+                true,
+                view,
+            )
+            .map(|layout| layout.rect.width)
+            .unwrap_or(min)
+            .max(min);
+            if cell.colspan == 1 {
+                min_w[cell.column] = min_w[cell.column].max(min);
+                max_w[cell.column] = max_w[cell.column].max(max);
+            } else {
+                let share_min = min / cell.colspan as f32;
+                let share_max = max / cell.colspan as f32;
+                for offset in 0..cell.colspan {
+                    let column = cell.column + offset;
+                    if column < columns {
+                        min_w[column] = min_w[column].max(share_min);
+                        max_w[column] = max_w[column].max(share_max);
+                    }
+                }
+            }
+        }
+    }
+    let sum_min: f32 = min_w.iter().sum();
+    let sum_max: f32 = max_w.iter().sum();
+    let target = specified
+        .unwrap_or(sum_max.min(available).max(sum_min))
+        .max(sum_min);
+    let mut widths = max_w.clone();
+    if target >= sum_max && sum_max > 0.0 {
+        let extra = target - sum_max;
+        for (width, max) in widths.iter_mut().zip(max_w.iter()) {
+            *width += extra * max / sum_max;
+        }
+    } else if sum_max > sum_min {
+        let overflow = (sum_max - target).max(0.0);
+        let room = sum_max - sum_min;
+        for (width, (min, max)) in widths.iter_mut().zip(min_w.iter().zip(max_w.iter())) {
+            *width = max - overflow * (max - min) / room;
+        }
+    }
+    let mut children = Vec::new();
+    let y = margin_y + margin_top + borders[0] + padding.top;
+    let x0 = containing_x + margin_left + borders[3] + padding.left;
+    let mut row_heights = vec![0.0f32; grid.len()];
+    let mut laid: Vec<(usize, TableCell, LayoutBox)> = Vec::new();
+    for (row_index, row) in grid.iter().enumerate() {
+        for cell in row {
+            if cell.colspan == 0 {
+                continue;
+            }
+            let width: f32 = widths.iter().skip(cell.column).take(cell.colspan).sum();
+            if let Some(layout) = layout_node(
+                doc,
+                styles,
+                measure,
+                images,
+                cell.id,
+                0.0,
+                0.0,
+                width,
+                href.clone(),
+                false,
+                view,
+            ) {
+                let span = cell.rowspan.max(1);
+                if span == 1 {
+                    row_heights[row_index] = row_heights[row_index].max(layout.rect.height);
+                }
+                laid.push((
+                    row_index,
+                    TableCell {
+                        id: cell.id,
+                        column: cell.column,
+                        colspan: cell.colspan,
+                        rowspan: span,
+                    },
+                    layout,
+                ));
+            }
+        }
+    }
+    for (row_index, cell, layout) in &laid {
+        if cell.rowspan > 1 {
+            let covered: f32 = row_heights.iter().skip(*row_index).take(cell.rowspan).sum();
+            if layout.rect.height > covered {
+                let extra = layout.rect.height - covered;
+                let last = (*row_index + cell.rowspan - 1).min(row_heights.len() - 1);
+                row_heights[last] += extra;
+            }
+        }
+    }
+    for (row_index, cell, mut layout) in laid {
+        let x = x0 + widths.iter().take(cell.column).sum::<f32>();
+        let y_cell = y + row_heights.iter().take(row_index).sum::<f32>();
+        let dx = x - layout.rect.x;
+        let dy = y_cell - layout.rect.y;
+        translate(&mut layout, dx, dy);
+        children.push(layout);
+    }
+    let content_h: f32 = row_heights.iter().sum();
+    let content_w: f32 = widths.iter().sum();
+    Some(LayoutBox {
+        node: id,
+        rect: Rect::new(
+            containing_x + margin_left,
+            margin_y + margin_top,
+            content_w + padding.left + padding.right + border_w,
+            content_h + padding.top + padding.bottom + border_h,
+        ),
+        margin: Edges::new(margin_top, 0.0, margin_bottom, margin_left),
+        background: style.background,
+        gradient: style.gradient,
+        border_color: style.border_color,
+        border_width: borders[0],
+        borders,
+        fixed: style.position == Position::Fixed,
+        color: style.color,
+        font_size: style.font_size,
+        bold: style.bold,
+        mono: style.mono,
+        href,
+        marker: None,
+        children,
+        lines: Vec::new(),
+        opacity: style.opacity.clamp(0.0, 1.0),
+        overflow_hidden: style.overflow_hidden,
+        border_radius: style.border_radius,
+        image: None,
+        visible: style.visible,
+        z_index: style.z_index,
+        shapes: Vec::new(),
+    })
+}
+
+fn table_rows(doc: &Document, table: NodeId) -> Vec<Vec<NodeId>> {
+    let mut rows = Vec::new();
+    fn walk(doc: &Document, id: NodeId, rows: &mut Vec<Vec<NodeId>>) {
+        for child in doc.node(id).children.clone() {
+            match doc.element_name(child) {
+                Some("tr") => {
+                    let cells = doc
+                        .node(child)
+                        .children
+                        .iter()
+                        .copied()
+                        .filter(|cell| matches!(doc.element_name(*cell), Some("td" | "th")))
+                        .collect();
+                    rows.push(cells);
+                }
+                Some("thead" | "tbody" | "tfoot") => walk(doc, child, rows),
+                _ => {}
+            }
+        }
+    }
+    walk(doc, table, &mut rows);
+    rows
 }
 
 #[cfg(test)]
@@ -2344,6 +2757,21 @@ mod tests {
     }
 
     #[test]
+    fn grid_column_span_is_wider_than_one_track() {
+        let doc = parse_html(
+            r#"<div id="grid" style="display:grid;width:240px;grid-template-columns:repeat(6, 1fr)"><div id="lead" style="grid-column:2 / span 3;height:10px"></div></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let lead = find(&tree.root, doc.get_element_by_id("lead").unwrap()).unwrap();
+        assert!(
+            (lead.rect.width - 120.0).abs() < 2.0,
+            "lead {}",
+            lead.rect.width
+        );
+    }
+
+    #[test]
     fn flex_items_shrink_to_the_line() {
         let doc = parse_html(
             r#"<div id="row" style="display:flex;width:100px"><div id="a" style="width:80px;height:10px"></div><div id="b" style="width:80px;height:10px"></div></div>"#,
@@ -2359,5 +2787,55 @@ mod tests {
             a.rect.width,
             b.rect.width
         );
+    }
+
+    #[test]
+    fn a_flex_button_keeps_its_label() {
+        let doc = parse_html(
+            r#"<div id="row" style="display:flex;width:40px"><button id="go">View project</button></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let go = find(&tree.root, doc.get_element_by_id("go").unwrap()).unwrap();
+        assert!(go.rect.width > 80.0, "button width {}", go.rect.width);
+    }
+
+    #[test]
+    fn inline_svg_builds_a_path() {
+        let doc = parse_html(
+            r##"<svg id="icon" viewBox="0 0 10 10" width="20" height="20"><path d="M0 0 L10 0 L10 10 Z" fill="#ff0000"/></svg>"##,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let icon = find(&tree.root, doc.get_element_by_id("icon").unwrap()).unwrap();
+        assert!(!icon.shapes.is_empty());
+        assert_eq!(icon.background.a, 0);
+        assert!(icon.shapes[0].fill.is_some());
+        assert!(icon.rect.width >= 20.0, "w {}", icon.rect.width);
+    }
+
+    #[test]
+    fn table_cells_share_rows_and_columns() {
+        let doc = parse_html(
+            r#"<table id="t"><tr><th id="a">Name</th><th id="b">Value</th></tr><tr><td id="c">One</td><td id="d">Two</td></tr></table>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let a = find(&tree.root, doc.get_element_by_id("a").unwrap()).unwrap();
+        let b = find(&tree.root, doc.get_element_by_id("b").unwrap()).unwrap();
+        let c = find(&tree.root, doc.get_element_by_id("c").unwrap()).unwrap();
+        assert!(
+            b.rect.x + 0.5 >= a.rect.right(),
+            "b {} a {}",
+            b.rect.x,
+            a.rect.right()
+        );
+        assert!(
+            (c.rect.x - a.rect.x).abs() < 1.0,
+            "c x {} a x {}",
+            c.rect.x,
+            a.rect.x
+        );
+        assert!(c.rect.y > a.rect.y, "c y {} a y {}", c.rect.y, a.rect.y);
     }
 }

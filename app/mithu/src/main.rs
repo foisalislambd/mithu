@@ -59,6 +59,9 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
     let mut browser = Browser::new();
     if let Some(url) = url {
         browser.navigate(url);
+        // Let a short timer (Google's own fallback, for example) run before
+        // the still is taken.
+        browser.advance_timers(2_500);
     }
     let width = 1280u32;
     let height = 800u32;
@@ -90,8 +93,11 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        let mut browser = Browser::new();
+        browser.set_cooperative_scripts(true);
+        browser.follow_os_theme();
         Self {
-            browser: Browser::new(),
+            browser,
             window: None,
             context: None,
             surface: None,
@@ -376,6 +382,12 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.browser.pump_scripts(Duration::from_millis(12)) || self.browser.chrome_animating() {
+            self.sync_title();
+            self.request_redraw();
+            event_loop.set_control_flow(ControlFlow::Poll);
+            return;
+        }
         let elapsed = self.timer_mark.elapsed().as_millis() as u64;
         self.timer_mark = Instant::now();
         if elapsed > 0 && self.browser.advance_timers(elapsed) {

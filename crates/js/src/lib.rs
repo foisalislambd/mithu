@@ -5,13 +5,18 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context as TaskContext, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use boa_engine::module::{Module, ModuleLoader, ModuleRequest, Referrer};
 use boa_engine::object::builtins::{JsArray, JsPromise};
 use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
 use boa_engine::property::Attribute;
+use boa_engine::script::Script;
 use boa_engine::{
     Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue,
     NativeFunction, Source, Trace, js_string,
@@ -77,12 +82,21 @@ pub fn engine_name() -> &'static str {
 }
 
 pub struct Session {
-    context: Context,
+    /// `None` while a script task owns the engine. The document stays readable.
+    context: Option<Context>,
+    driver: Option<Pin<Box<dyn Future<Output = Context>>>>,
     doc: Rc<RefCell<Document>>,
     log: Rc<RefCell<Vec<String>>>,
     prevented: Rc<Cell<bool>>,
     local: Rc<RefCell<HashMap<String, String>>>,
     session_store: Rc<RefCell<HashMap<String, String>>>,
+}
+
+struct ScriptJob {
+    code: String,
+    path: String,
+    module: bool,
+    node: NodeId,
 }
 
 impl Session {
@@ -98,12 +112,35 @@ impl Session {
         Self::open_with_storage(doc, href, fetch, HashMap::new(), HashMap::new())
     }
 
+    /// Like [`Session::open_with_storage`], but script tasks stay queued.
+    /// [`Session::pump`] runs them in slices so the UI thread can paint.
+    pub fn open_cooperative(
+        doc: Document,
+        href: &str,
+        fetch: impl FnMut(&str) -> Option<String> + 'static,
+        local: HashMap<String, String>,
+        session_store: HashMap<String, String>,
+    ) -> Self {
+        Self::boot(doc, href, fetch, local, session_store, false)
+    }
+
     pub fn open_with_storage(
         doc: Document,
         href: &str,
         fetch: impl FnMut(&str) -> Option<String> + 'static,
         local: HashMap<String, String>,
         session_store: HashMap<String, String>,
+    ) -> Self {
+        Self::boot(doc, href, fetch, local, session_store, true)
+    }
+
+    fn boot(
+        doc: Document,
+        href: &str,
+        fetch: impl FnMut(&str) -> Option<String> + 'static,
+        local: HashMap<String, String>,
+        session_store: HashMap<String, String>,
+        finish: bool,
     ) -> Self {
         let log = Rc::new(RefCell::new(Vec::new()));
         let prevented = Rc::new(Cell::new(false));
@@ -141,103 +178,65 @@ impl Session {
             current_script: Rc::new(RefCell::new(None)),
             ready_state: Rc::new(RefCell::new("interactive".to_string())),
         });
+        let mut jobs = Vec::new();
         if let Err(error) = install_host(&mut context) {
             log.borrow_mut().push(format!("JavaScript error: {error}"));
         } else {
-            let scripts = shared.borrow().scripts.clone();
-            let mut classic = Vec::new();
-            let mut deferred = Vec::new();
-            let mut asynchronous = Vec::new();
-            for script in scripts {
-                if !script.javascript || script.nomodule {
-                    continue;
-                }
-                if script.module || script.defer {
-                    deferred.push(script);
-                } else if script.asynchronous {
-                    asynchronous.push(script);
-                } else {
-                    classic.push(script);
-                }
-            }
-            let started = std::time::Instant::now();
-            for script in classic.into_iter().chain(deferred).chain(asynchronous) {
-                if started.elapsed() > std::time::Duration::from_secs(8) {
-                    log.borrow_mut()
-                        .push("JavaScript error: the script ran longer than 8s".to_string());
-                    break;
-                }
-                let code = if let Some(src) = &script.src {
-                    let fetched = {
-                        let mut fetch = loader.fetch.borrow_mut();
-                        fetch(src).unwrap_or_default()
-                    };
-                    fetched
-                } else {
-                    script.code.clone()
-                };
-                if code.trim().is_empty() {
-                    continue;
-                }
-                if code.len() > 256_000 {
-                    log.borrow_mut()
-                        .push("JavaScript error: skipped a script larger than 256KB".to_string());
-                    continue;
-                }
-                let script_url = script.src.as_deref().map(|src| {
-                    let location = context
-                        .get_data::<Host>()
-                        .map(|host| host.location.borrow().clone())
-                        .unwrap_or_default();
-                    resolve_request(&location, src)
-                        .map(|url| url.to_display())
-                        .unwrap_or_else(|_| src.to_string())
-                });
-                if let Some(host) = context.get_data::<Host>() {
-                    *host.current_script.borrow_mut() = Some(script.node);
-                }
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if script.module {
-                        let name = script_url
-                            .clone()
-                            .unwrap_or_else(|| "inline-module.js".to_string());
-                        run_module(&mut context, &code, &name)
-                    } else {
-                        let path =
-                            PathBuf::from(script_url.unwrap_or_else(|| "inline.js".to_string()));
-                        if let Err(error) =
-                            context.eval(Source::from_bytes(code.as_str()).with_path(&path))
-                        {
-                            Err(error)
-                        } else {
-                            context.run_jobs()
-                        }
-                    }
-                }))
-                .unwrap_or_else(|_| {
-                    Err(JsNativeError::typ()
-                        .with_message("the script stopped the engine")
-                        .into())
-                });
-                if let Some(host) = context.get_data::<Host>() {
-                    *host.current_script.borrow_mut() = None;
-                }
-                if let Err(error) = result {
-                    log.borrow_mut().push(format!("JavaScript error: {error}"));
-                }
-            }
-            if let Err(error) = run_due_timers(&mut context, 0) {
-                log.borrow_mut().push(format!("JavaScript error: {error}"));
-            }
-            signal_document_loaded(&mut context);
+            jobs = script_jobs(&context, &shared, &loader);
         }
-        Self {
+        let (context, driver) = if jobs.is_empty() {
+            signal_document_loaded(&mut context);
+            (Some(context), None)
+        } else {
+            (None, Some(drive_scripts(context, jobs)))
+        };
+        let mut session = Self {
             context,
+            driver,
             doc: shared,
             log,
             prevented,
             local,
             session_store,
+        };
+        if finish {
+            while session.pump(Duration::from_secs(60)) {}
+        }
+        session
+    }
+
+    /// True while script tasks are still queued. Blink keeps the renderer
+    /// responsive by returning to the event loop between slices.
+    pub fn scripts_pending(&self) -> bool {
+        self.driver.is_some()
+    }
+
+    /// Run the current script task until `budget` elapses or the queue drains.
+    /// Returns true when more script work remains.
+    ///
+    /// Boa yields every 16_384 instruction-costs (`Script::evaluate_async_with_budget`).
+    /// That is the same idea as Blink's per-task budget: a long bundle is one
+    /// task, but the thread can paint between yields.
+    pub fn pump(&mut self, budget: Duration) -> bool {
+        let Some(mut driver) = self.driver.take() else {
+            return false;
+        };
+        let start = Instant::now();
+        let waker = Waker::noop();
+        let mut task = TaskContext::from_waker(waker);
+        loop {
+            match driver.as_mut().poll(&mut task) {
+                Poll::Ready(context) => {
+                    self.context = Some(context);
+                    return false;
+                }
+                Poll::Pending => {
+                    if start.elapsed() >= budget {
+                        self.driver = Some(driver);
+                        return true;
+                    }
+                }
+            }
         }
     }
 
@@ -263,6 +262,7 @@ impl Session {
 
     pub fn take_navigation(&mut self) -> Option<String> {
         self.context
+            .as_mut()?
             .get_data::<Host>()
             .cloned()
             .and_then(|host| host.navigation.borrow_mut().take())
@@ -270,7 +270,10 @@ impl Session {
 
     /// Moves the page clock forward and runs timers whose delay has elapsed.
     pub fn advance(&mut self, ms: u64) -> bool {
-        match run_due_timers(&mut self.context, ms) {
+        let Some(context) = self.context.as_mut() else {
+            return false;
+        };
+        match run_due_timers(context, ms) {
             Ok(ran) => ran,
             Err(error) => {
                 self.log
@@ -282,7 +285,7 @@ impl Session {
     }
 
     pub fn next_timer_ms(&self) -> Option<u64> {
-        let host = self.context.get_data::<Host>().cloned()?;
+        let host = self.context.as_ref()?.get_data::<Host>().cloned()?;
         let clock = host.clock.borrow();
         clock
             .queue
@@ -338,8 +341,14 @@ impl Session {
     }
 
     fn invoke(&mut self, current: NodeId, target: NodeId, event: &str) {
+        if self.context.is_none() {
+            return;
+        }
         self.ensure_attribute_handler(current, event);
-        let functions = match listener_functions(&mut self.context, current, event) {
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
+        let functions = match listener_functions(context, current, event) {
             Ok(functions) => functions,
             Err(error) => {
                 self.log
@@ -351,12 +360,19 @@ impl Session {
         if functions.is_empty() {
             return;
         }
-        if let Some(host) = self.context.get_data::<Host>().cloned() {
+        if let Some(host) = self
+            .context
+            .as_mut()
+            .and_then(|context| context.get_data::<Host>().cloned())
+        {
             host.event_target.set(Some(target.0));
             host.event_current.set(Some(current.0));
         }
-        let this = element_value(current.0, &mut self.context);
-        let event_value = match event_object(target, event, &mut self.context) {
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
+        let this = element_value(current.0, context);
+        let event_value = match event_object(target, event, context) {
             Ok(value) => value,
             Err(error) => {
                 self.log
@@ -365,8 +381,11 @@ impl Session {
                 return;
             }
         };
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
         for function in functions {
-            if let Err(error) = function.call(&this, &[event_value.clone()], &mut self.context) {
+            if let Err(error) = function.call(&this, &[event_value.clone()], context) {
                 self.log
                     .borrow_mut()
                     .push(format!("JavaScript error: {error}"));
@@ -375,11 +394,21 @@ impl Session {
     }
 
     fn invoke_window(&mut self, target: NodeId, event: &str) {
-        if let Some(host) = self.context.get_data::<Host>().cloned() {
+        if self.context.is_none() {
+            return;
+        }
+        if let Some(host) = self
+            .context
+            .as_mut()
+            .and_then(|context| context.get_data::<Host>().cloned())
+        {
             host.event_target.set(Some(target.0));
             host.event_current.set(None);
         }
-        let functions = match read_listeners(&mut self.context, &format!("win:{event}")) {
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
+        let functions = match read_listeners(context, &format!("win:{event}")) {
             Ok(functions) => functions,
             Err(error) => {
                 self.log
@@ -391,7 +420,10 @@ impl Session {
         if functions.is_empty() {
             return;
         }
-        let event_value = match event_object(target, event, &mut self.context) {
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
+        let event_value = match event_object(target, event, context) {
             Ok(value) => value,
             Err(error) => {
                 self.log
@@ -400,9 +432,12 @@ impl Session {
                 return;
             }
         };
-        let this = JsValue::from(self.context.global_object().clone());
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
+        let this = JsValue::from(context.global_object().clone());
         for function in functions {
-            if let Err(error) = function.call(&this, &[event_value.clone()], &mut self.context) {
+            if let Err(error) = function.call(&this, &[event_value.clone()], context) {
                 self.log
                     .borrow_mut()
                     .push(format!("JavaScript error: {error}"));
@@ -421,13 +456,22 @@ impl Session {
             return;
         }
         let key = format!("on:{}:{event}", id.0);
-        if listener_count(&mut self.context, &key).unwrap_or(0) > 0 {
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
+        if listener_count(context, &key).unwrap_or(0) > 0 {
             return;
         }
         let source = format!("(function(event) {{\n{code}\n}})");
-        match self.context.eval(Source::from_bytes(source.as_str())) {
+        let Some(context) = self.context.as_mut() else {
+            return;
+        };
+        match context.eval(Source::from_bytes(source.as_str())) {
             Ok(value) => {
-                if let Err(error) = push_listener(&mut self.context, &key, &value, false) {
+                let Some(context) = self.context.as_mut() else {
+                    return;
+                };
+                if let Err(error) = push_listener(context, &key, &value, false) {
                     self.log
                         .borrow_mut()
                         .push(format!("JavaScript error: {error}"));
@@ -445,6 +489,122 @@ pub struct Submission {
     pub action: String,
     pub method: String,
     pub query: String,
+}
+
+fn script_jobs(
+    context: &Context,
+    doc: &Rc<RefCell<Document>>,
+    loader: &PageLoader,
+) -> Vec<ScriptJob> {
+    let scripts = doc.borrow().scripts.clone();
+    let mut classic = Vec::new();
+    let mut deferred = Vec::new();
+    let mut asynchronous = Vec::new();
+    for script in scripts {
+        if !script.javascript || script.nomodule {
+            continue;
+        }
+        if script.module || script.defer {
+            deferred.push(script);
+        } else if script.asynchronous {
+            asynchronous.push(script);
+        } else {
+            classic.push(script);
+        }
+    }
+    let mut jobs = Vec::new();
+    for script in classic.into_iter().chain(deferred).chain(asynchronous) {
+        let code = if let Some(src) = &script.src {
+            let mut fetch = loader.fetch.borrow_mut();
+            fetch(src).unwrap_or_default()
+        } else {
+            script.code.clone()
+        };
+        if code.trim().is_empty() {
+            continue;
+        }
+        let path = script
+            .src
+            .as_deref()
+            .map(|src| {
+                let location = context
+                    .get_data::<Host>()
+                    .map(|host| host.location.borrow().clone())
+                    .unwrap_or_default();
+                resolve_request(&location, src)
+                    .map(|url| url.to_display())
+                    .unwrap_or_else(|_| src.to_string())
+            })
+            .unwrap_or_else(|| {
+                if script.module {
+                    "inline-module.js".to_string()
+                } else {
+                    "inline.js".to_string()
+                }
+            });
+        jobs.push(ScriptJob {
+            code,
+            path,
+            module: script.module,
+            node: script.node,
+        });
+    }
+    jobs
+}
+
+fn note_error(context: &Context, error: &dyn std::fmt::Display) {
+    if let Some(host) = context.get_data::<Host>() {
+        host.log
+            .borrow_mut()
+            .push(format!("JavaScript error: {error}"));
+    }
+}
+
+/// One script is one task. Boa suspends the task every 16_384 instruction
+/// costs so the browser can paint without aborting the bundle.
+fn drive_scripts(
+    mut context: Context,
+    jobs: Vec<ScriptJob>,
+) -> Pin<Box<dyn Future<Output = Context>>> {
+    Box::pin(async move {
+        for job in jobs {
+            if let Some(host) = context.get_data::<Host>() {
+                *host.current_script.borrow_mut() = Some(job.node);
+            }
+            if job.module {
+                if let Err(error) = run_module(&mut context, &job.code, &job.path) {
+                    note_error(&context, &error);
+                }
+            } else {
+                let path = PathBuf::from(&job.path);
+                match Script::parse(
+                    Source::from_bytes(job.code.as_str()).with_path(&path),
+                    None,
+                    &mut context,
+                ) {
+                    Ok(script) => {
+                        if let Err(error) = script
+                            .evaluate_async_with_budget(&mut context, 16_384)
+                            .await
+                        {
+                            note_error(&context, &error);
+                        } else if let Err(error) = context.run_jobs() {
+                            note_error(&context, &error);
+                        }
+                    }
+                    Err(error) => note_error(&context, &error),
+                }
+            }
+            if let Some(host) = context.get_data::<Host>() {
+                *host.current_script.borrow_mut() = None;
+            }
+        }
+        if let Err(error) = run_due_timers(&mut context, 0) {
+            note_error(&context, &error);
+        }
+        signal_document_loaded(&mut context);
+        context
+    })
 }
 
 pub fn run_scripts(
@@ -3251,6 +3411,30 @@ mod tests {
                 r#"performance.mark("js-parse-end");let e,t,n,l,a="global-banner-disable-styles",d=/^[a-zA-Z0-9_-]+$/;n=((t=(e=document.cookie.match(RegExp("(?:^|;\\s*)disabled_global_site_banners\\s*=\\s*([^;]+)")))?e[1]:null)?t.split(",").map(e=>e.trim()).filter(e=>d.test(e)):[]).map(e=>`global-banner[id="${e}"]{display:none !important}`).join(""),l=document.getElementById(a),n?(l||((l=document.createElement("style")).id=a,document.head.appendChild(l)),l.textContent=n):l?.remove();"#.to_string()
             })
         });
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+    }
+
+    #[test]
+    fn a_large_script_runs_and_a_long_loop_yields() {
+        let filler = " ".repeat(300_000);
+        let doc = parse_html(&format!(
+            "<script>document.title = 'big';{filler}</script><script>var i = 0; while (i < 200000) i = i + 1; document.title = document.title + i;</script>"
+        ));
+        let mut session = Session::open_cooperative(
+            doc,
+            "https://example.com/",
+            |_| None,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        assert!(session.scripts_pending());
+        let mut slices = 0;
+        while session.pump(Duration::ZERO) {
+            slices += 1;
+            assert!(slices < 100_000, "the script task never yielded");
+        }
+        assert!(slices > 0, "a long loop should cross a budget boundary");
+        assert_eq!(session.document().title, "big200000");
         assert!(session.logs().is_empty(), "{:?}", session.logs());
     }
 

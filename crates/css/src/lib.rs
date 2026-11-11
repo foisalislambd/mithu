@@ -10,6 +10,14 @@
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    pub font_faces: Vec<FontFace>,
+}
+
+/// A downloaded face. `url` is the first `src` the parser found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontFace {
+    pub family: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +121,20 @@ impl Selector {
     }
 }
 
+fn first_font_url(value: &str) -> String {
+    let Some(start) = value.to_ascii_lowercase().find("url(") else {
+        return String::new();
+    };
+    let rest = value[start + 4..].trim_start();
+    let quote = rest.chars().next().unwrap_or(' ');
+    if quote == '"' || quote == '\'' {
+        let end = rest[1..].find(quote).unwrap_or(0) + 1;
+        return rest[1..end].to_string();
+    }
+    let end = rest.find(')').unwrap_or(rest.len());
+    rest[..end].trim().to_string()
+}
+
 fn compound_specificity(compound: &Compound) -> (u32, u32, u32) {
     let mut ids = u32::from(compound.id.is_some());
     let mut classes = compound.classes.len() as u32 + compound.attrs.len() as u32;
@@ -166,8 +188,12 @@ struct CssParser {
 impl CssParser {
     fn parse_stylesheet(&mut self) -> Stylesheet {
         let mut rules = Vec::new();
-        self.parse_rule_list(&mut rules, None);
-        Stylesheet { rules }
+        let mut faces = Vec::new();
+        self.parse_rule_list(&mut rules, &mut faces, None);
+        Stylesheet {
+            rules,
+            font_faces: faces,
+        }
     }
 
     fn parse_selector_list(&mut self) -> Vec<Selector> {
@@ -613,6 +639,31 @@ impl CssParser {
             self.skip_balanced_block();
             return AtRule::Done;
         }
+        if name == "font-face" {
+            self.skip_ws();
+            if self.peek() == Some('{') {
+                self.bump();
+                let declarations = self.parse_declaration_block();
+                let mut family = String::new();
+                let mut url = String::new();
+                for declaration in declarations {
+                    if declaration.name == "font-family" {
+                        family = declaration
+                            .value
+                            .trim()
+                            .trim_matches(|ch| ch == '"' || ch == '\'')
+                            .to_string();
+                    }
+                    if declaration.name == "src" && url.is_empty() {
+                        url = first_font_url(&declaration.value);
+                    }
+                }
+                if !family.is_empty() && !url.is_empty() {
+                    return AtRule::FontFace(FontFace { family, url });
+                }
+            }
+            return AtRule::Done;
+        }
         if name == "layer" || name == "supports" {
             while let Some(ch) = self.peek() {
                 if ch == '{' || ch == ';' {
@@ -633,7 +684,12 @@ impl CssParser {
         AtRule::Done
     }
 
-    fn parse_rule_list(&mut self, rules: &mut Vec<Rule>, media: Option<Media>) {
+    fn parse_rule_list(
+        &mut self,
+        rules: &mut Vec<Rule>,
+        faces: &mut Vec<FontFace>,
+        media: Option<Media>,
+    ) {
         self.skip_ws();
         if self.peek() == Some('{') {
             self.bump();
@@ -647,9 +703,14 @@ impl CssParser {
             if self.peek() == Some('@') {
                 match self.take_at_rule() {
                     AtRule::Media(inner) => {
-                        self.parse_rule_list(rules, Some(combine_media(media.clone(), inner)));
+                        self.parse_rule_list(
+                            rules,
+                            faces,
+                            Some(combine_media(media.clone(), inner)),
+                        );
                     }
-                    AtRule::Enter => self.parse_rule_list(rules, media.clone()),
+                    AtRule::FontFace(face) => faces.push(face),
+                    AtRule::Enter => self.parse_rule_list(rules, faces, media.clone()),
                     AtRule::Done => {}
                 }
                 continue;
@@ -835,6 +896,7 @@ fn parse_an_b(text: &str) -> Option<(i32, i32)> {
 
 enum AtRule {
     Media(Media),
+    FontFace(FontFace),
     /// `@layer` or `@supports` whose block still needs to be parsed.
     Enter,
     Done,

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mithu_base::{Color, Rect};
 use mithu_dom::{Document, NodeId};
@@ -14,7 +15,7 @@ use mithu_js::{Session, Submission};
 use mithu_layout::{LayoutTree, hit_test, layout_tree};
 use mithu_net::{get, post};
 use mithu_paint::{Canvas, paint_layout};
-use mithu_style::{ComputedStyle, StyleState, style_with};
+use mithu_style::{ComputedStyle, StyleState, font_faces, style_with};
 use mithu_text::{FontBook, MeasureText};
 use mithu_url::{Url, UrlError};
 
@@ -168,6 +169,89 @@ struct ChromeColors {
     tooltip_ink: Color,
 }
 
+fn os_prefers_dark() -> bool {
+    if let Ok(value) = std::env::var("MITHU_THEME") {
+        return value.eq_ignore_ascii_case("dark");
+    }
+    let output = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+        .output();
+    if let Ok(output) = output {
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.contains("prefer-dark") {
+            return true;
+        }
+        if text.contains("prefer-light") || text.contains("default") {
+            return false;
+        }
+    }
+    std::fs::read_to_string("/home/ubuntu/.config/gtk-3.0/settings.ini")
+        .or_else(|_| std::fs::read_to_string("/home/ubuntu/.config/gtk-4.0/settings.ini"))
+        .is_ok_and(|text| text.contains("gtk-application-prefer-dark=1"))
+}
+
+/// Active-tab outline from `HorizontalTabStyleViews::GetPath`.
+///
+/// The bottom corners are concave so the tab joins the toolbar. Points are
+/// sampled from the same quarter-circles the Skia path builds with `arcTo`.
+fn active_tab_contour(rect: Rect) -> Vec<(f32, f32)> {
+    let top_radius = 8.0_f32;
+    let scoop = 10.0_f32;
+    let left = rect.x;
+    let right = rect.right();
+    let top = rect.y;
+    let bottom = rect.bottom();
+    let tab_left = left + scoop;
+    let tab_right = right - scoop;
+    let mut points = Vec::new();
+    points.push((left, bottom));
+    arc_points(
+        &mut points,
+        tab_left,
+        bottom - scoop,
+        scoop,
+        std::f32::consts::FRAC_PI_2,
+        std::f32::consts::PI,
+    );
+    points.push((tab_left, top + top_radius));
+    arc_points(
+        &mut points,
+        tab_left + top_radius,
+        top + top_radius,
+        top_radius,
+        std::f32::consts::PI,
+        std::f32::consts::PI * 1.5,
+    );
+    points.push((tab_right - top_radius, top));
+    arc_points(
+        &mut points,
+        tab_right - top_radius,
+        top + top_radius,
+        top_radius,
+        std::f32::consts::PI * 1.5,
+        std::f32::consts::TAU,
+    );
+    points.push((tab_right, bottom - scoop));
+    arc_points(
+        &mut points,
+        tab_right,
+        bottom - scoop,
+        scoop,
+        std::f32::consts::PI,
+        std::f32::consts::FRAC_PI_2,
+    );
+    points.push((right, bottom));
+    points
+}
+
+fn arc_points(points: &mut Vec<(f32, f32)>, cx: f32, cy: f32, radius: f32, start: f32, end: f32) {
+    let steps = 6;
+    for step in 0..=steps {
+        let t = start + (end - start) * (step as f32 / steps as f32);
+        points.push((cx + t.cos() * radius, cy + t.sin() * radius));
+    }
+}
+
 fn chrome_colors(dark: bool) -> ChromeColors {
     if dark {
         return ChromeColors {
@@ -253,7 +337,10 @@ pub struct Browser {
     dark: bool,
     cursor: (f32, f32),
     hovering: bool,
-    ripple: Option<(f32, f32)>,
+    ripple: Option<(f32, f32, Instant)>,
+    cooperative: bool,
+    script_refresh: Instant,
+    opened: Instant,
     closed: Vec<Url>,
     local_data: HashMap<String, HashMap<String, String>>,
     session_data: HashMap<String, HashMap<String, String>>,
@@ -302,6 +389,9 @@ impl Browser {
             cursor: (0.0, 0.0),
             hovering: false,
             ripple: None,
+            cooperative: false,
+            script_refresh: Instant::now(),
+            opened: Instant::now(),
             closed: Vec::new(),
             local_data: HashMap::new(),
             session_data: HashMap::new(),
@@ -309,6 +399,62 @@ impl Browser {
         };
         browser.navigate("about:mithu");
         browser
+    }
+
+    /// Script tasks yield back to the window instead of running to completion
+    /// inside `navigate`. Screenshots leave this off so the picture includes
+    /// the finished page.
+    pub fn chrome_animating(&self) -> bool {
+        self.page().status.starts_with("Loading")
+            || self
+                .ripple
+                .is_some_and(|(_, _, started)| started.elapsed().as_secs_f32() < 0.35)
+    }
+
+    pub fn set_cooperative_scripts(&mut self, enabled: bool) {
+        self.cooperative = enabled;
+    }
+
+    /// Match the frame to the desktop color scheme. The menu toggle still wins
+    /// after the user picks a theme.
+    pub fn follow_os_theme(&mut self) {
+        self.dark = os_prefers_dark();
+    }
+
+    /// Run pending script tasks for `budget`, then refresh the page.
+    /// Returns true while scripts remain, so the window keeps painting.
+    pub fn pump_scripts(&mut self, budget: Duration) -> bool {
+        let pending = {
+            let Some(session) = self.page_mut().session.as_mut() else {
+                return false;
+            };
+            if !session.scripts_pending() {
+                return false;
+            }
+            session.pump(budget)
+        };
+        if pending {
+            self.page_mut().status = "Loading".to_string();
+            if self.script_refresh.elapsed() >= Duration::from_millis(200) {
+                self.script_refresh = Instant::now();
+                self.pull_page();
+                self.page_mut().status = "Loading".to_string();
+            }
+            return true;
+        }
+        let next = self
+            .page_mut()
+            .session
+            .as_mut()
+            .and_then(|session| session.take_navigation());
+        self.pull_page();
+        if let Some(next) = next
+            && self.js_hops < 8
+        {
+            self.js_hops += 1;
+            self.navigate(&next);
+        }
+        false
     }
 
     pub fn tab_count(&self) -> usize {
@@ -635,7 +781,7 @@ impl Browser {
                 return;
             }
         }
-        self.ripple = Some((x, y));
+        self.ripple = Some((x, y, Instant::now()));
         if y < TAB_H {
             let strip = self.tab_strip();
             if strip.search.contains(x, y) {
@@ -1330,25 +1476,38 @@ impl Browser {
         let origin = origin_key(&fetched.url);
         let local = self.local_data.get(&origin).cloned().unwrap_or_default();
         let session_store = self.session_data.get(&origin).cloned().unwrap_or_default();
-        let mut session = Session::open_with_storage(
-            document,
-            &fetched.url.to_display(),
-            move |src| fetch_text(&module_base, src),
-            local,
-            session_store,
-        );
+        let mut session = if self.cooperative {
+            Session::open_cooperative(
+                document,
+                &fetched.url.to_display(),
+                move |src| fetch_text(&module_base, src),
+                local,
+                session_store,
+            )
+        } else {
+            Session::open_with_storage(
+                document,
+                &fetched.url.to_display(),
+                move |src| fetch_text(&module_base, src),
+                local,
+                session_store,
+            )
+        };
+        let scripts_pending = session.scripts_pending();
         self.local_data
             .insert(origin.clone(), session.local_storage());
         self.session_data.insert(origin, session.session_storage());
-        if let Some(next) = session.take_navigation() {
-            if self.js_hops < 8 {
-                self.js_hops += 1;
-                self.navigate(&next);
-                return;
+        if !scripts_pending {
+            if let Some(next) = session.take_navigation() {
+                if self.js_hops < 8 {
+                    self.js_hops += 1;
+                    self.navigate(&next);
+                    return;
+                }
+                self.js_hops = 0;
+            } else {
+                self.js_hops = 0;
             }
-            self.js_hops = 0;
-        } else {
-            self.js_hops = 0;
         }
         let logs = session.logs();
         session.edit(|doc| doc.refresh_metadata());
@@ -1368,6 +1527,7 @@ impl Browser {
             }
         }
         author = expand_imports(&author, &base, 0, &mut seen);
+        self.install_web_fonts(&author, &base);
         let styles = style_with(
             &document,
             &author,
@@ -1400,7 +1560,9 @@ impl Browser {
             return;
         };
         page.title = title.clone();
-        page.status = if logs.is_empty() {
+        page.status = if scripts_pending {
+            "Loading".to_string()
+        } else if logs.is_empty() {
             fetched.status
         } else {
             logs.last().cloned().unwrap_or(fetched.status)
@@ -1444,7 +1606,13 @@ impl Browser {
             };
             (session.advance(ms), session.take_navigation())
         };
-        if ran {
+        if ran
+            || self
+                .page()
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.logs().is_empty())
+        {
             self.pull_page();
         }
         if let Some(next) = next {
@@ -1489,7 +1657,6 @@ impl Browser {
 
     pub fn pointer_up(&mut self) {
         self.drag = None;
-        self.ripple = None;
     }
 
     pub fn pointer_move(&mut self, x: f32, y: f32) {
@@ -1575,6 +1742,17 @@ impl Browser {
         }
     }
 
+    fn install_web_fonts(&mut self, css: &str, base: &Url) {
+        for (family, url) in font_faces(css).into_iter().take(8) {
+            if self.fonts.has_family(&family) {
+                continue;
+            }
+            if let Some(bytes) = fetch_bytes(base, &url) {
+                self.fonts.add_family(&family, &bytes);
+            }
+        }
+    }
+
     fn pull_page(&mut self) {
         let base = self.page().base.clone();
         let (document, logs) = {
@@ -1585,6 +1763,7 @@ impl Browser {
             (session.document(), session.logs())
         };
         let author = author_css(&document, &base);
+        self.install_web_fonts(&author, &base);
         let hover = self.page().hover;
         let viewport_width = self.layout_width();
         let styles = style_with(
@@ -1959,6 +2138,13 @@ impl Browser {
         if let Some(menu) = self.menu.clone() {
             self.paint_menu(canvas, &menu);
         }
+        if let Some((x, y, started)) = self.ripple {
+            let t = (started.elapsed().as_secs_f32() / 0.35).clamp(0.0, 1.0);
+            if t < 1.0 {
+                let alpha = ((1.0 - t) * 70.0) as u8;
+                canvas.fill_circle(x, y, 6.0 + t * 36.0, Color::rgba(11, 87, 208, alpha), full);
+            }
+        }
     }
 
     fn paint_menu(&self, canvas: &mut Canvas<'_>, menu: &Menu) {
@@ -2199,12 +2385,10 @@ impl Browser {
             let active = index == self.tabs.active;
             let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
             if active {
-                canvas.fill_round(*rect, colors.active, 10.0, full);
-                canvas.fill(
-                    Rect::new(rect.x, rect.bottom() - 10.0, rect.width, 11.0),
-                    colors.active,
-                    full,
-                );
+                // HorizontalTabStyleViews::GetPath for the active tab: top
+                // corners curve in, and the bottom corners scoop out to the
+                // toolbar so the tab and the toolbar are one shape.
+                canvas.fill_contours(&[active_tab_contour(*rect)], colors.active, full);
             } else if hovered {
                 canvas.fill_round(*rect, colors.hover, 10.0, full);
             } else if index > 0 && index != self.tabs.active && index - 1 != self.tabs.active {
@@ -2364,7 +2548,9 @@ impl Browser {
     ) {
         let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
         let hovered = enabled && self.hovering && rect.contains(self.cursor.0, self.cursor.1);
-        let pressed = self.ripple.is_some_and(|(x, y)| rect.contains(x, y));
+        let pressed = self.ripple.is_some_and(|(x, y, started)| {
+            rect.contains(x, y) && started.elapsed().as_millis() < 280
+        });
         if hovered || pressed {
             canvas.fill_circle(
                 rect.x + rect.width / 2.0,
@@ -2516,9 +2702,10 @@ impl Browser {
         let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
         let cx = rect.x + rect.width / 2.0;
         let cy = rect.y + rect.height / 2.0;
+        let shift = (self.opened.elapsed().as_millis() / 80) as usize;
         for index in 0..8 {
-            let angle = index as f32 / 8.0 * std::f32::consts::TAU;
-            let color = if index < 3 {
+            let angle = index as f32 / 8.0 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            let color = if (index + shift) % 8 < 3 {
                 colors.focus
             } else {
                 colors.icon_disabled

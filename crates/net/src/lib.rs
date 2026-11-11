@@ -697,7 +697,10 @@ mod tests {
 
     #[test]
     fn windows_1252_bytes_become_characters() {
-        let text = decode_text(&[0x63, 0x61, 0x66, 0xE9], Some("text/html; charset=windows-1252"));
+        let text = decode_text(
+            &[0x63, 0x61, 0x66, 0xE9],
+            Some("text/html; charset=windows-1252"),
+        );
         assert_eq!(text, "café");
         let utf8 = decode_text("বাংলা".as_bytes(), None);
         assert_eq!(utf8, "বাংলা");

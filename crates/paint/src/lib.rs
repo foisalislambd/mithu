@@ -197,17 +197,37 @@ impl Canvas<'_> {
         underline: bool,
         clip: Rect,
     ) {
+        self.text_family(
+            fonts, x, baseline, text, size, color, bold, mono, underline, "", clip,
+        );
+    }
+
+    pub fn text_family(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        clip: Rect,
+    ) {
         if text.is_empty() || color.a == 0 || size <= 0.0 {
             return;
         }
         let mut pen = x;
-        for ch in text.chars() {
+        for glyph in fonts.shape(text, size, bold, mono, family) {
             if !pen.is_finite() || pen < -100_000.0 || pen > 100_000.0 {
                 break;
             }
-            let glyph = fonts.glyph(ch, size, bold, mono);
-            let left = (pen.round() as i32).saturating_add(glyph.xmin);
-            let top = glyph_top(baseline, &glyph);
+            let left = (pen.round() as i32)
+                .saturating_add(glyph.xmin)
+                .saturating_add(glyph.x_offset.round() as i32);
+            let top = glyph_top(baseline - glyph.y_offset, &glyph);
             for row in 0..glyph.height {
                 for col in 0..glyph.width {
                     let coverage = glyph.coverage[row * glyph.width + col];
@@ -229,9 +249,34 @@ impl Canvas<'_> {
             pen += glyph.advance;
         }
         if underline {
-            let width = fonts.width(text, size, bold, mono);
+            let width = fonts.width_family(text, size, bold, mono, family);
             let y = baseline + (size * 0.12).max(1.0);
             self.fill(Rect::new(x, y, width, (size * 0.06).max(1.0)), color, clip);
+        }
+    }
+}
+
+fn stroke_polyline(
+    canvas: &mut Canvas<'_>,
+    points: &[(f32, f32)],
+    width: f32,
+    color: Color,
+    clip: Rect,
+) {
+    if points.len() < 2 || color.a == 0 {
+        return;
+    }
+    let radius = (width * 0.5).max(0.6);
+    for pair in points.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        let steps = (len / radius.max(0.5)).ceil().max(1.0) as i32;
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            canvas.fill_circle(x0 + dx * t, y0 + dy * t, radius, color, clip);
         }
     }
 }
@@ -290,6 +335,26 @@ fn paint_box_with_opacity(
         }
     } else if background.a > 0 {
         canvas.fill_round(screen, background, box_.border_radius, clip);
+    }
+    let shape_clip = intersect(clip, screen).unwrap_or(clip);
+    for shape in &box_.shapes {
+        let moved: Vec<(f32, f32)> = shape
+            .points
+            .iter()
+            .map(|(x, y)| (screen.x + x, screen.y + y))
+            .collect();
+        if let Some(fill) = shape.fill {
+            canvas.fill_contours(&[moved.clone()], scale_alpha(fill, opacity), shape_clip);
+        }
+        if let Some(stroke) = shape.stroke {
+            stroke_polyline(
+                canvas,
+                &moved,
+                shape.stroke_width,
+                scale_alpha(stroke, opacity),
+                shape_clip,
+            );
+        }
     }
     if let Some(bitmap) = &box_.image {
         let left = box_.borders[3].max(0.0);
@@ -382,7 +447,7 @@ fn paint_box_with_opacity(
             line.baseline - scroll + origin_y
         };
         for fragment in &line.fragments {
-            canvas.text(
+            canvas.text_family(
                 fonts,
                 fragment.x,
                 baseline,
@@ -392,6 +457,7 @@ fn paint_box_with_opacity(
                 fragment.bold,
                 fragment.mono,
                 fragment.underline,
+                &fragment.family,
                 child_clip,
             );
         }

@@ -9,7 +9,10 @@ publish.workspace = true
 description = "Font loading and text measurement"
 
 [dependencies]
+flate2 = "1.1.11"
 fontdue = "0.9"
+oxifont-webfont = { version = "0.2.2", features = ["woff2"] }
+rustybuzz = "0.20.1"
 
 [lints]
 workspace = true
