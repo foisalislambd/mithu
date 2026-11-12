@@ -206,7 +206,23 @@ fn decode_windows_1252(body: &[u8]) -> String {
 }
 
 pub fn get(url: &Url) -> Result<Response, NetError> {
-    fetch("GET", url, None, &[], 0, CacheMode::Use, None, true)
+    fetch("GET", url, None, &[], 0, CacheMode::Use, None, true, None)
+}
+
+/// A CORS `fetch` or XHR. `origin` is the page's serialized origin, which
+/// Chromium sends so the server can echo `Access-Control-Allow-Origin`.
+pub fn get_with_origin(url: &Url, initiator_host: &str, origin: &str) -> Result<Response, NetError> {
+    fetch(
+        "GET",
+        url,
+        None,
+        &[],
+        0,
+        CacheMode::Use,
+        Some(initiator_host),
+        false,
+        Some(origin),
+    )
 }
 
 /// GET issued by a document. `initiator_host` is that document's host, so
@@ -223,6 +239,7 @@ pub fn navigate_from(url: &Url, initiator_host: &str) -> Result<Response, NetErr
         CacheMode::Use,
         Some(initiator_host),
         true,
+        None,
     )
 }
 
@@ -236,12 +253,13 @@ pub fn get_from(url: &Url, initiator_host: &str) -> Result<Response, NetError> {
         CacheMode::Use,
         Some(initiator_host),
         false,
+        None,
     )
 }
 
 /// GET that ignores a fresh cache entry. The reload button uses this.
 pub fn reload(url: &Url) -> Result<Response, NetError> {
-    fetch("GET", url, None, &[], 0, CacheMode::Bypass, None, true)
+    fetch("GET", url, None, &[], 0, CacheMode::Bypass, None, true, None)
 }
 
 pub fn post(url: &Url, content_type: &str, body: &[u8]) -> Result<Response, NetError> {
@@ -254,6 +272,7 @@ pub fn post(url: &Url, content_type: &str, body: &[u8]) -> Result<Response, NetE
         CacheMode::Bypass,
         None,
         true,
+        None,
     )
 }
 
@@ -266,6 +285,7 @@ fn fetch(
     cache_mode: CacheMode,
     initiator: Option<&str>,
     top_level: bool,
+    origin: Option<&str>,
 ) -> Result<Response, NetError> {
     if redirects > 8 {
         return Err(NetError::TooManyRedirects);
@@ -306,7 +326,7 @@ fn fetch(
         })
     });
     let port = url.effective_port().unwrap_or(80);
-    let request = build_request(method, url, content_type, body, cookie.as_deref());
+    let request = build_request(method, url, content_type, body, cookie.as_deref(), origin);
     let mut parsed = if url.scheme == "https" {
         https_exchange(&url.host, port, &request, method, url)?
     } else {
@@ -335,6 +355,7 @@ fn fetch(
                 cache_mode,
                 initiator,
                 top_level,
+                origin,
             );
         }
         return fetch(
@@ -346,6 +367,7 @@ fn fetch(
             cache_mode,
             initiator,
             top_level,
+            origin,
         );
     }
     let response = Response {
@@ -372,6 +394,7 @@ fn build_request(
     content_type: Option<&str>,
     body: &[u8],
     cookie: Option<&str>,
+    origin: Option<&str>,
 ) -> Vec<u8> {
     let host = match url.port {
         Some(port) if Url::default_port(&url.scheme) != Some(port) => {
@@ -392,6 +415,11 @@ fn build_request(
     if let Some(cookie) = cookie {
         head.push_str("Cookie: ");
         head.push_str(cookie);
+        head.push_str("\r\n");
+    }
+    if let Some(origin) = origin {
+        head.push_str("Origin: ");
+        head.push_str(origin);
         head.push_str("\r\n");
     }
     head.push_str("\r\n");
@@ -453,7 +481,8 @@ fn https_once(
     let mut tls = rustls::Stream::new(&mut connection, &mut socket);
     if allow_h2 && alpn.as_deref() == Some(b"h2".as_slice()) {
         let cookie = header_value_from_request(request, "cookie");
-        return http2::roundtrip(&mut tls, method, url, cookie.as_deref())
+        let origin = header_value_from_request(request, "origin");
+        return http2::roundtrip(&mut tls, method, url, cookie.as_deref(), origin.as_deref())
             .map(|message| RawHttp {
                 status: message.status,
                 headers: message.headers,

@@ -1117,6 +1117,12 @@ fn collect_node(
             let style = style_of(styles, id);
             let href = own_href(doc, id).or(href);
             let display = effective_display(doc, styles, id);
+            // An inline image is a replaced box. Walking its (empty) children
+            // would drop it, so the line beside an infobox paints through it.
+            let replaced = matches!(
+                doc.element_name(id),
+                Some("img" | "video" | "canvas" | "iframe" | "svg" | "input" | "textarea" | "select")
+            );
             if matches!(
                 display,
                 Display::Block
@@ -1125,7 +1131,8 @@ fn collect_node(
                     | Display::Flex
                     | Display::InlineFlex
                     | Display::Grid
-            ) || synthetic_text(doc, id).is_some()
+            ) || replaced
+                || synthetic_text(doc, id).is_some()
             {
                 let Some(layout) = layout_node(
                     doc, styles, measure, images, id, 0.0, 0.0, available, href, false, view,
@@ -3512,6 +3519,23 @@ mod tests {
             go.rect.width > 80.0,
             "border follows the label, width {}",
             go.rect.width
+        );
+    }
+
+    #[test]
+    fn an_inline_image_lifts_the_line() {
+        let doc = parse_html(
+            r#"<p id="p">Hi <img id="pic" width="40" height="80" alt=""> tail</p>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 200.0, &NaiveMetrics, &HashMap::new());
+        let pic = find(&tree.root, doc.get_element_by_id("pic").unwrap()).unwrap();
+        let paragraph = find(&tree.root, doc.get_element_by_id("p").unwrap()).unwrap();
+        assert!(
+            pic.rect.height >= 80.0 && paragraph.rect.height >= 80.0,
+            "image {} paragraph {}",
+            pic.rect.height,
+            paragraph.rect.height
         );
     }
 

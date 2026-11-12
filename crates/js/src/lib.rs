@@ -752,6 +752,8 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     let performance = performance_object(context)?;
     context.register_global_property(js_string!("performance"), performance, flags)?;
     context.register_global_property(js_string!("navigator"), navigator, flags)?;
+    let screen = screen_object(context)?;
+    context.register_global_property(js_string!("screen"), screen, flags)?;
     context.register_global_property(js_string!("location"), location.clone(), flags)?;
     if let Ok(document) = context.global_object().get(js_string!("document"), context)
         && let Some(document) = document.as_object()
@@ -846,6 +848,7 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     }
     let _ = wire_document_prototype(context);
     let _ = wire_prototype_chain(context);
+    let _ = install_group(context);
     Ok(())
 }
 
@@ -966,6 +969,127 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     define_accessor(&proto, context, "previousSibling", previous_sibling, None)?;
     define_accessor(&proto, context, "childNodes", child_nodes, None)?;
     Ok(())
+}
+
+fn install_group(context: &mut Context) -> JsResult<()> {
+    let array = context.global_object().get(js_string!("Array"), context)?;
+    if let Some(array) = array.as_object() {
+        let proto = array.get(js_string!("prototype"), context)?;
+        if let Some(proto) = proto.as_object() {
+            let group = native(context, "group", 1, group_array);
+            let property = boa_engine::property::PropertyDescriptor::builder()
+                .value(group)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true);
+            proto.define_property_or_throw(js_string!("group"), property, context)?;
+        }
+    }
+    let object = context.global_object().get(js_string!("Object"), context)?;
+    if let Some(object) = object.as_object() {
+        let group_by = native(context, "groupBy", 2, group_by_object);
+        object.set(js_string!("groupBy"), group_by, true, context)?;
+    }
+    let map = context.global_object().get(js_string!("Map"), context)?;
+    if let Some(map) = map.as_object() {
+        let group_by = native(context, "groupBy", 2, group_by_map);
+        map.set(js_string!("groupBy"), group_by, true, context)?;
+    }
+    Ok(())
+}
+
+fn group_array(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let callback = args.first().cloned().unwrap_or(JsValue::undefined());
+    let this_arg = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    groups_to_object(this, &callback, &this_arg, context)
+}
+
+fn group_by_object(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let items = args.first().cloned().unwrap_or(JsValue::undefined());
+    let callback = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    let this_arg = args.get(2).cloned().unwrap_or(JsValue::undefined());
+    groups_to_object(&items, &callback, &this_arg, context)
+}
+
+fn group_by_map(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let items = args.first().cloned().unwrap_or(JsValue::undefined());
+    let callback = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    let this_arg = args.get(2).cloned().unwrap_or(JsValue::undefined());
+    let groups = collect_groups(&items, &callback, &this_arg, context)?;
+    let ctor = context.global_object().get(js_string!("Map"), context)?;
+    let Some(ctor) = ctor.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let map = ctor.construct(&[], None, context)?;
+    let set = map.get(js_string!("set"), context)?;
+    let Some(set) = set.as_object() else {
+        return Ok(JsValue::from(map));
+    };
+    for (key, items) in groups {
+        let array = JsValue::from(JsArray::from_iter(items, context));
+        set.call(&JsValue::from(map.clone()), &[key, array], context)?;
+    }
+    Ok(JsValue::from(map))
+}
+
+fn groups_to_object(
+    items: &JsValue,
+    callback: &JsValue,
+    this_arg: &JsValue,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let groups = collect_groups(items, callback, this_arg, context)?;
+    let object = ObjectInitializer::new(context).build();
+    for (key, values) in groups {
+        let name = key.to_string(context)?;
+        let array = JsValue::from(JsArray::from_iter(values, context));
+        object.set(name, array, true, context)?;
+    }
+    Ok(object.into())
+}
+
+fn collect_groups(
+    items: &JsValue,
+    callback: &JsValue,
+    this_arg: &JsValue,
+    context: &mut Context,
+) -> JsResult<Vec<(JsValue, Vec<JsValue>)>> {
+    let Some(callback) = callback.as_object().filter(|function| function.is_callable()) else {
+        return Err(JsNativeError::typ()
+            .with_message("group callback must be a function")
+            .into());
+    };
+    let Some(object) = items.as_object() else {
+        return Ok(Vec::new());
+    };
+    let length = object
+        .get(js_string!("length"), context)?
+        .as_number()
+        .unwrap_or(0.0);
+    let length = if length.is_finite() && length > 0.0 {
+        length as usize
+    } else {
+        0
+    };
+    let mut groups: Vec<(String, JsValue, Vec<JsValue>)> = Vec::new();
+    for index in 0..length {
+        let item = object.get(index as u32, context)?;
+        let key = callback.call(
+            this_arg,
+            &[item.clone(), JsValue::from(index as u32), items.clone()],
+            context,
+        )?;
+        let name = key.to_string(context)?.to_std_string_lossy();
+        if let Some(group) = groups.iter_mut().find(|(existing, _, _)| existing == &name) {
+            group.2.push(item);
+        } else {
+            groups.push((name, key, vec![item]));
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .map(|(_, key, values)| (key, values))
+        .collect())
 }
 
 fn install_canvas_methods(context: &mut Context) -> JsResult<()> {
@@ -1288,6 +1412,9 @@ fn console_object(context: &mut Context) -> JsResult<JsObject> {
 
 fn navigator_object(context: &mut Context) -> JsResult<JsObject> {
     let languages = JsArray::from_iter([JsValue::from(js_string!("en"))], context);
+    let mime_types = plugin_array(context)?;
+    let plugins = plugin_array(context)?;
+    let ua_data = user_agent_data(context)?;
     let mut object = ObjectInitializer::new(context);
     object.property(js_string!("userAgent"), js_string!("Mithu"), ATTR);
     object.property(js_string!("platform"), js_string!("Linux x86_64"), ATTR);
@@ -1296,11 +1423,80 @@ fn navigator_object(context: &mut Context) -> JsResult<JsObject> {
     object.property(js_string!("doNotTrack"), JsValue::null(), ATTR);
     object.property(js_string!("cookieEnabled"), JsValue::from(true), ATTR);
     object.property(js_string!("onLine"), JsValue::from(true), ATTR);
+    object.property(js_string!("mimeTypes"), mime_types, ATTR);
+    object.property(js_string!("plugins"), plugins, ATTR);
+    object.property(js_string!("userAgentData"), ua_data, ATTR);
+    object.property(js_string!("vendor"), js_string!(""), ATTR);
+    object.property(js_string!("maxTouchPoints"), JsValue::from(0), ATTR);
     object.function(
         NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::from(true))),
         js_string!("sendBeacon"),
         1,
     );
+    Ok(object.build())
+}
+
+fn plugin_array(context: &mut Context) -> JsResult<JsObject> {
+    let mut object = ObjectInitializer::new(context);
+    object
+        .property(js_string!("length"), JsValue::from(0), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::null())),
+            js_string!("item"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::null())),
+            js_string!("namedItem"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("refresh"),
+            0,
+        );
+    Ok(object.build())
+}
+
+fn user_agent_data(context: &mut Context) -> JsResult<JsObject> {
+    let brand = ObjectInitializer::new(context)
+        .property(js_string!("brand"), js_string!("Mithu"), ATTR)
+        .property(js_string!("version"), js_string!("0"), ATTR)
+        .build();
+    let brands = JsArray::from_iter([JsValue::from(brand)], context);
+    let mut object = ObjectInitializer::new(context);
+    object
+        .property(js_string!("brands"), brands, ATTR)
+        .property(js_string!("mobile"), JsValue::from(false), ATTR)
+        .property(js_string!("platform"), js_string!("Linux"), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(ua_high_entropy),
+            js_string!("getHighEntropyValues"),
+            1,
+        );
+    Ok(object.build())
+}
+
+fn ua_high_entropy(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let data = user_agent_data(context)?;
+    data.set(js_string!("architecture"), js_string!("x86"), true, context)?;
+    data.set(js_string!("bitness"), js_string!("64"), true, context)?;
+    data.set(js_string!("model"), js_string!(""), true, context)?;
+    data.set(js_string!("platformVersion"), js_string!(""), true, context)?;
+    Ok(JsPromise::resolve(data, context)?.into())
+}
+
+fn screen_object(context: &mut Context) -> JsResult<JsObject> {
+    let mut object = ObjectInitializer::new(context);
+    object
+        .property(js_string!("width"), JsValue::from(1280), ATTR)
+        .property(js_string!("height"), JsValue::from(800), ATTR)
+        .property(js_string!("availWidth"), JsValue::from(1280), ATTR)
+        .property(js_string!("availHeight"), JsValue::from(800), ATTR)
+        .property(js_string!("colorDepth"), JsValue::from(24), ATTR)
+        .property(js_string!("pixelDepth"), JsValue::from(24), ATTR)
+        .property(js_string!("top"), JsValue::from(0), ATTR)
+        .property(js_string!("left"), JsValue::from(0), ATTR);
     Ok(object.build())
 }
 
@@ -2714,7 +2910,11 @@ fn get_computed_style(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let id = args.first().and_then(node_of).ok_or_else(type_error)?;
+    let properties = computed_properties(id, context);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id: id.0 }, context);
+    for (name, value) in &properties {
+        object.property(js_string!(name.clone()), js_string!(value.clone()), ATTR);
+    }
     object.function(
         NativeFunction::from_fn_ptr(computed_property),
         js_string!("getPropertyValue"),
@@ -2723,27 +2923,134 @@ fn get_computed_style(
     Ok(object.build().into())
 }
 
+fn computed_properties(id: NodeId, context: &mut Context) -> Vec<(String, String)> {
+    let Ok(host) = host(context) else {
+        return Vec::new();
+    };
+    let doc = host.doc.borrow();
+    let css = doc.stylesheets.join("\n");
+    let styles = mithu_style::style_document(&doc, &css);
+    let style = styles
+        .get(id.0)
+        .cloned()
+        .unwrap_or_else(mithu_style::ComputedStyle::initial);
+    let font = format_px(style.font_size);
+    let display = match style.display {
+        mithu_style::Display::Inline => "inline",
+        mithu_style::Display::Block => "block",
+        mithu_style::Display::InlineBlock => "inline-block",
+        mithu_style::Display::ListItem => "list-item",
+        mithu_style::Display::Flex => "flex",
+        mithu_style::Display::InlineFlex => "inline-flex",
+        mithu_style::Display::Grid => "grid",
+        mithu_style::Display::Contents => "contents",
+        mithu_style::Display::None => "none",
+    };
+    let float_side = match style.float {
+        mithu_style::FloatSide::None => "none",
+        mithu_style::FloatSide::Left => "left",
+        mithu_style::FloatSide::Right => "right",
+    };
+    let position = match style.position {
+        mithu_style::Position::Static => "static",
+        mithu_style::Position::Relative => "relative",
+        mithu_style::Position::Absolute => "absolute",
+        mithu_style::Position::Fixed => "fixed",
+        mithu_style::Position::Sticky => "sticky",
+    };
+    vec![
+        ("fontSize".into(), font.clone()),
+        ("font-size".into(), font),
+        ("fontFamily".into(), style.font_family.clone()),
+        ("font-family".into(), style.font_family),
+        ("fontWeight".into(), if style.bold { "700" } else { "400" }.into()),
+        ("font-weight".into(), if style.bold { "700" } else { "400" }.into()),
+        ("display".into(), display.into()),
+        ("float".into(), float_side.into()),
+        ("cssFloat".into(), float_side.into()),
+        ("position".into(), position.into()),
+        ("color".into(), format_color(style.color.r, style.color.g, style.color.b, style.color.a)),
+        (
+            "backgroundColor".into(),
+            format_color(style.background.r, style.background.g, style.background.b, style.background.a),
+        ),
+        (
+            "background-color".into(),
+            format_color(style.background.r, style.background.g, style.background.b, style.background.a),
+        ),
+        ("width".into(), format_length(style.width)),
+        ("height".into(), format_length(style.height)),
+        ("opacity".into(), format!("{:.3}", style.opacity)),
+        ("visibility".into(), if style.visible { "visible" } else { "hidden" }.into()),
+        ("lineHeight".into(), match style.line_height {
+            mithu_style::LineHeight::Normal => "normal".into(),
+            mithu_style::LineHeight::Px(value) => format_px(value),
+            mithu_style::LineHeight::Number(value) => format!("{value}"),
+            mithu_style::LineHeight::Percent(value) => format!("{value}%"),
+        }),
+    ]
+}
+
+fn format_px(value: f32) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}px")
+    } else {
+        format!("{value}px")
+    }
+}
+
+fn format_length(length: mithu_style::Length) -> String {
+    match length {
+        mithu_style::Length::Auto => "auto".into(),
+        mithu_style::Length::Px(value) => format_px(value),
+        mithu_style::Length::Percent(value) => format!("{value}%"),
+        mithu_style::Length::Em(value) => format!("{value}em"),
+        mithu_style::Length::Rem(value) => format!("{value}rem"),
+        mithu_style::Length::Vw(value) => format!("{value}vw"),
+        mithu_style::Length::Vh(value) => format!("{value}vh"),
+        mithu_style::Length::Calc { percent, px, .. } => format!("calc({percent}% + {px}px)"),
+    }
+}
+
+fn format_color(r: u8, g: u8, b: u8, a: u8) -> String {
+    if a == 0 {
+        "rgba(0, 0, 0, 0)".into()
+    } else if a == 255 {
+        format!("rgb({r}, {g}, {b})")
+    } else {
+        format!("rgba({r}, {g}, {b}, {:.3})", a as f32 / 255.0)
+    }
+}
+
 fn computed_property(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let host = host(context)?;
     let Some(object) = this.as_object() else {
         return Ok(js_string!("").into());
     };
-    let Some(key) = object.downcast_ref::<NodeKey>() else {
-        return Ok(js_string!("").into());
-    };
-    let name = arg_string(args, 0, context)?;
-    let style = host
-        .doc
-        .borrow()
-        .attr(NodeId(key.id), "style")
-        .unwrap_or("")
-        .to_string();
-    let value = parse_declarations(&style)
-        .into_iter()
-        .find(|declaration| declaration.name.eq_ignore_ascii_case(&name))
-        .map(|declaration| declaration.value)
-        .unwrap_or_default();
-    Ok(js_string!(value).into())
+    let name = arg_string(args, 0, context).unwrap_or_default();
+    let camel = kebab_to_camel(&name);
+    for candidate in [name.as_str(), camel.as_str()] {
+        let value = object.get(js_string!(candidate.to_string()), context)?;
+        if value.is_string() {
+            return Ok(value);
+        }
+    }
+    Ok(js_string!("").into())
+}
+
+fn kebab_to_camel(name: &str) -> String {
+    let mut out = String::new();
+    let mut upper = false;
+    for ch in name.chars() {
+        if ch == '-' {
+            upper = true;
+        } else if upper {
+            out.extend(ch.to_uppercase());
+            upper = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn queue_microtask(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -4070,19 +4377,33 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
             .ok()
             .map(|page| page.host)
             .filter(|host| !host.is_empty());
-        let response = if let Some(host) = initiator.as_deref() {
+        let page = mithu_url::Url::parse(&location).ok();
+        let origin = page.as_ref().map(serialized_origin);
+        let response = if let (Some(host), Some(origin)) = (initiator.as_deref(), origin.as_deref())
+        {
+            mithu_net::get_with_origin(&url, host, origin)
+        } else if let Some(host) = initiator.as_deref() {
             mithu_net::get_from(&url, host)
         } else {
             mithu_net::get(&url)
         };
+        let mode = fetch_mode(args, context);
         response
             .map_err(|error| error.to_string())
             .and_then(|response| {
-                if let Some(page) = mithu_url::Url::parse(&location).ok()
-                    && cross_origin(&page, &response.url)
-                    && !cors_allows(&page, response.header("access-control-allow-origin"))
+                if let Some(page) = page.as_ref()
+                    && cross_origin(page, &response.url)
+                    && mode != "no-cors"
+                    && !cors_allows(page, response.header("access-control-allow-origin"))
                 {
-                    return Err("cross-origin fetch was blocked".to_string());
+                    return Err(format!(
+                        "cross-origin fetch was blocked ({})",
+                        response.url
+                    ));
+                }
+                if mode == "no-cors" && page.as_ref().is_some_and(|page| cross_origin(page, &response.url))
+                {
+                    return Ok((0, false, response.url.to_string(), String::new(), String::new()));
                 }
                 Ok((
                     response.status,
@@ -4108,7 +4429,20 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
 }
 
 pub(crate) fn cross_origin(page: &mithu_url::Url, target: &mithu_url::Url) -> bool {
-    page.scheme != target.scheme || page.host != target.host || page.port != target.port
+    page.scheme != target.scheme
+        || !page.host.eq_ignore_ascii_case(&target.host)
+        || page.effective_port() != target.effective_port()
+}
+
+/// Chromium's serialized origin: scheme, host, and a port only when it is not
+/// the scheme's default.
+pub(crate) fn serialized_origin(url: &mithu_url::Url) -> String {
+    match url.port {
+        Some(port) if mithu_url::Url::default_port(&url.scheme) != Some(port) => {
+            format!("{}://{}:{port}", url.scheme, url.host)
+        }
+        _ => format!("{}://{}", url.scheme, url.host),
+    }
 }
 
 pub(crate) fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
@@ -4118,8 +4452,18 @@ pub(crate) fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
     if allow == "*" {
         return true;
     }
-    let port = page.port.map(|port| format!(":{port}")).unwrap_or_default();
-    allow == format!("{}://{}{port}", page.scheme, page.host)
+    allow == serialized_origin(page)
+}
+
+fn fetch_mode(args: &[JsValue], context: &mut Context) -> String {
+    let Some(init) = args.get(1).and_then(JsValue::as_object) else {
+        return "cors".to_string();
+    };
+    init.get(js_string!("mode"), context)
+        .ok()
+        .and_then(|value| value.as_string())
+        .map(|value| value.to_std_string_lossy())
+        .unwrap_or_else(|| "cors".to_string())
 }
 
 pub(crate) fn resolve_request(location: &str, spec: &str) -> Result<mithu_url::Url, String> {
@@ -6018,6 +6362,23 @@ mod tests {
               var range = new Range();
               range.selectNodeContents(document.body);
               if (!range.getBoundingClientRect() || range.getClientRects().length !== 1) document.title = "range";
+              if (getComputedStyle(document.documentElement).fontSize.replace("px","") !== "16") document.title = "font";
+              if (navigator.mimeTypes.length !== 0 || navigator.plugins.length !== 0) document.title = "plugins";
+              if (!screen.width || !navigator.userAgentData || navigator.userAgentData.mobile !== false) document.title = "screen";
+              var grouped = Object.groupBy([0,1,2,3], function (n) { return n % 2 ? "odd" : "even"; });
+              if (!grouped.even || grouped.even.length !== 2 || [].group(function (n) { return n; }).length) document.title = "group";
+              var described = Object.getOwnPropertyDescriptor({ email() { return 1; } }, "email");
+              if (!described || typeof described.value !== "function") document.title = "desc";
+              var inherited = [];
+              for (var key in {}) inherited.push(key);
+              var methods = { email() { return 1; }, url() { return 2; } };
+              var missing = [];
+              for (var key2 in methods) {
+                if (!Object.getOwnPropertyDescriptor(methods, key2)) missing.push(key2);
+              }
+              if (inherited.length || missing.length || typeof WheelEvent !== "function") {
+                document.title = "forin:" + inherited.join(",") + "/" + missing.join(",") + ":" + typeof WheelEvent;
+              }
               if (document.title === "") document.title = "ok";
             </script></body>"#,
         );

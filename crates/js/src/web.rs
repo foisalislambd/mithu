@@ -2,12 +2,12 @@
 //! `XMLHttpRequest`, `MutationObserver`, and `history`.
 
 use boa_engine::class::{Class, ClassBuilder};
-use boa_engine::object::ObjectInitializer;
+use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
 use boa_engine::object::builtins::{JsArray, JsPromise};
 use boa_engine::property::Attribute;
 use boa_engine::{
-    Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsValue, NativeFunction, Trace,
-    js_string,
+    Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
+    Trace, js_string,
 };
 
 use crate::{arg_string, cors_allows, cross_origin, host, native, resolve_request};
@@ -47,12 +47,30 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("HTMLImageElement"), image, Attribute::all())?;
     for name in [
         "MouseEvent",
+        "WheelEvent",
         "KeyboardEvent",
         "FocusEvent",
         "PointerEvent",
         "InputEvent",
         "UIEvent",
         "TouchEvent",
+        "ErrorEvent",
+    ] {
+        let constructor = FunctionObjectBuilder::new(
+            context.realm(),
+            NativeFunction::from_fn_ptr(construct_event),
+        )
+        .name(JsString::from(name))
+        .length(1)
+        .constructor(true)
+        .build();
+        context.register_global_property(
+            js_string!(name),
+            constructor,
+            Attribute::WRITABLE.union(Attribute::CONFIGURABLE),
+        )?;
+    }
+    for name in [
         "CharacterData",
         "Comment",
         "CDATASection",
@@ -61,7 +79,6 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
         "Window",
         "SVGElement",
         "CustomElementRegistry",
-        "ErrorEvent",
         "HTMLUnknownElement",
         "NodeFilter",
         "TreeWalker",
@@ -639,6 +656,17 @@ impl Class for TextDecoderHost {
     }
 }
 
+fn construct_event(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let event = context.global_object().get(js_string!("Event"), context)?;
+    let Some(constructor) = event.as_constructor() else {
+        return Ok(JsValue::undefined());
+    };
+    let target = this.as_object();
+    Ok(constructor
+        .construct(args, target.as_ref(), context)?
+        .into())
+}
+
 fn text_decode(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let Some(value) = args.first() else {
         return Ok(js_string!("").into());
@@ -877,8 +905,11 @@ fn xhr_roundtrip(method: &str, spec: &str, body: &str, context: &mut Context) ->
         return (0, String::new());
     }
     let initiator = mithu_url::Url::parse(&location).ok();
+    let origin = initiator.as_ref().map(super::serialized_origin);
     let result = if method == "POST" {
         mithu_net::post(&url, "application/x-www-form-urlencoded", body.as_bytes())
+    } else if let (Some(page), Some(origin)) = (initiator.as_ref(), origin.as_deref()) {
+        mithu_net::get_with_origin(&url, &page.host, origin)
     } else if let Some(page) = initiator.as_ref() {
         mithu_net::get_from(&url, &page.host)
     } else {
