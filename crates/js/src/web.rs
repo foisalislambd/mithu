@@ -2,12 +2,12 @@
 //! `XMLHttpRequest`, `MutationObserver`, and `history`.
 
 use boa_engine::class::{Class, ClassBuilder};
-use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
 use boa_engine::object::builtins::{JsArray, JsPromise};
+use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
 use boa_engine::property::Attribute;
 use boa_engine::{
-    Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
-    Trace, js_string,
+    Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue,
+    NativeFunction, Trace, js_string,
 };
 
 use crate::{arg_string, cors_allows, cross_origin, host, native, resolve_request};
@@ -1299,13 +1299,20 @@ fn observer_take(this: &JsValue, _args: &[JsValue], context: &mut Context) -> Js
 }
 
 pub(crate) fn deliver_mutations(context: &mut Context) -> JsResult<()> {
-    let records = {
-        let host = host(context)?;
-        std::mem::take(&mut host.doc.borrow_mut().mutations)
-    };
-    if records.is_empty() {
-        return Ok(());
+    for _ in 0..16 {
+        let records = {
+            let host = host(context)?;
+            std::mem::take(&mut host.doc.borrow_mut().mutations)
+        };
+        if records.is_empty() {
+            return Ok(());
+        }
+        deliver_one_batch(&records, context)?;
     }
+    Ok(())
+}
+
+fn deliver_one_batch(records: &[mithu_dom::DomMutation], context: &mut Context) -> JsResult<()> {
     let list = context
         .global_object()
         .get(js_string!("__mithuObservers"), context)?;
@@ -1354,7 +1361,11 @@ pub(crate) fn deliver_mutations(context: &mut Context) -> JsResult<()> {
             .as_object()
             .filter(|function| function.is_callable())
         {
-            let _ = callback.call(&observer, &[array, observer.clone()], context);
+            if let Err(error) = callback.call(&observer, &[array, observer.clone()], context)
+                && std::env::var_os("MITHU_JS_DEBUG").is_some()
+            {
+                eprintln!("mutation observer: {error}");
+            }
         }
     }
     Ok(())
@@ -2064,7 +2075,12 @@ impl Class for ElementHost {
             let context = class.context();
             native(context, "set innerHTML", 1, super::set_html)
         };
-        class.accessor(js_string!("innerHTML"), Some(html_get), Some(html_set), ATTR);
+        class.accessor(
+            js_string!("innerHTML"),
+            Some(html_get),
+            Some(html_set),
+            ATTR,
+        );
         Ok(())
     }
 
@@ -2475,9 +2491,7 @@ fn range_clone(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsR
     let Some(constructor) = constructor.as_object() else {
         return Ok(JsValue::undefined());
     };
-    constructor
-        .construct(&[], None, context)
-        .map(JsValue::from)
+    constructor.construct(&[], None, context).map(JsValue::from)
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]

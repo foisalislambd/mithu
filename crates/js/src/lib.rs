@@ -3372,6 +3372,13 @@ fn define_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     let ctor = args.get(1).cloned().unwrap_or(JsValue::undefined());
     let bag = custom_registry(context)?;
     bag.set(js_string!(name.clone()), ctor.clone(), true, context)?;
+    if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+        static DEFINED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = DEFINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n < 40 || name.contains("ytd-") || name.contains("app") {
+            eprintln!("customElements.define {name}");
+        }
+    }
     resolve_when_defined(&name, &ctor, context)?;
     if let Ok(host) = host(context) {
         let ids: Vec<usize> = host
@@ -3828,7 +3835,17 @@ fn set_text(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let value = arg_string(args, 0, context)?;
+    let character = {
+        let doc = host.doc.borrow();
+        matches!(
+            doc.node(id).data,
+            mithu_dom::NodeData::Text(_) | mithu_dom::NodeData::Comment(_)
+        )
+    };
     host.doc.borrow_mut().set_text_content(id, &value);
+    if character {
+        note_mutation(context, id, "characterData", None)?;
+    }
     Ok(JsValue::undefined())
 }
 
@@ -6807,6 +6824,24 @@ mod tests {
         let session = Session::open(doc, |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
         assert_eq!(session.document().title, "yes");
+    }
+
+    #[test]
+    fn a_text_mutation_reaches_the_observer() {
+        let doc = parse_html(
+            r#"<body><script>
+              var node = document.createTextNode("a");
+              document.body.appendChild(node);
+              var observer = new MutationObserver(function (records) {
+                document.title = records.length && records[0].type === "characterData" ? "ok" : "bad";
+              });
+              observer.observe(node, { characterData: true });
+              node.data = "b";
+            </script></body>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "ok");
     }
 
     #[test]
