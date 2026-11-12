@@ -1068,7 +1068,10 @@ fn collect_groups(
     this_arg: &JsValue,
     context: &mut Context,
 ) -> JsResult<Vec<(JsValue, Vec<JsValue>)>> {
-    let Some(callback) = callback.as_object().filter(|function| function.is_callable()) else {
+    let Some(callback) = callback
+        .as_object()
+        .filter(|function| function.is_callable())
+    else {
         return Err(JsNativeError::typ()
             .with_message("group callback must be a function")
             .into());
@@ -1209,7 +1212,12 @@ fn canvas_2d(context: &mut Context) -> JsResult<JsObject> {
     Ok(object.build())
 }
 
-fn define_hidden(proto: &JsObject, context: &mut Context, name: &str, value: JsValue) -> JsResult<()> {
+fn define_hidden(
+    proto: &JsObject,
+    context: &mut Context,
+    name: &str,
+    value: JsValue,
+) -> JsResult<()> {
     let property = boa_engine::property::PropertyDescriptor::builder()
         .value(value)
         .writable(true)
@@ -1262,7 +1270,13 @@ const LANGUAGE_EXTRAS: &str = r#"
   var nativeToString = Function.prototype.toString;
   Function.prototype.toString = function () {
     var text = nativeToString.call(this);
-    if (text === "function () { [native code] }") return "class { }";
+    // Boa prints a class with no saved source as a native function.
+    // Only anonymous classes get the class form, so host methods such
+    // as attachShadow still contain "[native code]".
+    if (text === "function () { [native code] }" && this.name === "") {
+      var desc = Object.getOwnPropertyDescriptor(this, "prototype");
+      if (desc && desc.writable === false && desc.configurable === false) return "class { }";
+    }
     return text;
   };
 })();
@@ -2418,9 +2432,9 @@ fn get_element_by_id(
     // be the one in the document. Return the first connected match.
     let found = {
         let doc = host.doc.borrow();
-        (0..doc.nodes.len()).map(NodeId).find(|node| {
-            doc.attr(*node, "id") == Some(id.as_str()) && doc.is_connected(*node)
-        })
+        (0..doc.nodes.len())
+            .map(NodeId)
+            .find(|node| doc.attr(*node, "id") == Some(id.as_str()) && doc.is_connected(*node))
     };
     match found {
         Some(node) => Ok(element_value(node.0, context)),
@@ -3188,31 +3202,56 @@ fn computed_properties(id: NodeId, context: &mut Context) -> Vec<(String, String
         ("font-size".into(), font),
         ("fontFamily".into(), style.font_family.clone()),
         ("font-family".into(), style.font_family),
-        ("fontWeight".into(), if style.bold { "700" } else { "400" }.into()),
-        ("font-weight".into(), if style.bold { "700" } else { "400" }.into()),
+        (
+            "fontWeight".into(),
+            if style.bold { "700" } else { "400" }.into(),
+        ),
+        (
+            "font-weight".into(),
+            if style.bold { "700" } else { "400" }.into(),
+        ),
         ("display".into(), display.into()),
         ("float".into(), float_side.into()),
         ("cssFloat".into(), float_side.into()),
         ("position".into(), position.into()),
-        ("color".into(), format_color(style.color.r, style.color.g, style.color.b, style.color.a)),
+        (
+            "color".into(),
+            format_color(style.color.r, style.color.g, style.color.b, style.color.a),
+        ),
         (
             "backgroundColor".into(),
-            format_color(style.background.r, style.background.g, style.background.b, style.background.a),
+            format_color(
+                style.background.r,
+                style.background.g,
+                style.background.b,
+                style.background.a,
+            ),
         ),
         (
             "background-color".into(),
-            format_color(style.background.r, style.background.g, style.background.b, style.background.a),
+            format_color(
+                style.background.r,
+                style.background.g,
+                style.background.b,
+                style.background.a,
+            ),
         ),
         ("width".into(), format_length(style.width)),
         ("height".into(), format_length(style.height)),
         ("opacity".into(), format!("{:.3}", style.opacity)),
-        ("visibility".into(), if style.visible { "visible" } else { "hidden" }.into()),
-        ("lineHeight".into(), match style.line_height {
-            mithu_style::LineHeight::Normal => "normal".into(),
-            mithu_style::LineHeight::Px(value) => format_px(value),
-            mithu_style::LineHeight::Number(value) => format!("{value}"),
-            mithu_style::LineHeight::Percent(value) => format!("{value}%"),
-        }),
+        (
+            "visibility".into(),
+            if style.visible { "visible" } else { "hidden" }.into(),
+        ),
+        (
+            "lineHeight".into(),
+            match style.line_height {
+                mithu_style::LineHeight::Normal => "normal".into(),
+                mithu_style::LineHeight::Px(value) => format_px(value),
+                mithu_style::LineHeight::Number(value) => format!("{value}"),
+                mithu_style::LineHeight::Percent(value) => format!("{value}%"),
+            },
+        ),
     ]
 }
 
@@ -3322,12 +3361,9 @@ fn custom_registry(context: &mut Context) -> JsResult<JsObject> {
         return Ok(object.clone());
     }
     let created = ObjectInitializer::new(context).build();
-    context.global_object().set(
-        js_string!("__mithuCE"),
-        created.clone(),
-        false,
-        context,
-    )?;
+    context
+        .global_object()
+        .set(js_string!("__mithuCE"), created.clone(), false, context)?;
     Ok(created)
 }
 
@@ -3345,7 +3381,9 @@ fn define_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
             .iter()
             .enumerate()
             .filter_map(|(index, node)| match &node.data {
-                mithu_dom::NodeData::Element(element) if element.name.eq_ignore_ascii_case(&name) => {
+                mithu_dom::NodeData::Element(element)
+                    if element.name.eq_ignore_ascii_case(&name) =>
+                {
                     Some(index)
                 }
                 _ => None,
@@ -3366,12 +3404,9 @@ fn when_defined_bag(context: &mut Context) -> JsResult<JsObject> {
         return Ok(object.clone());
     }
     let created = ObjectInitializer::new(context).build();
-    context.global_object().set(
-        js_string!("__mithuWhen"),
-        created.clone(),
-        false,
-        context,
-    )?;
+    context
+        .global_object()
+        .set(js_string!("__mithuWhen"), created.clone(), false, context)?;
     Ok(created)
 }
 
@@ -3448,7 +3483,10 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
     if !tag.contains('-') {
         return;
     }
-    let Ok(bag) = context.global_object().get(js_string!("__mithuCE"), context) else {
+    let Ok(bag) = context
+        .global_object()
+        .get(js_string!("__mithuCE"), context)
+    else {
         return;
     };
     let Some(bag) = bag.as_object() else {
@@ -3486,7 +3524,8 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
             if let Err(error) = constructor.construct(&[], Some(&ctor), context)
                 && std::env::var_os("MITHU_JS_DEBUG").is_some()
             {
-                static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                static ONCE: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
                 if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("custom element constructor: {error}");
                 }
@@ -3711,7 +3750,11 @@ fn set_property(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     write_style(this, &name, &args[1..], context)
 }
 
-fn get_property_value(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn get_property_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = arg_string(args, 0, context).unwrap_or_default();
     read_style(this, &name, context)
 }
@@ -4105,7 +4148,11 @@ fn set_attribute_ns(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     set_attribute(this, &[name, value], context)
 }
 
-fn remove_attribute_ns(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn remove_attribute_ns(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = args.get(1).cloned().unwrap_or(JsValue::undefined());
     remove_attribute(this, &[name], context)
 }
@@ -4169,7 +4216,11 @@ fn remove_self(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsRe
 
 fn before_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     for arg in args {
-        insert_adjacent_element(this, &[js_string!("beforebegin").into(), arg.clone()], context)?;
+        insert_adjacent_element(
+            this,
+            &[js_string!("beforebegin").into(), arg.clone()],
+            context,
+        )?;
     }
     Ok(JsValue::undefined())
 }
@@ -4202,14 +4253,20 @@ pub(crate) fn attach_shadow(
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if n < 4 {
             let tag = node_of(this)
-                .and_then(|id| host(context).ok().and_then(|host| host.doc.borrow().element_name(id).map(str::to_string)))
+                .and_then(|id| {
+                    host(context)
+                        .ok()
+                        .and_then(|host| host.doc.borrow().element_name(id).map(str::to_string))
+                })
                 .unwrap_or_default();
             eprintln!("attachShadow {n} {tag}");
         }
     }
     let root_id = {
         let host = host(context)?;
-        host.doc.borrow_mut().create_element_detached("mithu-shadow")
+        host.doc
+            .borrow_mut()
+            .create_element_detached("mithu-shadow")
     };
     let root = element_value(root_id.0, context);
     if let Some(object) = root.as_object() {
@@ -4223,11 +4280,9 @@ pub(crate) fn attach_shadow(
     }
     if let Some(host_id) = node_of(this) {
         let host = host(context)?;
-        host.doc.borrow_mut().set_attr(
-            host_id,
-            "mithu-shadow",
-            &root_id.0.to_string(),
-        );
+        host.doc
+            .borrow_mut()
+            .set_attr(host_id, "mithu-shadow", &root_id.0.to_string());
     }
     Ok(root)
 }
@@ -4805,14 +4860,20 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
                     && mode != "no-cors"
                     && !cors_allows(page, response.header("access-control-allow-origin"))
                 {
-                    return Err(format!(
-                        "cross-origin fetch was blocked ({})",
-                        response.url
-                    ));
+                    return Err(format!("cross-origin fetch was blocked ({})", response.url));
                 }
-                if mode == "no-cors" && page.as_ref().is_some_and(|page| cross_origin(page, &response.url))
+                if mode == "no-cors"
+                    && page
+                        .as_ref()
+                        .is_some_and(|page| cross_origin(page, &response.url))
                 {
-                    return Ok((0, false, response.url.to_string(), String::new(), String::new()));
+                    return Ok((
+                        0,
+                        false,
+                        response.url.to_string(),
+                        String::new(),
+                        String::new(),
+                    ));
                 }
                 Ok((
                     response.status,
@@ -6740,6 +6801,7 @@ mod tests {
               document.title = el.getAttribute("ready") || "missing";
               if (!/\bclass\b/.test((class {}).toString())) document.title = "tostring";
               if ((function () { return 1; }).toString().indexOf("return 1") < 0) document.title = "fntext";
+              if (HTMLElement.prototype.attachShadow.toString().indexOf("[native code]") < 0) document.title = "shadow";
             </script></body>"#,
         );
         let session = Session::open(doc, |_| None);
@@ -6921,7 +6983,10 @@ mod tests {
         assert!(!files.is_empty());
         let mut script = String::from("var passed = 0; var failed = '';");
         for path in &files {
-            let name = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("case");
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("case");
             let body = std::fs::read_to_string(path).unwrap();
             script.push_str(&format!(
                 "try {{ {body}; passed += 1; }} catch (error) {{ failed += '{name}:' + error + ','; }}"
