@@ -29,7 +29,7 @@ enum Token {
         name: String,
     },
     Text(String),
-    Comment,
+    Comment(String),
     Eof,
 }
 
@@ -90,6 +90,12 @@ impl Parser {
                 break;
             }
             self.dispatch(token);
+        }
+        let open: Vec<NodeId> = self.stack.clone();
+        for id in open {
+            if self.doc.element_name(id) == Some("template") {
+                self.seal_template(id);
+            }
         }
     }
 
@@ -215,7 +221,7 @@ impl Parser {
             Some(c) if c.is_ascii_alphabetic() => self.read_start_tag(),
             Some('?') => {
                 self.skip_until_gt();
-                Token::Comment
+                Token::Comment(String::new())
             }
             _ => {
                 self.pos = start + 1;
@@ -227,17 +233,20 @@ impl Parser {
     fn tokenize_markup(&mut self) -> Token {
         if self.starts_with("--") {
             self.pos += 2;
+            let start = self.pos;
             while self.pos < self.chars.len() {
                 if self.chars[self.pos] == '-'
                     && self.chars.get(self.pos + 1) == Some(&'-')
                     && self.chars.get(self.pos + 2) == Some(&'>')
                 {
+                    let text: String = self.chars[start..self.pos].iter().collect();
                     self.pos += 3;
-                    break;
+                    return Token::Comment(text);
                 }
                 self.pos += 1;
             }
-            return Token::Comment;
+            let text: String = self.chars[start..].iter().collect();
+            return Token::Comment(text);
         }
         let rest: String = self.chars[self.pos..].iter().take(7).collect();
         if rest.to_ascii_lowercase().starts_with("doctype") {
@@ -245,7 +254,7 @@ impl Parser {
             return Token::Doctype;
         }
         self.skip_until_gt();
-        Token::Comment
+        Token::Comment(String::new())
     }
 
     fn read_start_tag(&mut self) -> Token {
@@ -439,10 +448,18 @@ impl Parser {
     }
 
     fn starts_with(&self, text: &str) -> bool {
-        self.chars[self.pos..].iter().collect::<String>().starts_with(text)
+        self.chars[self.pos..]
+            .iter()
+            .collect::<String>()
+            .starts_with(text)
     }
 
     fn dispatch(&mut self, token: Token) {
+        if let Token::Comment(text) = &token {
+            let parent = self.current().unwrap_or(self.doc.root);
+            self.doc.append_comment(parent, text);
+            return;
+        }
         match self.mode {
             Mode::BeforeHtml => self.before_html(token),
             Mode::BeforeHead => self.before_head(token),
@@ -463,7 +480,7 @@ impl Parser {
 
     fn before_html(&mut self, token: Token) {
         match token {
-            Token::Doctype | Token::Comment => {}
+            Token::Doctype | Token::Comment(_) => {}
             Token::Start { name, attrs, .. } if name == "html" => {
                 let id = self.insert("html");
                 self.apply_attrs(id, attrs);
@@ -481,7 +498,7 @@ impl Parser {
 
     fn before_head(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. } if name == "html" => {
                 if let Some(html) = self.stack.first().copied() {
@@ -504,12 +521,19 @@ impl Parser {
 
     fn in_head(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "title" | "style" | "script" | "textarea" | "noscript") => {
+            Token::Start { name, attrs, .. }
+                if matches!(
+                    name.as_str(),
+                    "title" | "style" | "script" | "textarea" | "noscript"
+                ) =>
+            {
                 self.start_raw(name, attrs);
             }
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "base" | "link" | "meta") => {
+            Token::Start { name, attrs, .. }
+                if matches!(name.as_str(), "base" | "link" | "meta") =>
+            {
                 let id = self.insert(&name);
                 self.apply_attrs(id, attrs);
                 self.stack.pop();
@@ -540,7 +564,7 @@ impl Parser {
 
     fn after_head(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. } if name == "body" => {
                 let id = self.insert("body");
@@ -552,7 +576,12 @@ impl Parser {
                     self.apply_attrs(html, attrs);
                 }
             }
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "title" | "style" | "script" | "base" | "link" | "meta") => {
+            Token::Start { name, attrs, .. }
+                if matches!(
+                    name.as_str(),
+                    "title" | "style" | "script" | "base" | "link" | "meta"
+                ) =>
+            {
                 self.mode = Mode::InHead;
                 self.stack.push(self.head_id().unwrap_or(self.stack[0]));
                 self.reconsume(Token::Start {
@@ -571,20 +600,24 @@ impl Parser {
 
     fn in_body(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) => {
                 self.reconstruct();
                 if let Some(parent) = self.current() {
                     self.doc.append_text(parent, &text);
                 }
             }
-            Token::Start { name, attrs, self_closing } => self.start_in_body(name, attrs, self_closing),
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } => self.start_in_body(name, attrs, self_closing),
             Token::End { name } => self.end_in_body(name),
             Token::Eof => {}
         }
     }
 
-    fn start_in_body(&mut self, name: String, attrs: Vec<(String, String)>, _self_closing: bool) {
+    fn start_in_body(&mut self, name: String, attrs: Vec<(String, String)>, self_closing: bool) {
         if matches!(name.as_str(), "html") {
             return;
         }
@@ -595,7 +628,18 @@ impl Parser {
             return;
         }
         self.reconstruct();
-        if matches!(name.as_str(), "title" | "style" | "script" | "textarea" | "iframe" | "noscript" | "noembed" | "noframes" | "xmp") {
+        if matches!(
+            name.as_str(),
+            "title"
+                | "style"
+                | "script"
+                | "textarea"
+                | "iframe"
+                | "noscript"
+                | "noembed"
+                | "noframes"
+                | "xmp"
+        ) {
             self.start_raw(name, attrs);
             return;
         }
@@ -605,10 +649,18 @@ impl Parser {
         if name == "li" && self.current_name() == Some("li") {
             self.stack.pop();
         }
-        if matches!(name.as_str(), "dd" | "dt") && self.current_name().is_some_and(|current| current == "dd" || current == "dt") {
+        if matches!(name.as_str(), "dd" | "dt")
+            && self
+                .current_name()
+                .is_some_and(|current| current == "dd" || current == "dt")
+        {
             self.stack.pop();
         }
-        if is_heading(&name) && self.current_name().is_some_and(|current| is_heading(current)) {
+        if is_heading(&name)
+            && self
+                .current_name()
+                .is_some_and(|current| is_heading(current))
+        {
             self.stack.pop();
         }
         if name == "a" && self.in_scope("a") {
@@ -635,7 +687,9 @@ impl Parser {
         if is_formatting(&name) {
             self.active.push(Some(id));
         }
-        if is_void(&name) {
+        // In HTML, `/>` only closes a void element. Inside SVG it closes the
+        // element, so `<path/>` does not swallow the following `<use>`.
+        if is_void(&name) || (self_closing && self.in_svg()) {
             self.stack.pop();
         }
     }
@@ -683,7 +737,7 @@ impl Parser {
 
     fn in_table(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. } if name == "caption" => {
                 self.open_table_section("caption", attrs, Mode::InCaption);
@@ -691,18 +745,36 @@ impl Parser {
             Token::Start { name, attrs, .. } if name == "colgroup" => {
                 self.open_table_section("colgroup", attrs, Mode::InColumnGroup);
             }
-            Token::Start { name, attrs, self_closing } if name == "col" => {
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if name == "col" => {
                 self.insert("colgroup");
                 self.mode = Mode::InColumnGroup;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
-            Token::Start { name, attrs, .. } if matches!(name.as_str(), "tbody" | "thead" | "tfoot") => {
+            Token::Start { name, attrs, .. }
+                if matches!(name.as_str(), "tbody" | "thead" | "tfoot") =>
+            {
                 self.open_table_section(&name, attrs, Mode::InTableBody);
             }
-            Token::Start { name, attrs, self_closing } if matches!(name.as_str(), "td" | "th" | "tr") => {
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(name.as_str(), "td" | "th" | "tr") => {
                 self.insert("tbody");
                 self.mode = Mode::InTableBody;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
             Token::Start { name, attrs, .. } if matches!(name.as_str(), "style" | "script") => {
                 self.start_raw(name, attrs);
@@ -711,7 +783,21 @@ impl Parser {
                 self.pop_until("table");
                 self.mode = Mode::InBody;
             }
-            Token::End { name } if matches!(name.as_str(), "body" | "caption" | "col" | "colgroup" | "html" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") => {}
+            Token::End { name }
+                if matches!(
+                    name.as_str(),
+                    "body"
+                        | "caption"
+                        | "col"
+                        | "colgroup"
+                        | "html"
+                        | "tbody"
+                        | "td"
+                        | "tfoot"
+                        | "th"
+                        | "thead"
+                        | "tr"
+                ) => {}
             other => self.foster(other),
         }
     }
@@ -722,12 +808,22 @@ impl Parser {
                 self.pop_until("caption");
                 self.mode = Mode::InTable;
             }
-            Token::Start { name, attrs, self_closing }
-                if matches!(name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") =>
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(
+                name.as_str(),
+                "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr"
+            ) =>
             {
                 self.pop_until("caption");
                 self.mode = Mode::InTable;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
             Token::End { name } if name == "table" => {
                 self.pop_until("caption");
@@ -740,7 +836,7 @@ impl Parser {
 
     fn in_column_group(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::Start { name, attrs, .. } if name == "col" => {
                 let id = self.insert("col");
@@ -767,20 +863,38 @@ impl Parser {
             Token::Start { name, attrs, .. } if name == "tr" => {
                 self.open_table_section("tr", attrs, Mode::InRow);
             }
-            Token::Start { name, attrs, self_closing } if matches!(name.as_str(), "th" | "td") => {
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(name.as_str(), "th" | "td") => {
                 self.insert("tr");
                 self.mode = Mode::InRow;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
             Token::End { name } if matches!(name.as_str(), "tbody" | "thead" | "tfoot") => {
                 self.pop_until(&name);
                 self.mode = Mode::InTable;
             }
-            Token::Start { name, attrs, self_closing }
-                if matches!(name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead") =>
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(
+                name.as_str(),
+                "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead"
+            ) =>
             {
                 self.close_table_body();
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
             Token::End { name } if name == "table" => {
                 self.close_table_body();
@@ -799,14 +913,26 @@ impl Parser {
                 self.pop_until("tr");
                 self.mode = Mode::InTableBody;
             }
-            Token::Start { name, attrs, self_closing }
-                if matches!(name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead" | "tr") =>
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(
+                name.as_str(),
+                "caption" | "col" | "colgroup" | "tbody" | "tfoot" | "thead" | "tr"
+            ) =>
             {
                 self.pop_until("tr");
                 self.mode = Mode::InTableBody;
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
-            Token::End { name } if matches!(name.as_str(), "table" | "tbody" | "tfoot" | "thead") => {
+            Token::End { name }
+                if matches!(name.as_str(), "table" | "tbody" | "tfoot" | "thead") =>
+            {
                 self.pop_until("tr");
                 self.mode = Mode::InTableBody;
                 self.reconsume(Token::End { name });
@@ -821,13 +947,25 @@ impl Parser {
                 self.pop_until(&name);
                 self.mode = Mode::InRow;
             }
-            Token::Start { name, attrs, self_closing }
-                if matches!(name.as_str(), "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr") =>
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } if matches!(
+                name.as_str(),
+                "caption" | "col" | "colgroup" | "tbody" | "td" | "tfoot" | "th" | "thead" | "tr"
+            ) =>
             {
                 self.close_cell();
-                self.reconsume(Token::Start { name, attrs, self_closing });
+                self.reconsume(Token::Start {
+                    name,
+                    attrs,
+                    self_closing,
+                });
             }
-            Token::End { name } if matches!(name.as_str(), "table" | "tbody" | "tfoot" | "thead" | "tr") => {
+            Token::End { name }
+                if matches!(name.as_str(), "table" | "tbody" | "tfoot" | "thead" | "tr") =>
+            {
                 self.close_cell();
                 self.reconsume(Token::End { name });
             }
@@ -837,7 +975,7 @@ impl Parser {
 
     fn in_select(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) => {
                 if let Some(parent) = self.current() {
                     self.doc.append_text(parent, &text);
@@ -891,14 +1029,20 @@ impl Parser {
     }
 
     fn close_table_body(&mut self) {
-        if self.current_name().is_some_and(|name| matches!(name, "tbody" | "thead" | "tfoot")) {
+        if self
+            .current_name()
+            .is_some_and(|name| matches!(name, "tbody" | "thead" | "tfoot"))
+        {
             self.stack.pop();
         }
         self.mode = Mode::InTable;
     }
 
     fn close_cell(&mut self) {
-        if self.current_name().is_some_and(|name| name == "td" || name == "th") {
+        if self
+            .current_name()
+            .is_some_and(|name| name == "td" || name == "th")
+        {
             self.stack.pop();
         }
         self.mode = Mode::InRow;
@@ -913,7 +1057,11 @@ impl Parser {
                     self.doc.append_text(parent, &text);
                 }
             }
-            Token::Start { name, attrs, self_closing } => {
+            Token::Start {
+                name,
+                attrs,
+                self_closing,
+            } => {
                 let id = self.doc.create_element_detached(&name);
                 if let Some((parent, before)) = self.foster_slot() {
                     self.doc.insert_before(parent, id, before);
@@ -934,7 +1082,12 @@ impl Parser {
     }
 
     fn foster_slot(&self) -> Option<(NodeId, Option<NodeId>)> {
-        let table = self.stack.iter().rev().copied().find(|id| self.doc.element_name(*id) == Some("table"))?;
+        let table = self
+            .stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| self.doc.element_name(*id) == Some("table"))?;
         let parent = self.doc.nodes.get(table.0).and_then(|node| node.parent)?;
         Some((parent, Some(table)))
     }
@@ -966,7 +1119,11 @@ impl Parser {
                 break;
             };
             let name = self.doc.element_name(id).unwrap_or("span").to_string();
-            let attrs = self.doc.element(id).map(|element| element.attrs.clone()).unwrap_or_default();
+            let attrs = self
+                .doc
+                .element(id)
+                .map(|element| element.attrs.clone())
+                .unwrap_or_default();
             let clone = self.insert(&name);
             self.apply_attrs(clone, attrs);
             self.active[entry] = Some(clone);
@@ -976,7 +1133,9 @@ impl Parser {
 
     fn adoption_agency(&mut self, subject: &str) {
         if self.current_name() == Some(subject)
-            && self.current().is_some_and(|id| !self.active.contains(&Some(id)))
+            && self
+                .current()
+                .is_some_and(|id| !self.active.contains(&Some(id)))
         {
             self.stack.pop();
             return;
@@ -993,9 +1152,11 @@ impl Parser {
             if !self.in_scope(subject) {
                 return;
             }
-            let Some(block_pos) = ((fmt_pos + 1)..self.stack.len())
-                .find(|index| self.doc.element_name(self.stack[*index]).is_some_and(is_special))
-            else {
+            let Some(block_pos) = ((fmt_pos + 1)..self.stack.len()).find(|index| {
+                self.doc
+                    .element_name(self.stack[*index])
+                    .is_some_and(is_special)
+            }) else {
                 while let Some(id) = self.stack.pop() {
                     if id == formatting {
                         self.active.retain(|entry| *entry != Some(formatting));
@@ -1005,7 +1166,11 @@ impl Parser {
                 return;
             };
             let block = self.stack[block_pos];
-            let common = if fmt_pos == 0 { self.doc.root } else { self.stack[fmt_pos - 1] };
+            let common = if fmt_pos == 0 {
+                self.doc.root
+            } else {
+                self.stack[fmt_pos - 1]
+            };
             let mut node_pos = block_pos;
             let mut last = block;
             let mut inner = 0;
@@ -1051,7 +1216,8 @@ impl Parser {
             self.doc.append_child(block, new_element);
             self.active.retain(|entry| *entry != Some(formatting));
             self.active.push(Some(new_element));
-            self.stack.retain(|id| *id != formatting && *id != new_element);
+            self.stack
+                .retain(|id| *id != formatting && *id != new_element);
             self.stack.push(new_element);
             return;
         }
@@ -1061,7 +1227,11 @@ impl Parser {
         for entry in self.active.iter().rev() {
             match entry {
                 None => return None,
-                Some(id) if self.doc.element_name(*id) == Some(subject) && self.stack.contains(id) => return Some(*id),
+                Some(id)
+                    if self.doc.element_name(*id) == Some(subject) && self.stack.contains(id) =>
+                {
+                    return Some(*id);
+                }
                 Some(_) => {}
             }
         }
@@ -1070,7 +1240,11 @@ impl Parser {
 
     fn clone_element(&mut self, id: NodeId) -> NodeId {
         let name = self.doc.element_name(id).unwrap_or("span").to_string();
-        let attrs = self.doc.element(id).map(|element| element.attrs.clone()).unwrap_or_default();
+        let attrs = self
+            .doc
+            .element(id)
+            .map(|element| element.attrs.clone())
+            .unwrap_or_default();
         let clone = self.doc.create_element_detached(&name);
         self.apply_attrs(clone, attrs);
         clone
@@ -1107,7 +1281,7 @@ impl Parser {
 
     fn after_body(&mut self, token: Token) {
         match token {
-            Token::Comment | Token::Doctype => {}
+            Token::Comment(_) | Token::Doctype => {}
             Token::Text(text) if text.chars().all(|ch| ch.is_whitespace()) => {}
             Token::End { name } if name == "html" => {}
             other => {
@@ -1131,7 +1305,33 @@ impl Parser {
         self.mode = Mode::Text;
     }
 
+    fn inside_template(&self, id: NodeId) -> bool {
+        let mut current = self.doc.node(id).parent;
+        while let Some(parent) = current {
+            if self.doc.element_name(parent) == Some("template") {
+                return true;
+            }
+            current = self.doc.node(parent).parent;
+        }
+        false
+    }
+
+    fn seal_template(&mut self, id: NodeId) {
+        if self.doc.template_content(id).is_some() {
+            return;
+        }
+        let fragment = self.doc.create_element_detached("mithu-fragment");
+        let children = std::mem::take(&mut self.doc.nodes[id.0].children);
+        for child in children {
+            self.doc.append_child(fragment, child);
+        }
+        self.doc.template_contents.push((id, fragment));
+    }
+
     fn capture_raw_element(&mut self, id: NodeId, name: &str) {
+        if self.inside_template(id) {
+            return;
+        }
         let text = self.doc.text_content(id);
         match name {
             "title" => {
@@ -1144,12 +1344,41 @@ impl Parser {
             }
             "script" => {
                 let src = self.doc.attr(id, "src").map(str::to_string);
-                let kind = self.doc.attr(id, "type").unwrap_or("").to_ascii_lowercase();
+                let kind = self
+                    .doc
+                    .attr(id, "type")
+                    .unwrap_or("")
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                if kind == "importmap" {
+                    if !text.trim().is_empty() {
+                        self.doc.import_maps.push(text);
+                    }
+                    return;
+                }
+                let javascript = kind.is_empty()
+                    || kind == "module"
+                    || matches!(
+                        kind.as_str(),
+                        "text/javascript"
+                            | "application/javascript"
+                            | "application/ecmascript"
+                            | "text/ecmascript"
+                            | "text/jscript"
+                    );
                 if src.is_some() || !text.trim().is_empty() {
                     self.doc.scripts.push(mithu_dom::Script {
+                        node: id,
                         src,
                         code: text,
                         module: kind == "module",
+                        defer: self.doc.attr(id, "defer").is_some(),
+                        asynchronous: self.doc.attr(id, "async").is_some(),
+                        nomodule: self.doc.attr(id, "nomodule").is_some(),
+                        javascript,
                     });
                 }
             }
@@ -1182,7 +1411,9 @@ impl Parser {
                 self.doc.stylesheet_links.push(href.to_string());
             }
         }
-        if name == "base" && self.doc.base_href.is_none() && let Some(href) = self.doc.attr(id, "href")
+        if name == "base"
+            && self.doc.base_href.is_none()
+            && let Some(href) = self.doc.attr(id, "href")
         {
             self.doc.base_href = Some(href.to_string());
         }
@@ -1196,14 +1427,27 @@ impl Parser {
         self.current().and_then(|id| self.doc.element_name(id))
     }
 
+    fn in_svg(&self) -> bool {
+        self.stack
+            .iter()
+            .any(|id| self.doc.element_name(*id) == Some("svg"))
+    }
+
     fn head_id(&self) -> Option<NodeId> {
-        self.doc.node(self.doc.root).children.iter().copied().find(|id| {
-            self.doc.element_name(*id) == Some("html")
-        }).and_then(|html| {
-            self.doc.node(html).children.iter().copied().find(|id| {
-                self.doc.element_name(*id) == Some("head")
+        self.doc
+            .node(self.doc.root)
+            .children
+            .iter()
+            .copied()
+            .find(|id| self.doc.element_name(*id) == Some("html"))
+            .and_then(|html| {
+                self.doc
+                    .node(html)
+                    .children
+                    .iter()
+                    .copied()
+                    .find(|id| self.doc.element_name(*id) == Some("head"))
             })
-        })
     }
 
     fn close_p_if_open(&mut self) {
@@ -1213,12 +1457,19 @@ impl Parser {
     }
 
     fn pop_until(&mut self, tag: &str) {
-        if !self.stack.iter().any(|id| self.doc.element_name(*id) == Some(tag)) {
+        if !self
+            .stack
+            .iter()
+            .any(|id| self.doc.element_name(*id) == Some(tag))
+        {
             return;
         }
         while let Some(id) = self.stack.pop() {
             let name = self.doc.element_name(id).unwrap_or("");
             if name == tag {
+                if name == "template" {
+                    self.seal_template(id);
+                }
                 break;
             }
             if name == "html" || name == "body" {
@@ -1236,7 +1487,19 @@ fn is_void(name: &str) -> bool {
 fn is_formatting(name: &str) -> bool {
     matches!(
         name,
-        "a" | "b" | "big" | "code" | "em" | "font" | "i" | "nobr" | "s" | "small" | "strike" | "strong" | "tt" | "u"
+        "a" | "b"
+            | "big"
+            | "code"
+            | "em"
+            | "font"
+            | "i"
+            | "nobr"
+            | "s"
+            | "small"
+            | "strike"
+            | "strong"
+            | "tt"
+            | "u"
     )
 }
 
@@ -1415,8 +1678,27 @@ mod tests {
     }
 
     #[test]
+    fn a_self_closing_svg_path_does_not_swallow_the_next_use() {
+        let doc = parse_html(r##"<svg><path id="q" d="M0 0 L1 1"/><use href="#q"></use></svg>"##);
+        let path = doc.get_element_by_id("q").unwrap();
+        assert!(
+            doc.node(path).children.is_empty(),
+            "the path kept {} children",
+            doc.node(path).children.len()
+        );
+        let svg = doc
+            .node(path)
+            .parent
+            .and_then(|id| doc.element_name(id))
+            .unwrap_or("");
+        assert_eq!(svg, "svg");
+    }
+
+    #[test]
     fn decodes_entities_and_keeps_raw_style() {
-        let doc = parse_html("<title>A &amp; B</title><style>div > p { color: red }</style><p>&lt;x&gt;</p>");
+        let doc = parse_html(
+            "<title>A &amp; B</title><style>div > p { color: red }</style><p>&lt;x&gt;</p>",
+        );
         assert_eq!(doc.title, "A & B");
         assert_eq!(doc.stylesheets[0], "div > p { color: red }");
         let body = doc
@@ -1438,16 +1720,26 @@ mod tests {
 
     #[test]
     fn an_image_before_body_is_not_hidden_in_head() {
-        let doc = parse_html("<link rel='stylesheet' href='app.css'><img id='pic' src='pixel.png'><p id='text'>Hi</p>");
+        let doc = parse_html(
+            "<link rel='stylesheet' href='app.css'><img id='pic' src='pixel.png'><p id='text'>Hi</p>",
+        );
         let html = doc.node(doc.root).children[0];
         let head = doc.node(html).children[0];
         let body = doc.node(html).children[1];
         assert_eq!(doc.element_name(head), Some("head"));
         assert_eq!(doc.element_name(body), Some("body"));
-        assert!(doc.node(head).children.iter().all(|id| doc.element_name(*id) != Some("img")));
+        assert!(
+            doc.node(head)
+                .children
+                .iter()
+                .all(|id| doc.element_name(*id) != Some("img"))
+        );
         let pic = doc.get_element_by_id("pic").unwrap();
         assert_eq!(doc.parent_element(pic), Some(body));
-        assert_eq!(doc.parent_element(doc.get_element_by_id("text").unwrap()), Some(body));
+        assert_eq!(
+            doc.parent_element(doc.get_element_by_id("text").unwrap()),
+            Some(body)
+        );
     }
 
     fn chain(doc: &Document, names: &[&str]) -> NodeId {
@@ -1466,9 +1758,16 @@ mod tests {
 
     #[test]
     fn table_implies_tbody_and_a_row() {
-        let doc = parse_html("<table id='grid'><tr><td id='cell'>Hi</td><th>Head</th></tr></table>");
+        let doc =
+            parse_html("<table id='grid'><tr><td id='cell'>Hi</td><th>Head</th></tr></table>");
         let table = doc.get_element_by_id("grid").unwrap();
-        let tbody = doc.node(table).children.iter().copied().find(|id| doc.element_name(*id) == Some("tbody")).unwrap();
+        let tbody = doc
+            .node(table)
+            .children
+            .iter()
+            .copied()
+            .find(|id| doc.element_name(*id) == Some("tbody"))
+            .unwrap();
         let row = doc.node(tbody).children[0];
         assert_eq!(doc.element_name(row), Some("tr"));
         let cell = doc.get_element_by_id("cell").unwrap();
@@ -1479,15 +1778,29 @@ mod tests {
 
     #[test]
     fn select_keeps_options_and_a_stray_table_child_moves_out() {
-        let doc = parse_html("<select id='menu'><option>One</option><option>Two</option></select><table><div id='out'>No</div><tr><td>Yes</td></tr></table>");
+        let doc = parse_html(
+            "<select id='menu'><option>One</option><option>Two</option></select><table><div id='out'>No</div><tr><td>Yes</td></tr></table>",
+        );
         let menu = doc.get_element_by_id("menu").unwrap();
-        let options: Vec<_> = doc.node(menu).children.iter().copied().filter(|id| doc.element_name(*id) == Some("option")).collect();
+        let options: Vec<_> = doc
+            .node(menu)
+            .children
+            .iter()
+            .copied()
+            .filter(|id| doc.element_name(*id) == Some("option"))
+            .collect();
         assert_eq!(options.len(), 2);
         assert_eq!(doc.text_content(options[1]), "Two");
         let out = doc.get_element_by_id("out").unwrap();
         let body = chain(&doc, &["body"]);
         assert_eq!(doc.parent_element(out), Some(body));
-        let table = doc.node(body).children.iter().copied().find(|id| doc.element_name(*id) == Some("table")).unwrap();
+        let table = doc
+            .node(body)
+            .children
+            .iter()
+            .copied()
+            .find(|id| doc.element_name(*id) == Some("table"))
+            .unwrap();
         let body_children = &doc.node(body).children;
         let out_at = body_children.iter().position(|id| *id == out).unwrap();
         let table_at = body_children.iter().position(|id| *id == table).unwrap();
@@ -1540,11 +1853,39 @@ mod tests {
 
     #[test]
     fn raw_text_elements_keep_their_markup_as_text() {
-        let doc = parse_html("<iframe id='frame'><p id='no'>Hi</p></iframe><noscript><div id='also'>x</div></noscript>");
+        let doc = parse_html(
+            "<iframe id='frame'><p id='no'>Hi</p></iframe><noscript><div id='also'>x</div></noscript>",
+        );
         let frame = doc.get_element_by_id("frame").unwrap();
-        assert!(doc.node(frame).children.iter().all(|id| doc.element_name(*id).is_none()));
+        assert!(
+            doc.node(frame)
+                .children
+                .iter()
+                .all(|id| doc.element_name(*id).is_none())
+        );
         assert!(doc.text_content(frame).contains("<p"));
         assert!(doc.get_element_by_id("no").is_none());
         assert!(doc.get_element_by_id("also").is_none());
+    }
+
+    #[test]
+    fn comments_stay_in_the_tree() {
+        let doc = parse_html("<div id='host'><!--$?--><span id='el'></span><!--/$--></div>");
+        let host = doc.get_element_by_id("host").unwrap();
+        let kids: Vec<_> = doc
+            .node(host)
+            .children
+            .iter()
+            .map(|id| match &doc.node(*id).data {
+                mithu_dom::NodeData::Comment(text) => format!("c:{text}"),
+                mithu_dom::NodeData::Element(element) => format!("e:{}", element.name),
+                mithu_dom::NodeData::Text(text) => format!("t:{text}"),
+                mithu_dom::NodeData::Document => "d".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            kids,
+            vec!["c:$?".to_string(), "e:span".to_string(), "c:/$".to_string()]
+        );
     }
 }

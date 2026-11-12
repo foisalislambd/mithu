@@ -17,6 +17,21 @@ pub struct Document {
     pub stylesheet_links: Vec<String>,
     pub scripts: Vec<Script>,
     pub base_href: Option<String>,
+    /// Inline `<script type="importmap">` bodies, in document order.
+    pub import_maps: Vec<String>,
+    /// Child and attribute changes since the last observer delivery.
+    pub mutations: Vec<DomMutation>,
+    /// `<template>` elements keep their contents in a detached fragment, the
+    /// way the HTML parser does, so the template itself has no child nodes.
+    pub template_contents: Vec<(NodeId, NodeId)>,
+}
+
+/// One DOM change a `MutationObserver` can report.
+#[derive(Clone, Debug)]
+pub struct DomMutation {
+    pub target: NodeId,
+    pub kind: String,
+    pub attribute: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,9 +51,15 @@ pub enum NodeData {
 
 #[derive(Clone, Debug)]
 pub struct Script {
+    pub node: NodeId,
     pub src: Option<String>,
     pub code: String,
     pub module: bool,
+    pub defer: bool,
+    pub asynchronous: bool,
+    pub nomodule: bool,
+    /// `type` is empty, JavaScript, or `module`. JSON-LD and other data blocks are not.
+    pub javascript: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -47,6 +68,15 @@ pub struct ElementData {
     pub attrs: Vec<(String, String)>,
     pub id: Option<String>,
     pub classes: Vec<String>,
+}
+
+fn attributes_equal(left: &[(String, String)], right: &[(String, String)]) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(name, value)| {
+            right
+                .iter()
+                .any(|(other, other_value)| name == other && value == other_value)
+        })
 }
 
 impl Document {
@@ -63,7 +93,30 @@ impl Document {
             stylesheet_links: Vec::new(),
             scripts: Vec::new(),
             base_href: None,
+            import_maps: Vec::new(),
+            mutations: Vec::new(),
+            template_contents: Vec::new(),
         }
+    }
+
+    pub fn template_content(&self, template: NodeId) -> Option<NodeId> {
+        self.template_contents
+            .iter()
+            .find(|(id, _)| *id == template)
+            .map(|(_, fragment)| *fragment)
+    }
+
+    /// True when `id` is in the document tree. Template contents and other
+    /// detached nodes are not.
+    pub fn is_connected(&self, id: NodeId) -> bool {
+        let mut current = Some(id);
+        while let Some(node) = current {
+            if node == self.root {
+                return true;
+            }
+            current = self.nodes.get(node.0).and_then(|item| item.parent);
+        }
+        false
     }
 
     pub fn node(&self, id: NodeId) -> &Node {
@@ -124,9 +177,10 @@ impl Document {
             NodeData::Element(_) | NodeData::Document => self.nodes[id.0]
                 .children
                 .iter()
+                .filter(|child| !matches!(self.nodes[child.0].data, NodeData::Comment(_)))
                 .map(|child| self.text_content(*child))
                 .collect(),
-            NodeData::Comment(_) => String::new(),
+            NodeData::Comment(text) => text.clone(),
         }
     }
 
@@ -202,6 +256,19 @@ impl Document {
         }
     }
 
+    pub fn append_comment(&mut self, parent: NodeId, text: &str) -> NodeId {
+        let id = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            parent: Some(parent),
+            children: Vec::new(),
+            data: NodeData::Comment(text.to_string()),
+        });
+        if let Some(parent) = self.nodes.get_mut(parent.0) {
+            parent.children.push(id);
+        }
+        id
+    }
+
     pub fn create_text_detached(&mut self, text: &str) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node {
@@ -243,7 +310,7 @@ impl Document {
         if self.nodes.get(id.0).is_none() {
             return;
         }
-        if let NodeData::Text(existing) = &mut self.nodes[id.0].data {
+        if let NodeData::Text(existing) | NodeData::Comment(existing) = &mut self.nodes[id.0].data {
             *existing = text.to_string();
             return;
         }
@@ -265,6 +332,71 @@ impl Document {
         if let Some(node) = self.nodes.get_mut(id.0) {
             node.parent = None;
         }
+    }
+
+    /// Blink's `Node.isEqualNode`: same type, and for elements the same tag,
+    /// the same attributes regardless of order, and equal children in order.
+    pub fn nodes_equal(&self, left: NodeId, right: NodeId) -> bool {
+        if left == right {
+            return true;
+        }
+        let (Some(a), Some(b)) = (self.nodes.get(left.0), self.nodes.get(right.0)) else {
+            return false;
+        };
+        match (&a.data, &b.data) {
+            (NodeData::Text(left), NodeData::Text(right))
+            | (NodeData::Comment(left), NodeData::Comment(right)) => left == right,
+            (NodeData::Document, NodeData::Document) => self.children_equal(left, right),
+            (NodeData::Element(left_el), NodeData::Element(right_el)) => {
+                left_el.name == right_el.name
+                    && attributes_equal(&left_el.attrs, &right_el.attrs)
+                    && self.children_equal(left, right)
+            }
+            _ => false,
+        }
+    }
+
+    fn children_equal(&self, left: NodeId, right: NodeId) -> bool {
+        let left_children = &self.nodes[left.0].children;
+        let right_children = &self.nodes[right.0].children;
+        left_children.len() == right_children.len()
+            && left_children
+                .iter()
+                .zip(right_children)
+                .all(|(left, right)| self.nodes_equal(*left, *right))
+    }
+
+    /// A detached copy. `deep` copies descendants. Template contents are copied
+    /// with the template, since they are not child nodes.
+    pub fn clone_node(&mut self, id: NodeId, deep: bool) -> NodeId {
+        let Some(source) = self.nodes.get(id.0) else {
+            return id;
+        };
+        let data = source.data.clone();
+        let children = if deep {
+            source.children.clone()
+        } else {
+            Vec::new()
+        };
+        let fragment = self.template_content(id);
+        let copy = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            parent: None,
+            children: Vec::new(),
+            data,
+        });
+        if deep {
+            for child in children {
+                let cloned = self.clone_node(child, true);
+                self.nodes[cloned.0].parent = Some(copy);
+                self.nodes[copy.0].children.push(cloned);
+            }
+        }
+        if let Some(fragment) = fragment {
+            let cloned = self.clone_node(fragment, deep);
+            self.template_contents.push((copy, cloned));
+        }
+        copy
     }
 
     pub fn contains_node(&self, ancestor: NodeId, node: NodeId) -> bool {
@@ -298,10 +430,19 @@ impl Document {
         if parent == child || self.contains_node(child, parent) {
             return false;
         }
+        // Inserting a node before itself means "leave it in front of the next sibling".
+        let before = if before == Some(child) {
+            self.next_sibling(child)
+        } else {
+            before
+        };
         self.detach(child);
         self.nodes[child.0].parent = Some(parent);
         if let Some(before) = before
-            && let Some(index) = self.nodes[parent.0].children.iter().position(|id| *id == before)
+            && let Some(index) = self.nodes[parent.0]
+                .children
+                .iter()
+                .position(|id| *id == before)
         {
             self.nodes[parent.0].children.insert(index, child);
             return true;
@@ -314,7 +455,11 @@ impl Document {
         if text.is_empty() || self.nodes.get(parent.0).is_none() {
             return;
         }
-        let Some(index) = self.nodes[parent.0].children.iter().position(|id| *id == before) else {
+        let Some(index) = self.nodes[parent.0]
+            .children
+            .iter()
+            .position(|id| *id == before)
+        else {
             self.append_text(parent, text);
             return;
         };
@@ -332,6 +477,13 @@ impl Document {
             data: NodeData::Text(text.to_string()),
         });
         self.nodes[parent.0].children.insert(index, id);
+    }
+
+    fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
+        let parent = self.nodes.get(id.0)?.parent?;
+        let children = &self.nodes.get(parent.0)?.children;
+        let index = children.iter().position(|child| *child == id)?;
+        children.get(index + 1).copied()
     }
 
     pub fn element_child_index(&self, id: NodeId) -> Option<usize> {
@@ -377,7 +529,12 @@ impl Document {
         for id in ids {
             match self.element_name(id) {
                 Some("title") if title.is_none() => {
-                    title = Some(self.text_content(id).split_whitespace().collect::<Vec<_>>().join(" "));
+                    title = Some(
+                        self.text_content(id)
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    );
                 }
                 Some("style") => {
                     let text = self.text_content(id);

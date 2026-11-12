@@ -12,6 +12,14 @@ description = "HTTP/1.1 and HTTPS fetch"
 mithu-url = { path = "../url" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+# gzip and deflate. The rust backend stays pure Rust; nothing already in the
+# workspace inflates Content-Encoding.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# brotli. Same reason: Accept-Encoding advertises br only because this crate
+# can inflate it. No HTTP stack in the workspace speaks brotli.
+brotli = "8"
+# zstd content-encoding. Pure Rust, so the workspace unsafe_code lint still holds.
+ruzstd = "0.8"
 
 [lints]
 workspace = true

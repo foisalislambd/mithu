@@ -31,6 +31,7 @@ pub struct Url {
     pub port: Option<u16>,
     pub path: String,
     pub query: Option<String>,
+    pub fragment: Option<String>,
 }
 
 impl Url {
@@ -39,8 +40,27 @@ impl Url {
         if input.is_empty() {
             return Err(UrlError::Empty);
         }
+        let scheme_hint = split_scheme(input).map(|(scheme, _)| scheme.to_ascii_lowercase());
+        if scheme_hint.as_deref() != Some("data")
+            && scheme_hint.as_deref() != Some("blob")
+            && let Some((body, fragment)) = input.split_once('#')
+        {
+            let mut url = Self::parse(body)?;
+            url.fragment = Some(fragment.to_string());
+            return Ok(url);
+        }
         let (scheme, after) = split_scheme(input).ok_or(UrlError::MissingScheme)?;
         let scheme = scheme.to_ascii_lowercase();
+        if scheme == "data" || scheme == "blob" {
+            return Ok(Self {
+                scheme,
+                host: String::new(),
+                port: None,
+                path: after.to_string(),
+                query: None,
+                fragment: None,
+            });
+        }
         if scheme == "about" {
             let path = after.strip_prefix("//").unwrap_or(after);
             return Ok(Self {
@@ -49,6 +69,7 @@ impl Url {
                 port: None,
                 path: path.to_string(),
                 query: None,
+                fragment: None,
             });
         }
 
@@ -83,6 +104,7 @@ impl Url {
             port,
             path,
             query: query.map(str::to_string),
+            fragment: None,
         })
     }
 
@@ -97,14 +119,28 @@ impl Url {
         if let Some(rest) = reference.strip_prefix("//") {
             return Self::parse(&format!("{}://{rest}", self.scheme));
         }
-        if reference.starts_with('#') {
-            return Ok(self.clone());
+        if let Some(fragment) = reference.strip_prefix('#') {
+            let mut url = self.clone();
+            url.fragment = Some(fragment.to_string());
+            return Ok(url);
+        }
+        let (reference, fragment) = match reference.split_once('#') {
+            Some((body, fragment)) => (body, Some(fragment.to_string())),
+            None => (reference, None),
+        };
+        if reference.is_empty() {
+            let mut url = self.clone();
+            if fragment.is_some() {
+                url.fragment = fragment;
+            }
+            return Ok(url);
         }
 
         let no_frag = reference.split('#').next().unwrap_or(reference);
         if let Some(query) = no_frag.strip_prefix('?') {
             return Ok(Self {
                 query: Some(query.to_string()),
+                fragment,
                 ..self.clone()
             });
         }
@@ -121,6 +157,7 @@ impl Url {
             port: self.port,
             path: normalize_path(&joined),
             query: query.map(str::to_string),
+            fragment,
         })
     }
 
@@ -165,6 +202,10 @@ impl Url {
                 if let Some(query) = &self.query {
                     out.push('?');
                     out.push_str(query);
+                }
+                if let Some(fragment) = &self.fragment {
+                    out.push('#');
+                    out.push_str(fragment);
                 }
                 out
             }
@@ -295,7 +336,27 @@ fn encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b'/'
+            | b':'
+            | b'@'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'=' => {
                 out.push(byte as char);
             }
             _ => out.push_str(&format!("%{byte:02X}")),
@@ -316,7 +377,12 @@ mod tests {
         assert_eq!(url.port, Some(8443));
         assert_eq!(url.path, "/a/b");
         assert_eq!(url.query.as_deref(), Some("q=1"));
-        assert_eq!(url.to_display(), "https://example.com:8443/a/b?q=1");
+        assert_eq!(url.fragment.as_deref(), Some("frag"));
+        assert_eq!(
+            Url::parse("https://example.com/a,b/c:d").unwrap().request_target(),
+            "/a,b/c:d"
+        );
+        assert_eq!(url.to_display(), "https://example.com:8443/a/b?q=1#frag");
         assert_eq!(url.request_target(), "/a/b?q=1");
     }
 

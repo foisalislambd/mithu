@@ -1,0 +1,14 @@
+// Geometric window glyph written for Mithu. Not a Chromium asset.
+
+CANVAS_DIMENSIONS, 16,
+FILL_RULE_NONZERO,
+MOVE_TO, 3, 3,
+LINE_TO, 13, 3,
+LINE_TO, 13, 13,
+LINE_TO, 3, 13,
+CLOSE,
+MOVE_TO, 5, 11,
+LINE_TO, 5, 5,
+LINE_TO, 11, 5,
+LINE_TO, 11, 11,
+CLOSE

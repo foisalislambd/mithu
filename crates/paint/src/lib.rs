@@ -3,7 +3,7 @@
 use mithu_base::{Color, Rect};
 use mithu_image::Bitmap;
 use mithu_layout::{LayoutBox, LayoutTree};
-use mithu_text::{glyph_top, FontBook, MeasureText};
+use mithu_text::{FontBook, MeasureText, glyph_top};
 
 pub struct Canvas<'a> {
     pub pixels: &'a mut [u32],
@@ -14,6 +14,35 @@ pub struct Canvas<'a> {
 impl Canvas<'_> {
     pub fn fill(&mut self, rect: Rect, color: Color, clip: Rect) {
         self.fill_round(rect, color, 0.0, clip);
+    }
+
+    pub fn fill_vertical(&mut self, rect: Rect, top: Color, bottom: Color, clip: Rect) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let Some(rect) = intersect(rect, clip) else {
+            return;
+        };
+        let x0 = rect.x.floor().max(0.0) as i32;
+        let y0 = rect.y.floor().max(0.0) as i32;
+        let x1 = rect.right().ceil().min(self.width as f32) as i32;
+        let y1 = rect.bottom().ceil().min(self.height as f32) as i32;
+        let span = (rect.height - 1.0).max(1.0);
+        let stride = self.width as usize;
+        for y in y0..y1 {
+            let t = ((y as f32 - rect.y) / span).clamp(0.0, 1.0);
+            let color = mix_t(top, bottom, t);
+            let packed = color.to_u32();
+            let row = y as usize * stride;
+            for x in x0..x1 {
+                let index = row + x as usize;
+                self.pixels[index] = if color.a == 255 {
+                    packed
+                } else {
+                    blend(self.pixels[index], color, 255)
+                };
+            }
+        }
     }
 
     pub fn fill_round(&mut self, rect: Rect, color: Color, radius: f32, clip: Rect) {
@@ -58,6 +87,66 @@ impl Canvas<'_> {
         }
     }
 
+    /// Nonzero-winding fill. Each contour is closed from its last point to its first.
+    pub fn fill_contours(&mut self, contours: &[Vec<(f32, f32)>], color: Color, clip: Rect) {
+        if color.a == 0 || contours.is_empty() {
+            return;
+        }
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for contour in contours {
+            for (x, y) in contour {
+                min_x = min_x.min(*x);
+                min_y = min_y.min(*y);
+                max_x = max_x.max(*x);
+                max_y = max_y.max(*y);
+            }
+        }
+        if max_x <= min_x || max_y <= min_y {
+            return;
+        }
+        let bounds = Rect::new(min_x, min_y, max_x - min_x, max_y - min_y);
+        let Some(rect) = intersect(bounds, clip) else {
+            return;
+        };
+        let x0 = rect.x.floor().max(0.0) as i32;
+        let y0 = rect.y.floor().max(0.0) as i32;
+        let x1 = rect.right().ceil().min(self.width as f32) as i32;
+        let y1 = rect.bottom().ceil().min(self.height as f32) as i32;
+        let stride = self.width as usize;
+        for y in y0..y1 {
+            let row = y as usize * stride;
+            for x in x0..x1 {
+                let mut hits = 0;
+                for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                    if winding(x as f32 + ox, y as f32 + oy, contours) != 0 {
+                        hits += 1;
+                    }
+                }
+                if hits == 0 {
+                    continue;
+                }
+                let index = row + x as usize;
+                let coverage = (hits * 255 / 4) as u8;
+                self.pixels[index] = blend(self.pixels[index], color, coverage);
+            }
+        }
+    }
+
+    pub fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color, clip: Rect) {
+        if radius <= 0.0 || color.a == 0 {
+            return;
+        }
+        self.fill_round(
+            Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0),
+            color,
+            radius,
+            clip,
+        );
+    }
+
     pub fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect) {
         if dest.width <= 0.0 || dest.height <= 0.0 || bitmap.width == 0 || bitmap.height == 0 {
             return;
@@ -76,7 +165,12 @@ impl Canvas<'_> {
                 let u = (u as i64).clamp(0, bitmap.width as i64 - 1) as u32;
                 let v = (v as i64).clamp(0, bitmap.height as i64 - 1) as u32;
                 let packed = bitmap.pixels[(v * bitmap.width + u) as usize];
-                let color = Color::rgba((packed >> 16) as u8, (packed >> 8) as u8, packed as u8, (packed >> 24) as u8);
+                let color = Color::rgba(
+                    (packed >> 16) as u8,
+                    (packed >> 8) as u8,
+                    packed as u8,
+                    (packed >> 24) as u8,
+                );
                 if color.a == 0 {
                     continue;
                 }
@@ -103,14 +197,37 @@ impl Canvas<'_> {
         underline: bool,
         clip: Rect,
     ) {
+        self.text_family(
+            fonts, x, baseline, text, size, color, bold, mono, underline, "", clip,
+        );
+    }
+
+    pub fn text_family(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        clip: Rect,
+    ) {
         if text.is_empty() || color.a == 0 || size <= 0.0 {
             return;
         }
         let mut pen = x;
-        for ch in text.chars() {
-            let glyph = fonts.glyph(ch, size, bold, mono);
-            let left = pen.round() as i32 + glyph.xmin;
-            let top = glyph_top(baseline, &glyph);
+        for glyph in fonts.shape(text, size, bold, mono, family) {
+            if !pen.is_finite() || pen < -100_000.0 || pen > 100_000.0 {
+                break;
+            }
+            let left = (pen.round() as i32)
+                .saturating_add(glyph.xmin)
+                .saturating_add(glyph.x_offset.round() as i32);
+            let top = glyph_top(baseline - glyph.y_offset, &glyph);
             for row in 0..glyph.height {
                 for col in 0..glyph.width {
                     let coverage = glyph.coverage[row * glyph.width + col];
@@ -132,9 +249,34 @@ impl Canvas<'_> {
             pen += glyph.advance;
         }
         if underline {
-            let width = fonts.width(text, size, bold, mono);
+            let width = fonts.width_family(text, size, bold, mono, family);
             let y = baseline + (size * 0.12).max(1.0);
             self.fill(Rect::new(x, y, width, (size * 0.06).max(1.0)), color, clip);
+        }
+    }
+}
+
+fn stroke_polyline(
+    canvas: &mut Canvas<'_>,
+    points: &[(f32, f32)],
+    width: f32,
+    color: Color,
+    clip: Rect,
+) {
+    if points.len() < 2 || color.a == 0 {
+        return;
+    }
+    let radius = (width * 0.5).max(0.6);
+    for pair in points.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        let steps = (len / radius.max(0.5)).ceil().max(1.0) as i32;
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            canvas.fill_circle(x0 + dx * t, y0 + dy * t, radius, color, clip);
         }
     }
 }
@@ -150,8 +292,26 @@ pub fn paint_layout(
     paint_box(canvas, &tree.root, fonts, clip, scroll, origin_y);
 }
 
-fn paint_box(canvas: &mut Canvas<'_>, box_: &LayoutBox, fonts: &FontBook, clip: Rect, scroll: f32, origin_y: f32) {
-    paint_box_with_opacity(canvas, box_, fonts, clip, scroll, origin_y, 1.0, false);
+fn paint_box(
+    canvas: &mut Canvas<'_>,
+    box_: &LayoutBox,
+    fonts: &FontBook,
+    clip: Rect,
+    scroll: f32,
+    origin_y: f32,
+) {
+    paint_box_with_opacity(
+        canvas,
+        box_,
+        fonts,
+        clip,
+        scroll,
+        origin_y,
+        1.0,
+        false,
+        0.0,
+        f32::INFINITY,
+    );
 }
 
 fn paint_box_with_opacity(
@@ -163,17 +323,72 @@ fn paint_box_with_opacity(
     origin_y: f32,
     opacity: f32,
     pinned: bool,
+    shift: f32,
+    parent_bottom: f32,
 ) {
     if !box_.visible {
         return;
     }
     let pinned = pinned || box_.fixed;
     let opacity = (opacity * box_.opacity).clamp(0.0, 1.0);
-    let screen_y = if pinned { box_.rect.y + origin_y } else { box_.rect.y - scroll + origin_y };
+    let natural_y = if pinned {
+        box_.rect.y + origin_y
+    } else {
+        box_.rect.y - scroll + origin_y
+    };
+    let mut stick = 0.0;
+    if box_.sticky && !pinned {
+        if let Some(top) = box_.sticky_top {
+            stick = (origin_y + top - natural_y).max(0.0);
+        }
+        if let Some(bottom) = box_.sticky_bottom {
+            let overflow = natural_y + box_.rect.height - (clip.bottom() - bottom);
+            if overflow > 0.0 {
+                stick = stick.min(-overflow);
+            }
+        }
+        if parent_bottom.is_finite() {
+            let room = parent_bottom - (natural_y + box_.rect.height);
+            stick = stick.min(room.max(0.0));
+        }
+    }
+    let shift = shift + stick;
+    let screen_y = natural_y + shift;
     let screen = Rect::new(box_.rect.x, screen_y, box_.rect.width, box_.rect.height);
+    if let Some(shadow) = box_.shadow {
+        paint_shadow(canvas, screen, shadow, clip);
+    }
     let background = scale_alpha(box_.background, opacity);
-    if background.a > 0 {
+    if let Some((top, bottom)) = box_.gradient {
+        let top = scale_alpha(top, opacity);
+        let bottom = scale_alpha(bottom, opacity);
+        if box_.border_radius > 0.0 {
+            canvas.fill_round(screen, mix(top, bottom), box_.border_radius, clip);
+        } else {
+            canvas.fill_vertical(screen, top, bottom, clip);
+        }
+    } else if background.a > 0 {
         canvas.fill_round(screen, background, box_.border_radius, clip);
+    }
+    let shape_clip = intersect(clip, screen).unwrap_or(clip);
+    for shape in &box_.shapes {
+        let moved: Vec<(f32, f32)> = shape
+            .points
+            .iter()
+            .map(|(x, y)| (screen.x + x, screen.y + y))
+            .collect();
+        if let Some(fill) = shape.fill {
+            canvas.fill_contours(&[moved.clone()], scale_alpha(fill, opacity), shape_clip);
+        }
+        if let Some(stroke) = shape.stroke {
+            stroke_polyline(
+                canvas,
+                &moved,
+                shape.stroke_width,
+                scale_alpha(stroke, opacity),
+                shape_clip,
+            );
+        }
     }
     if let Some(bitmap) = &box_.image {
         let left = box_.borders[3].max(0.0);
@@ -198,16 +413,32 @@ fn paint_box_with_opacity(
         let bottom = box_.borders[2].max(0.0);
         let left = box_.borders[3].max(0.0);
         if top > 0.0 {
-            canvas.fill(Rect::new(screen.x, screen.y, screen.width, top), border_color, clip);
+            canvas.fill(
+                Rect::new(screen.x, screen.y, screen.width, top),
+                border_color,
+                clip,
+            );
         }
         if bottom > 0.0 {
-            canvas.fill(Rect::new(screen.x, screen.bottom() - bottom, screen.width, bottom), border_color, clip);
+            canvas.fill(
+                Rect::new(screen.x, screen.bottom() - bottom, screen.width, bottom),
+                border_color,
+                clip,
+            );
         }
         if left > 0.0 {
-            canvas.fill(Rect::new(screen.x, screen.y, left, screen.height), border_color, clip);
+            canvas.fill(
+                Rect::new(screen.x, screen.y, left, screen.height),
+                border_color,
+                clip,
+            );
         }
         if right > 0.0 {
-            canvas.fill(Rect::new(screen.right() - right, screen.y, right, screen.height), border_color, clip);
+            canvas.fill(
+                Rect::new(screen.right() - right, screen.y, right, screen.height),
+                border_color,
+                clip,
+            );
         }
     }
     let child_clip = if box_.overflow_hidden {
@@ -222,8 +453,15 @@ fn paint_box_with_opacity(
         let baseline = box_
             .lines
             .first()
-            .map(|line| if pinned { line.baseline + origin_y } else { line.baseline - scroll + origin_y })
-            .unwrap_or(screen.y + box_.font_size);
+            .map(|line| {
+                if pinned {
+                    line.baseline + origin_y
+                } else {
+                    line.baseline - scroll + origin_y
+                }
+            })
+            .unwrap_or(screen.y + box_.font_size)
+            + shift;
         canvas.text(
             fonts,
             screen.x - 18.0,
@@ -238,9 +476,13 @@ fn paint_box_with_opacity(
         );
     }
     for line in &box_.lines {
-        let baseline = if pinned { line.baseline + origin_y } else { line.baseline - scroll + origin_y };
+        let baseline = if pinned {
+            line.baseline + origin_y
+        } else {
+            line.baseline - scroll + origin_y
+        } + shift;
         for fragment in &line.fragments {
-            canvas.text(
+            canvas.text_family(
                 fonts,
                 fragment.x,
                 baseline,
@@ -250,6 +492,7 @@ fn paint_box_with_opacity(
                 fragment.bold,
                 fragment.mono,
                 fragment.underline,
+                &fragment.family,
                 child_clip,
             );
         }
@@ -257,7 +500,71 @@ fn paint_box_with_opacity(
     let mut order: Vec<usize> = (0..box_.children.len()).collect();
     order.sort_by_key(|index| box_.children[*index].z_index);
     for index in order {
-        paint_box_with_opacity(canvas, &box_.children[index], fonts, child_clip, scroll, origin_y, opacity, pinned);
+        paint_box_with_opacity(
+            canvas,
+            &box_.children[index],
+            fonts,
+            child_clip,
+            scroll,
+            origin_y,
+            opacity,
+            pinned,
+            shift,
+            screen.bottom(),
+        );
+    }
+    if let Some(frame) = &box_.frame {
+        let mut nested = frame.root.clone();
+        let dx = screen.x - nested.rect.x;
+        let dy = screen.y - nested.rect.y;
+        shift_box(&mut nested, dx, dy);
+        let frame_clip = intersect(child_clip, screen).unwrap_or(screen);
+        paint_box_with_opacity(
+            canvas,
+            &nested,
+            fonts,
+            frame_clip,
+            0.0,
+            0.0,
+            opacity,
+            true,
+            0.0,
+            f32::INFINITY,
+        );
+    }
+}
+
+fn shift_box(box_: &mut LayoutBox, dx: f32, dy: f32) {
+    box_.rect.x += dx;
+    box_.rect.y += dy;
+    for line in &mut box_.lines {
+        line.baseline += dy;
+        for fragment in &mut line.fragments {
+            fragment.x += dx;
+        }
+    }
+    for child in &mut box_.children {
+        shift_box(child, dx, dy);
+    }
+}
+
+fn paint_shadow(canvas: &mut Canvas<'_>, screen: Rect, shadow: mithu_style::BoxShadow, clip: Rect) {
+    let layers = 4;
+    for layer in 1..=layers {
+        let t = layer as f32 / layers as f32;
+        let grow = shadow.blur.max(0.0) * t + shadow.spread;
+        let alpha = (f32::from(shadow.color.a) * (1.0 - t) * 0.45) as u8;
+        if alpha == 0 {
+            continue;
+        }
+        let color = mithu_base::Color::rgba(shadow.color.r, shadow.color.g, shadow.color.b, alpha);
+        let rect = Rect::new(
+            screen.x + shadow.x - grow,
+            screen.y + shadow.y - grow,
+            (screen.width + grow * 2.0).max(0.0),
+            (screen.height + grow * 2.0).max(0.0),
+        );
+        canvas.fill_round(rect, color, screen.height.min(8.0) + grow, clip);
     }
 }
 
@@ -267,6 +574,20 @@ fn scale_alpha(color: Color, opacity: f32) -> Color {
         g: color.g,
         b: color.b,
         a: (f32::from(color.a) * opacity).round().clamp(0.0, 255.0) as u8,
+    }
+}
+
+fn mix(top: Color, bottom: Color) -> Color {
+    mix_t(top, bottom, 0.5)
+}
+
+fn mix_t(top: Color, bottom: Color, t: f32) -> Color {
+    let lerp = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color {
+        r: lerp(top.r, bottom.r),
+        g: lerp(top.g, bottom.g),
+        b: lerp(top.b, bottom.b),
+        a: lerp(top.a, bottom.a),
     }
 }
 
@@ -298,6 +619,27 @@ fn inside_round(x: i32, y: i32, rect: Rect, radius: f32) -> bool {
     let dx = px - cx;
     let dy = py - cy;
     dx * dx + dy * dy <= radius * radius
+}
+
+fn winding(px: f32, py: f32, contours: &[Vec<(f32, f32)>]) -> i32 {
+    let mut wind = 0;
+    for contour in contours {
+        let count = contour.len();
+        if count < 2 {
+            continue;
+        }
+        for index in 0..count {
+            let (x0, y0) = contour[index];
+            let (x1, y1) = contour[(index + 1) % count];
+            if (y0 <= py && y1 > py) || (y1 <= py && y0 > py) {
+                let t = (py - y0) / (y1 - y0);
+                if x0 + t * (x1 - x0) > px {
+                    wind += if y1 > y0 { 1 } else { -1 };
+                }
+            }
+        }
+    }
+    wind
 }
 
 fn intersect(rect: Rect, clip: Rect) -> Option<Rect> {
@@ -359,7 +701,10 @@ mod tests {
             false,
             Rect::new(0.0, 0.0, 80.0, 80.0),
         );
-        let above = pixels.iter().take(50 * 80).any(|pixel| *pixel != Color::WHITE.to_u32());
+        let above = pixels
+            .iter()
+            .take(50 * 80)
+            .any(|pixel| *pixel != Color::WHITE.to_u32());
         assert!(above, "glyph should rise above the baseline");
     }
 }
