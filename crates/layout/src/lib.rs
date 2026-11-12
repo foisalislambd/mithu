@@ -169,13 +169,17 @@ fn layout_node(
     if doc.element_name(id) == Some("img") {
         if let Some(bitmap) = &image {
             apply_intrinsic(&mut style, bitmap);
-        } else if matches!(style.width, Length::Auto) && matches!(style.height, Length::Auto) {
-            style.width = Length::Px(300.0);
-            style.height = Length::Px(150.0);
-        } else if matches!(style.width, Length::Auto) {
-            style.width = Length::Px(300.0);
-        } else if matches!(style.height, Length::Auto) {
-            style.height = Length::Px(150.0);
+        } else {
+            // The HTML width/height attributes are the intrinsic size until the
+            // bitmap arrives. A missing image is 300×150 only when both are absent.
+            let attr_w = attribute_px(doc, id, "width");
+            let attr_h = attribute_px(doc, id, "height");
+            if matches!(style.width, Length::Auto) {
+                style.width = Length::Px(attr_w.unwrap_or(300.0));
+            }
+            if matches!(style.height, Length::Auto) {
+                style.height = Length::Px(attr_h.unwrap_or(150.0));
+            }
         }
     }
     let display = effective_display(doc, styles, id);
@@ -327,6 +331,12 @@ fn layout_node(
             view,
         )
     } else if blockish {
+        if shrink && width_is_auto {
+            let intrinsic = max_content_width(doc, styles, measure, id, content_w);
+            if intrinsic + 0.5 < content_w {
+                content_w = intrinsic;
+            }
+        }
         layout_blocks(
             doc,
             styles,
@@ -486,7 +496,12 @@ fn layout_node(
             .unwrap_or(0.0);
         translate(&mut laid_out, dx, dy);
     }
-    expand_ink(&mut laid_out);
+    // A definite block or grid area keeps its containing width. Growing it to
+    // overflowing children is what stretched Wikipedia's toolbar across the
+    // article column. Shrink-to-fit boxes still grow to their max-content.
+    if shrink || matches!(display, Display::InlineBlock | Display::InlineFlex) {
+        expand_ink(&mut laid_out);
+    }
     Some(laid_out)
 }
 
@@ -1651,6 +1666,98 @@ fn own_href(doc: &Document, id: NodeId) -> Option<String> {
     } else {
         None
     }
+}
+
+fn attribute_px(doc: &Document, id: NodeId, name: &str) -> Option<f32> {
+    let text = doc.attr(id, name)?;
+    let number: String = text
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
+    let value = number.parse::<f32>().ok()?;
+    (value > 0.0).then_some(value)
+}
+
+/// Max-content width of a shrink-to-fit box, capped by the available line.
+/// Block children contribute their own max-content instead of stretching.
+fn max_content_width(
+    doc: &Document,
+    styles: &[ComputedStyle],
+    measure: &dyn MeasureText,
+    id: NodeId,
+    cap: f32,
+) -> f32 {
+    let style = style_of(styles, id);
+    let mut line = 0.0f32;
+    let mut widest = 0.0f32;
+    let break_line = |line: &mut f32, widest: &mut f32| {
+        *widest = widest.max(*line);
+        *line = 0.0;
+    };
+    for child in doc.node(id).children.clone() {
+        match &doc.node(child).data {
+            NodeData::Text(text) => {
+                for word in text.split_whitespace() {
+                    let width = measure.width_family(
+                        word,
+                        style.font_size,
+                        style.bold,
+                        style.mono,
+                        &style.font_family,
+                    );
+                    let space = if line > 0.0 {
+                        measure.width(" ", style.font_size, style.bold, style.mono)
+                    } else {
+                        0.0
+                    };
+                    if line > 0.0 && line + space + width > cap {
+                        break_line(&mut line, &mut widest);
+                    }
+                    line += space + width;
+                    widest = widest.max(line);
+                }
+            }
+            NodeData::Element(_) => {
+                if is_skipped(doc, styles, child) {
+                    continue;
+                }
+                let child_style = style_of(styles, child);
+                let specified = resolve_length(
+                    child_style.width,
+                    child_style.font_size,
+                    cap,
+                    View {
+                        width: cap,
+                        height: cap,
+                        root: style.font_size,
+                    },
+                );
+                let child_width = if let Some(width) = specified {
+                    width
+                } else if doc.element_name(child) == Some("img") {
+                    attribute_px(doc, child, "width").unwrap_or(300.0)
+                } else {
+                    max_content_width(doc, styles, measure, child, cap)
+                };
+                let block = matches!(
+                    child_style.display,
+                    Display::Block | Display::Flex | Display::Grid | Display::ListItem
+                );
+                if block {
+                    break_line(&mut line, &mut widest);
+                    widest = widest.max(child_width.min(cap));
+                } else {
+                    if line > 0.0 && line + child_width > cap {
+                        break_line(&mut line, &mut widest);
+                    }
+                    line += child_width;
+                    widest = widest.max(line);
+                }
+            }
+            _ => {}
+        }
+    }
+    widest.max(line).min(cap).max(0.0)
 }
 
 fn synthetic_text(doc: &Document, id: NodeId) -> Option<String> {
@@ -3250,6 +3357,78 @@ mod tests {
             lead.rect.x,
             toc.rect.right()
         );
+        assert!(
+            (bar.rect.width - lead.rect.width).abs() < 80.0,
+            "toolbar {} lead {}",
+            bar.rect.width,
+            lead.rect.width
+        );
+    }
+
+    #[test]
+    fn an_image_width_attribute_shrinks_its_right_float() {
+        let doc = parse_html(
+            r#"<div id="host">
+              <div id="flag" style="float:right;display:flex">
+                <div style="display:inline-block"><div><img alt="This is a good article" width="19" height="20"></div></div>
+              </div>
+              <div id="tag">From Wikipedia, the free encyclopedia</div>
+            </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 800.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let flag = find(&tree.root, doc.get_element_by_id("flag").unwrap()).unwrap();
+        let tag = find(&tree.root, doc.get_element_by_id("tag").unwrap()).unwrap();
+        assert!(flag.rect.width < 80.0, "float stretched to {}", flag.rect.width);
+        assert!(tag.rect.width > 400.0, "tagline squeezed to {}", tag.rect.width);
+    }
+
+    #[test]
+    fn mdn_article_column_sits_between_the_sidebars() {
+        let doc = parse_html(
+            r#"<div class="layout">
+              <nav id="left" class="layout__left-sidebar">Sidebar</nav>
+              <div id="article" class="layout__body">Window</div>
+              <aside id="right" class="layout__right-sidebar">In this article</aside>
+            </div>"#,
+        );
+        let styles = style_document(
+            &doc,
+            r#"
+            :root {
+              --layout-sidebar-min: 15rem;
+              --layout-sidebar-gap: 2rem;
+              --layout-content-max: 48rem;
+              --layout-2-sidebars: [full-start left-sidebar-start] minmax(var(--layout-sidebar-min), 1fr) [left-sidebar-end] var(--layout-sidebar-gap) [content-start] minmax(0, var(--layout-content-max)) [content-end] var(--layout-sidebar-gap) [right-sidebar-start] minmax(var(--layout-sidebar-min), 1fr) [full-end right-sidebar-end];
+            }
+            .layout { display: grid; grid-template-columns: var(--layout-2-sidebars);
+              grid-template-areas: "left-sidebar . header . right-sidebar" "left-sidebar . body . right-sidebar"; }
+            .layout__left-sidebar { grid-area: left-sidebar; }
+            .layout__body { grid-area: body; }
+            .layout__right-sidebar { grid-area: right-sidebar; }
+            "#,
+        );
+        let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+        let left = find(&tree.root, doc.get_element_by_id("left").unwrap()).unwrap();
+        let article = find(&tree.root, doc.get_element_by_id("article").unwrap()).unwrap();
+        let right = find(&tree.root, doc.get_element_by_id("right").unwrap()).unwrap();
+        assert!(
+            article.rect.x > left.rect.right() - 1.0,
+            "article x {} left right {}",
+            article.rect.x,
+            left.rect.right()
+        );
+        assert!(
+            right.rect.x > article.rect.right() - 1.0,
+            "right x {} article right {}",
+            right.rect.x,
+            article.rect.right()
+        );
+        assert!(
+            article.rect.width > 400.0,
+            "article width {}",
+            article.rect.width
+        );
     }
 
     #[test]
@@ -3402,5 +3581,52 @@ mod tests {
             a.rect.x
         );
         assert!(c.rect.y > a.rect.y, "c y {} a y {}", c.rect.y, a.rect.y);
+    }
+
+    #[test]
+    fn wpt_css_subset_reports_a_pass_rate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/css");
+        let mut files: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "html"))
+            .collect();
+        files.sort();
+        assert!(!files.is_empty());
+        let mut passed = 0usize;
+        let mut notes = Vec::new();
+        for path in &files {
+            let html = std::fs::read_to_string(path).unwrap();
+            let doc = parse_html(&html);
+            let css = doc.stylesheets.join("\n");
+            let styles = style_document(&doc, &css);
+            let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+            let name = path.file_stem().unwrap().to_string_lossy();
+            let ok = match name.as_ref() {
+                "float-beside-tagline" => {
+                    let flag = find(&tree.root, doc.get_element_by_id("flag").unwrap()).unwrap();
+                    let tag = find(&tree.root, doc.get_element_by_id("tag").unwrap()).unwrap();
+                    flag.rect.width < 80.0 && tag.rect.width > 400.0
+                }
+                "two-sidebars" => {
+                    let left = find(&tree.root, doc.get_element_by_id("left").unwrap()).unwrap();
+                    let article = find(&tree.root, doc.get_element_by_id("article").unwrap()).unwrap();
+                    let right = find(&tree.root, doc.get_element_by_id("right").unwrap()).unwrap();
+                    article.rect.x + 1.0 >= left.rect.right()
+                        && right.rect.x + 1.0 >= article.rect.right()
+                        && article.rect.width > 400.0
+                }
+                _ => false,
+            };
+            if ok {
+                passed += 1;
+            } else {
+                notes.push(name.to_string());
+            }
+        }
+        let report = format!("wpt css subset {passed}/{} {notes:?}", files.len());
+        eprintln!("{report}");
+        assert_eq!(passed, files.len(), "{notes:?}");
     }
 }

@@ -1,0 +1,19 @@
+<!doctype html>
+<style>
+  :root {
+    --layout-sidebar-min: 15rem;
+    --layout-sidebar-gap: 2rem;
+    --layout-content-max: 48rem;
+    --layout-2-sidebars: [full-start left-sidebar-start] minmax(var(--layout-sidebar-min), 1fr) [left-sidebar-end] var(--layout-sidebar-gap) [content-start] minmax(0, var(--layout-content-max)) [content-end] var(--layout-sidebar-gap) [right-sidebar-start] minmax(var(--layout-sidebar-min), 1fr) [full-end right-sidebar-end];
+  }
+  .layout { display: grid; grid-template-columns: var(--layout-2-sidebars);
+    grid-template-areas: "left-sidebar . header . right-sidebar" "left-sidebar . body . right-sidebar"; }
+  .layout__left-sidebar { grid-area: left-sidebar; }
+  .layout__body { grid-area: body; }
+  .layout__right-sidebar { grid-area: right-sidebar; }
+</style>
+<div class="layout">
+  <nav id="left" class="layout__left-sidebar">Sidebar</nav>
+  <div id="article" class="layout__body">Window</div>
+  <aside id="right" class="layout__right-sidebar">Notes</aside>
+</div>

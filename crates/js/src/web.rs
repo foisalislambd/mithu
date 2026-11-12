@@ -39,6 +39,7 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     context.register_global_class::<AbortControllerHost>()?;
     context.register_global_class::<HtmlTemplateHost>()?;
     context.register_global_class::<FontFaceHost>()?;
+    context.register_global_class::<RangeHost>()?;
     context.register_global_class::<IntersectionObserverHost>()?;
     context.register_global_class::<ResizeObserverHost>()?;
     register_html_elements(context)?;
@@ -1522,7 +1523,32 @@ struct DocumentHost;
 impl Class for DocumentHost {
     const NAME: &'static str = "Document";
 
-    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("querySelector"),
+            1,
+            NativeFunction::from_fn_ptr(super::query_selector),
+        );
+        class.method(
+            js_string!("querySelectorAll"),
+            1,
+            NativeFunction::from_fn_ptr(super::query_selector_all),
+        );
+        class.method(
+            js_string!("importNode"),
+            1,
+            NativeFunction::from_fn_ptr(super::import_node),
+        );
+        class.method(
+            js_string!("prepend"),
+            0,
+            NativeFunction::from_fn_ptr(super::prepend_nodes),
+        );
+        class.method(
+            js_string!("append"),
+            0,
+            NativeFunction::from_fn_ptr(super::append_nodes),
+        );
         Ok(())
     }
 
@@ -1803,17 +1829,17 @@ impl Class for EventTargetHost {
         class.method(
             js_string!("addEventListener"),
             2,
-            NativeFunction::from_fn_ptr(signal_ignore),
+            NativeFunction::from_fn_ptr(super::add_event_listener),
         );
         class.method(
             js_string!("removeEventListener"),
             2,
-            NativeFunction::from_fn_ptr(signal_ignore),
+            NativeFunction::from_fn_ptr(super::remove_event_listener),
         );
         class.method(
             js_string!("dispatchEvent"),
             1,
-            NativeFunction::from_fn_ptr(signal_ignore),
+            NativeFunction::from_fn_ptr(super::dispatch_event),
         );
         Ok(())
     }
@@ -1872,6 +1898,100 @@ impl Class for ElementHost {
             1,
             NativeFunction::from_fn_ptr(element_animate),
         );
+        class.method(
+            js_string!("attachShadow"),
+            1,
+            NativeFunction::from_fn_ptr(super::attach_shadow),
+        );
+        class.method(
+            js_string!("getAttribute"),
+            1,
+            NativeFunction::from_fn_ptr(super::get_attribute),
+        );
+        class.method(
+            js_string!("setAttribute"),
+            2,
+            NativeFunction::from_fn_ptr(super::set_attribute),
+        );
+        class.method(
+            js_string!("removeAttribute"),
+            1,
+            NativeFunction::from_fn_ptr(super::remove_attribute),
+        );
+        class.method(
+            js_string!("toggleAttribute"),
+            1,
+            NativeFunction::from_fn_ptr(super::toggle_attribute),
+        );
+        class.method(
+            js_string!("getAttributeNS"),
+            2,
+            NativeFunction::from_fn_ptr(super::attribute_ns),
+        );
+        class.method(
+            js_string!("setAttributeNS"),
+            3,
+            NativeFunction::from_fn_ptr(super::set_attribute_ns),
+        );
+        class.method(
+            js_string!("removeAttributeNS"),
+            2,
+            NativeFunction::from_fn_ptr(super::remove_attribute_ns),
+        );
+        class.method(
+            js_string!("insertAdjacentHTML"),
+            2,
+            NativeFunction::from_fn_ptr(super::insert_adjacent_html),
+        );
+        class.method(
+            js_string!("insertAdjacentElement"),
+            2,
+            NativeFunction::from_fn_ptr(super::insert_adjacent_element),
+        );
+        class.method(
+            js_string!("querySelector"),
+            1,
+            NativeFunction::from_fn_ptr(super::query_selector),
+        );
+        class.method(
+            js_string!("querySelectorAll"),
+            1,
+            NativeFunction::from_fn_ptr(super::query_selector_all),
+        );
+        class.method(
+            js_string!("prepend"),
+            0,
+            NativeFunction::from_fn_ptr(super::prepend_nodes),
+        );
+        class.method(
+            js_string!("append"),
+            0,
+            NativeFunction::from_fn_ptr(super::append_nodes),
+        );
+        class.method(
+            js_string!("before"),
+            0,
+            NativeFunction::from_fn_ptr(super::before_node),
+        );
+        class.method(
+            js_string!("after"),
+            0,
+            NativeFunction::from_fn_ptr(super::after_node),
+        );
+        class.method(
+            js_string!("remove"),
+            0,
+            NativeFunction::from_fn_ptr(super::remove_self),
+        );
+        let html_get = {
+            let context = class.context();
+            native(context, "get innerHTML", 0, super::get_html)
+        };
+        let html_set = {
+            let context = class.context();
+            native(context, "set innerHTML", 1, super::set_html)
+        };
+        class.accessor(js_string!("innerHTML"), Some(html_get), Some(html_set), ATTR);
         Ok(())
     }
 
@@ -1890,7 +2010,27 @@ struct DocumentFragmentHost;
 impl Class for DocumentFragmentHost {
     const NAME: &'static str = "DocumentFragment";
 
-    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("prepend"),
+            0,
+            NativeFunction::from_fn_ptr(super::prepend_nodes),
+        );
+        class.method(
+            js_string!("append"),
+            0,
+            NativeFunction::from_fn_ptr(super::append_nodes),
+        );
+        class.method(
+            js_string!("querySelector"),
+            1,
+            NativeFunction::from_fn_ptr(super::query_selector),
+        );
+        class.method(
+            js_string!("querySelectorAll"),
+            1,
+            NativeFunction::from_fn_ptr(super::query_selector_all),
+        );
         Ok(())
     }
 
@@ -2167,6 +2307,104 @@ fn intersection_observe(
         let _ = function.call(this, &[JsValue::from(records), this.clone()], context);
     }
     Ok(JsValue::undefined())
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct RangeHost;
+
+impl Class for RangeHost {
+    const NAME: &'static str = "Range";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        for name in [
+            "setStart",
+            "setEnd",
+            "setStartBefore",
+            "setStartAfter",
+            "setEndBefore",
+            "setEndAfter",
+            "selectNode",
+            "selectNodeContents",
+            "collapse",
+            "cloneContents",
+            "deleteContents",
+            "extractContents",
+            "insertNode",
+            "surroundContents",
+        ] {
+            class.method(
+                js_string!(name.to_string()),
+                0,
+                NativeFunction::from_fn_ptr(range_noop),
+            );
+        }
+        class.method(
+            js_string!("getBoundingClientRect"),
+            0,
+            NativeFunction::from_fn_ptr(range_rect),
+        );
+        class.method(
+            js_string!("getClientRects"),
+            0,
+            NativeFunction::from_fn_ptr(range_rects),
+        );
+        class.method(
+            js_string!("cloneRange"),
+            0,
+            NativeFunction::from_fn_ptr(range_clone),
+        );
+        class.method(
+            js_string!("toString"),
+            0,
+            NativeFunction::from_fn_ptr(range_string),
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+}
+
+fn range_noop(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn range_string(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!("").into())
+}
+
+fn range_rect(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(ObjectInitializer::new(context)
+        .property(js_string!("x"), JsValue::from(0), ATTR)
+        .property(js_string!("y"), JsValue::from(0), ATTR)
+        .property(js_string!("width"), JsValue::from(0), ATTR)
+        .property(js_string!("height"), JsValue::from(0), ATTR)
+        .property(js_string!("top"), JsValue::from(0), ATTR)
+        .property(js_string!("right"), JsValue::from(0), ATTR)
+        .property(js_string!("bottom"), JsValue::from(0), ATTR)
+        .property(js_string!("left"), JsValue::from(0), ATTR)
+        .build()
+        .into())
+}
+
+fn range_rects(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let rect = range_rect(this, args, context)?;
+    Ok(JsArray::from_iter([rect], context).into())
+}
+
+fn range_clone(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let constructor = context.global_object().get(js_string!("Range"), context)?;
+    let Some(constructor) = constructor.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    constructor
+        .construct(&[], None, context)
+        .map(JsValue::from)
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]

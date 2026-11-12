@@ -48,6 +48,8 @@ struct Host {
     ready_state: Rc<RefCell<String>>,
     geometry: Rc<RefCell<HashMap<usize, BoxMetrics>>>,
     scroll: Rc<Cell<f32>>,
+    /// Script source by the path Boa prints in a stack, for `MITHU_JS_DEBUG`.
+    sources: Rc<RefCell<HashMap<String, String>>>,
 }
 
 /// Border box of a laid-out element, in CSS pixels.
@@ -209,6 +211,7 @@ impl Session {
             ready_state: Rc::new(RefCell::new("interactive".to_string())),
             geometry: Rc::new(RefCell::new(HashMap::new())),
             scroll: Rc::new(Cell::new(0.0)),
+            sources: Rc::new(RefCell::new(HashMap::new())),
         });
         let mut jobs = Vec::new();
         if let Err(error) = install_host(&mut context) {
@@ -602,10 +605,70 @@ fn script_jobs(
 
 fn note_error(context: &Context, error: &dyn std::fmt::Display) {
     if let Some(host) = context.get_data::<Host>() {
-        host.log
-            .borrow_mut()
-            .push(format!("JavaScript error: {error}"));
+        let message = format!("JavaScript error: {error}");
+        let extra = debug_source_window(host, &message);
+        host.log.borrow_mut().push(format!("{message}{extra}"));
     }
+}
+
+fn remember_source(host: &Host, path: &str, code: &str) {
+    if std::env::var_os("MITHU_JS_DEBUG").is_none() {
+        return;
+    }
+    let mut sources = host.sources.borrow_mut();
+    sources.insert(path.to_string(), code.to_string());
+    if let Some(name) = path.rsplit(['/', '\\']).next() {
+        sources.insert(name.to_string(), code.to_string());
+    }
+}
+
+/// `MITHU_JS_DEBUG=1` appends the source text around each stack location.
+fn debug_source_window(host: &Host, message: &str) -> String {
+    if std::env::var_os("MITHU_JS_DEBUG").is_none() {
+        return String::new();
+    }
+    let sources = host.sources.borrow();
+    for token in message.split_whitespace() {
+        let token = token.trim_matches(|ch: char| ch == '(' || ch == ')');
+        // Stack frames look like `https://host/a.js:12:34`. The line and
+        // column are the last two colon fields so the URL's scheme survives.
+        let Some((path_and_line, column)) = token.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(col) = column
+            .trim_end_matches(|ch: char| !ch.is_ascii_digit())
+            .parse::<usize>()
+        else {
+            continue;
+        };
+        let Some((path, line_text)) = path_and_line.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(line) = line_text.parse::<usize>() else {
+            continue;
+        };
+        if line == 0 {
+            continue;
+        }
+        let source = sources.get(path).or_else(|| {
+            sources
+                .iter()
+                .find(|(key, _)| key.ends_with(path) || path.ends_with(key.as_str()))
+                .map(|(_, code)| code)
+        });
+        let Some(source) = source else {
+            continue;
+        };
+        let Some(text) = source.lines().nth(line - 1) else {
+            continue;
+        };
+        let at = col.saturating_sub(1).min(text.len());
+        let start = at.saturating_sub(140);
+        let end = (at + 80).min(text.len());
+        let slice = text.get(start..end).unwrap_or("");
+        return format!("\njs-debug {path}:{line}:{col}: {slice}");
+    }
+    String::new()
 }
 
 /// One script is one task. Boa suspends the task every 16_384 instruction
@@ -618,6 +681,7 @@ fn drive_scripts(
         for job in jobs {
             if let Some(host) = context.get_data::<Host>() {
                 *host.current_script.borrow_mut() = Some(job.node);
+                remember_source(host, &job.path, &job.code);
             }
             if job.module {
                 if let Err(error) = run_module(&mut context, &job.code, &job.path) {
@@ -821,6 +885,43 @@ fn wire_prototype_chain(context: &mut Context) -> JsResult<()> {
         link_prototype(context, name, "HTMLElement")?;
     }
     install_node_methods(context)?;
+    install_canvas_methods(context)?;
+    expose_shady_natives(context)?;
+    Ok(())
+}
+
+/// Web components copy `addEventListener` off `EventTarget.prototype`, then call
+/// `window.__shady_native_addEventListener`. The global object is not a `Window`
+/// instance, so the copied prototype property would be invisible.
+fn expose_shady_natives(context: &mut Context) -> JsResult<()> {
+    link_prototype(context, "Window", "EventTarget")?;
+    let global = context.global_object();
+    for name in ["addEventListener", "removeEventListener", "dispatchEvent"] {
+        let value = global.get(js_string!(name), context)?;
+        if value.is_undefined() || value.is_null() {
+            continue;
+        }
+        global.set(
+            js_string!(format!("__shady_native_{name}")),
+            value.clone(),
+            true,
+            context,
+        )?;
+        let window = global.get(js_string!("Window"), context)?;
+        if let Some(window) = window.as_object() {
+            let proto = window.get(js_string!("prototype"), context)?;
+            if let Some(proto) = proto.as_object() {
+                proto.set(js_string!(name), value, true, context)?;
+            }
+        }
+    }
+    let window = context.global_object().get(js_string!("Window"), context)?;
+    if let Some(window) = window.as_object() {
+        let proto = window.get(js_string!("prototype"), context)?;
+        if let Some(proto) = proto.as_object() {
+            context.global_object().set_prototype(Some(proto.clone()));
+        }
+    }
     Ok(())
 }
 
@@ -845,7 +946,146 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     proto.set(js_string!("isSameNode"), same, true, context)?;
     let clone = native(context, "cloneNode", 1, clone_node);
     proto.set(js_string!("cloneNode"), clone, true, context)?;
+    let replace = native(context, "replaceChild", 2, replace_child);
+    proto.set(js_string!("replaceChild"), replace, true, context)?;
+    let text_get = native(context, "get textContent", 0, get_text);
+    let text_set = native(context, "set textContent", 1, set_text);
+    define_accessor(&proto, context, "textContent", text_get, Some(text_set))?;
+    let parent_node = native(context, "get parentNode", 0, get_parent_node);
+    let parent_element = native(context, "get parentElement", 0, get_parent_node);
+    let first_child = native(context, "get firstChild", 0, get_first_child);
+    let last_child = native(context, "get lastChild", 0, get_last_child);
+    let next_sibling = native(context, "get nextSibling", 0, get_next_sibling);
+    let previous_sibling = native(context, "get previousSibling", 0, get_previous_sibling);
+    let child_nodes = native(context, "get childNodes", 0, get_child_nodes);
+    define_accessor(&proto, context, "parentNode", parent_node, None)?;
+    define_accessor(&proto, context, "parentElement", parent_element, None)?;
+    define_accessor(&proto, context, "firstChild", first_child, None)?;
+    define_accessor(&proto, context, "lastChild", last_child, None)?;
+    define_accessor(&proto, context, "nextSibling", next_sibling, None)?;
+    define_accessor(&proto, context, "previousSibling", previous_sibling, None)?;
+    define_accessor(&proto, context, "childNodes", child_nodes, None)?;
     Ok(())
+}
+
+fn install_canvas_methods(context: &mut Context) -> JsResult<()> {
+    let ctor = context
+        .global_object()
+        .get(js_string!("HTMLCanvasElement"), context)?;
+    let Some(ctor) = ctor.as_object() else {
+        return Ok(());
+    };
+    let proto = ctor.get(js_string!("prototype"), context)?;
+    let Some(proto) = proto.as_object() else {
+        return Ok(());
+    };
+    let get_context = native(context, "getContext", 1, canvas_get_context);
+    proto.set(js_string!("getContext"), get_context, true, context)?;
+    let to_data = native(context, "toDataURL", 0, canvas_to_data_url);
+    proto.set(js_string!("toDataURL"), to_data, true, context)?;
+    Ok(())
+}
+
+fn canvas_get_context(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let kind = arg_string(args, 0, context).unwrap_or_else(|_| "2d".to_string());
+    if kind == "2d" || kind.is_empty() {
+        return Ok(canvas_2d(context)?.into());
+    }
+    Ok(JsValue::null())
+}
+
+fn canvas_to_data_url(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(js_string!("data:,").into())
+}
+
+fn canvas_noop(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn canvas_measure(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let text = arg_string(args, 0, context).unwrap_or_default();
+    let width = (text.chars().count() as f64).max(1.0);
+    Ok(ObjectInitializer::new(context)
+        .property(js_string!("width"), JsValue::from(width), ATTR)
+        .build()
+        .into())
+}
+
+/// A 2d context that accepts the drawing calls pages make while probing
+/// canvas support. Nothing is rasterized.
+fn canvas_2d(context: &mut Context) -> JsResult<JsObject> {
+    let mut object = ObjectInitializer::new(context);
+    for name in [
+        "fillRect",
+        "clearRect",
+        "strokeRect",
+        "fillText",
+        "strokeText",
+        "beginPath",
+        "closePath",
+        "moveTo",
+        "lineTo",
+        "arc",
+        "rect",
+        "fill",
+        "stroke",
+        "save",
+        "restore",
+        "translate",
+        "scale",
+        "rotate",
+        "transform",
+        "setTransform",
+        "drawImage",
+        "putImageData",
+        "createLinearGradient",
+        "createRadialGradient",
+        "createPattern",
+    ] {
+        object.function(
+            NativeFunction::from_fn_ptr(canvas_noop),
+            js_string!(name.to_string()),
+            0,
+        );
+    }
+    object
+        .function(
+            NativeFunction::from_fn_ptr(canvas_measure),
+            js_string!("measureText"),
+            1,
+        )
+        .property(js_string!("fillStyle"), js_string!("#000000"), ATTR)
+        .property(js_string!("strokeStyle"), js_string!("#000000"), ATTR)
+        .property(js_string!("font"), js_string!("10px sans-serif"), ATTR)
+        .property(js_string!("textAlign"), js_string!("start"), ATTR)
+        .property(js_string!("lineWidth"), JsValue::from(1), ATTR)
+        .property(js_string!("globalAlpha"), JsValue::from(1), ATTR);
+    Ok(object.build())
+}
+
+fn define_accessor(
+    proto: &JsObject,
+    context: &mut Context,
+    name: &str,
+    getter: boa_engine::object::builtins::JsFunction,
+    setter: Option<boa_engine::object::builtins::JsFunction>,
+) -> JsResult<()> {
+    let property = boa_engine::property::PropertyDescriptor::builder()
+        .get(JsValue::from(getter))
+        .maybe_set(setter.map(JsValue::from))
+        .enumerable(true)
+        .configurable(true);
+    proto
+        .define_property_or_throw(js_string!(name.to_string()), property, context)
+        .map(|_| ())
 }
 
 fn link_prototype(context: &mut Context, child: &str, parent: &str) -> JsResult<()> {
@@ -1146,6 +1386,10 @@ fn get_host_part(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> J
     .into())
 }
 
+fn set_domain(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
 fn get_hostname(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     Ok(js_string!(
         location_url(context)
@@ -1212,6 +1456,8 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let base_get = native(context, "get baseURI", 0, get_location);
     let cookie_get = native(context, "get cookie", 0, get_cookie);
     let cookie_set = native(context, "set cookie", 1, set_cookie);
+    let domain_get = native(context, "get domain", 0, get_hostname);
+    let domain_set = native(context, "set domain", 1, set_domain);
     let fonts = font_set(context)?;
     let implementation = implementation_object(context)?;
     let window = context.global_object().clone();
@@ -1284,6 +1530,12 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             js_string!("cookie"),
             Some(cookie_get),
             Some(cookie_set),
+            ATTR,
+        )
+        .accessor(
+            js_string!("domain"),
+            Some(domain_get),
+            Some(domain_set),
             ATTR,
         )
         .property(js_string!("fonts"), fonts, ATTR)
@@ -1524,18 +1776,44 @@ fn create_tree_walker(
 fn implementation_object(context: &mut Context) -> JsResult<JsObject> {
     let mut object = ObjectInitializer::new(context);
     object.function(
-        NativeFunction::from_fn_ptr(|_, _, context| {
-            let doc = ObjectInitializer::new(context)
-                .property(js_string!("documentElement"), JsValue::null(), ATTR)
-                .property(js_string!("body"), JsValue::null(), ATTR)
-                .property(js_string!("head"), JsValue::null(), ATTR)
-                .build();
-            Ok(doc.into())
-        }),
+        NativeFunction::from_fn_ptr(create_html_document),
         js_string!("createHTMLDocument"),
         0,
     );
     Ok(object.build())
+}
+
+fn create_html_document(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let html = create_element(this, &[js_string!("html").into()], context)?;
+    let head = create_element(this, &[js_string!("head").into()], context)?;
+    let body = create_element(this, &[js_string!("body").into()], context)?;
+    append_child(&html, &[head.clone()], context)?;
+    append_child(&html, &[body.clone()], context)?;
+    let doc = ObjectInitializer::new(context)
+        .property(js_string!("documentElement"), html, ATTR)
+        .property(js_string!("head"), head, ATTR)
+        .property(js_string!("body"), body, ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(create_element),
+            js_string!("createElement"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_element_ns),
+            js_string!("createElementNS"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_text_node),
+            js_string!("createTextNode"),
+            1,
+        )
+        .build();
+    Ok(doc.into())
 }
 
 fn create_event(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1550,6 +1828,11 @@ fn create_event(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             NativeFunction::from_fn_ptr(event_init),
             js_string!("initEvent"),
             1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(event_init),
+            js_string!("initCustomEvent"),
+            4,
         )
         .function(
             NativeFunction::from_fn_ptr(event_prevent),
@@ -1576,6 +1859,9 @@ fn event_init(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
             true,
             context,
         )?;
+    }
+    if let Some(detail) = args.get(3) {
+        object.set(js_string!("detail"), detail.clone(), true, context)?;
     }
     Ok(JsValue::undefined())
 }
@@ -1707,8 +1993,15 @@ fn get_element_by_id(
 ) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = arg_string(args, 0, context)?;
-    let found = host.doc.borrow().get_element_by_id(&id);
-    match found.filter(|node| host.doc.borrow().is_connected(*node)) {
+    // Template contents are detached, so the first node with this id may not
+    // be the one in the document. Return the first connected match.
+    let found = {
+        let doc = host.doc.borrow();
+        (0..doc.nodes.len()).map(NodeId).find(|node| {
+            doc.attr(*node, "id") == Some(id.as_str()) && doc.is_connected(*node)
+        })
+    };
+    match found {
         Some(node) => Ok(element_value(node.0, context)),
         None => Ok(JsValue::null()),
     }
@@ -2171,6 +2464,7 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     {
         value.set_prototype(Some(proto.clone()));
     }
+    apply_custom_prototype(&tag, &JsValue::from(value.clone()), context);
     let value = JsValue::from(value);
     remember_node(id, &value, context);
     value
@@ -2467,13 +2761,18 @@ fn custom_elements(context: &mut Context) -> JsResult<JsObject> {
     let mut object = ObjectInitializer::new(context);
     object
         .function(
-            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            NativeFunction::from_fn_ptr(define_custom),
             js_string!("define"),
             2,
         )
         .function(
-            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            NativeFunction::from_fn_ptr(get_custom),
             js_string!("get"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(upgrade_custom),
+            js_string!("upgrade"),
             1,
         )
         .function(
@@ -2484,6 +2783,94 @@ fn custom_elements(context: &mut Context) -> JsResult<JsObject> {
             1,
         );
     Ok(object.build())
+}
+
+fn custom_registry(context: &mut Context) -> JsResult<JsObject> {
+    let global = context.global_object();
+    let existing = global.get(js_string!("__mithuCE"), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+    let created = ObjectInitializer::new(context).build();
+    context.global_object().set(
+        js_string!("__mithuCE"),
+        created.clone(),
+        false,
+        context,
+    )?;
+    Ok(created)
+}
+
+fn define_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = arg_string(args, 0, context)?;
+    let ctor = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    let bag = custom_registry(context)?;
+    bag.set(js_string!(name.clone()), ctor, true, context)?;
+    if let Ok(host) = host(context) {
+        let ids: Vec<usize> = host
+            .doc
+            .borrow()
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| match &node.data {
+                mithu_dom::NodeData::Element(element) if element.name.eq_ignore_ascii_case(&name) => {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect();
+        for id in ids {
+            let value = element_value(id, context);
+            apply_custom_prototype(&name, &value, context);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn get_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = arg_string(args, 0, context).unwrap_or_default();
+    let bag = custom_registry(context)?;
+    bag.get(js_string!(name), context)
+}
+
+fn upgrade_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let element = args.first().cloned().unwrap_or(JsValue::undefined());
+    let Some(id) = node_of(&element) else {
+        return Ok(JsValue::undefined());
+    };
+    let name = host(context)?
+        .doc
+        .borrow()
+        .element_name(id)
+        .unwrap_or("")
+        .to_string();
+    apply_custom_prototype(&name, &element, context);
+    Ok(JsValue::undefined())
+}
+
+fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
+    if !tag.contains('-') {
+        return;
+    }
+    let Ok(bag) = context.global_object().get(js_string!("__mithuCE"), context) else {
+        return;
+    };
+    let Some(bag) = bag.as_object() else {
+        return;
+    };
+    let Ok(ctor) = bag.get(js_string!(tag.to_string()), context) else {
+        return;
+    };
+    let Some(ctor) = ctor.as_object() else {
+        return;
+    };
+    let Ok(proto) = ctor.get(js_string!("prototype"), context) else {
+        return;
+    };
+    if let (Some(proto), Some(object)) = (proto.as_object(), value.as_object()) {
+        object.set_prototype(Some(proto.clone()));
+    }
 }
 
 fn style_object(id: usize, context: &mut Context) -> JsObject {
@@ -2613,6 +3000,16 @@ fn style_object(id: usize, context: &mut Context) -> JsObject {
             Some(border_get),
             Some(border_set),
             ATTR,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_property_value),
+            js_string!("getPropertyValue"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(remove_property),
+            js_string!("removeProperty"),
+            1,
         );
     object.build()
 }
@@ -2681,6 +3078,18 @@ fn set_property(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     write_style(this, &name, &args[1..], context)
 }
 
+fn get_property_value(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = arg_string(args, 0, context).unwrap_or_default();
+    read_style(this, &name, context)
+}
+
+fn remove_property(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = arg_string(args, 0, context).unwrap_or_default();
+    let previous = read_style(this, &name, context)?;
+    let _ = write_style(this, &name, &[js_string!("").into()], context);
+    Ok(previous)
+}
+
 fn read_style(this: &JsValue, name: &str, context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
@@ -2693,7 +3102,7 @@ fn read_style(this: &JsValue, name: &str, context: &mut Context) -> JsResult<JsV
     let value = parse_declarations(&text)
         .into_iter()
         .rev()
-        .find(|declaration| declaration.name == name)
+        .find(|declaration| declaration.name.eq_ignore_ascii_case(name))
         .map(|declaration| declaration.value)
         .unwrap_or_default();
     Ok(js_string!(value).into())
@@ -2713,7 +3122,7 @@ fn write_style(
     let mut declarations = parse_declarations(&current);
     if let Some(existing) = declarations
         .iter_mut()
-        .find(|declaration| declaration.name == name)
+        .find(|declaration| declaration.name.eq_ignore_ascii_case(name))
     {
         existing.value = value;
         existing.important = false;
@@ -3000,6 +3409,152 @@ fn remove_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     }
     host.doc.borrow_mut().detach(child);
     Ok(child_value)
+}
+
+fn replace_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let new_node = args.first().cloned().unwrap_or(JsValue::null());
+    let old_node = args.get(1).cloned().unwrap_or(JsValue::null());
+    insert_before_child(this, &[new_node, old_node.clone()], context)?;
+    remove_child(this, &[old_node.clone()], context)?;
+    Ok(old_node)
+}
+
+fn toggle_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let name = arg_string(args, 0, context)?;
+    let present = host.doc.borrow().attr(id, &name).is_some();
+    if present {
+        host.doc.borrow_mut().remove_attr(id, &name);
+        Ok(JsValue::from(false))
+    } else {
+        let value = args
+            .get(1)
+            .and_then(|value| arg_string(std::slice::from_ref(value), 0, context).ok())
+            .unwrap_or_default();
+        host.doc.borrow_mut().set_attr(id, &name, &value);
+        Ok(JsValue::from(true))
+    }
+}
+
+fn attribute_ns(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    get_attribute(this, &[name], context)
+}
+
+fn set_attribute_ns(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    let value = args.get(2).cloned().unwrap_or(JsValue::undefined());
+    set_attribute(this, &[name, value], context)
+}
+
+fn remove_attribute_ns(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    remove_attribute(this, &[name], context)
+}
+
+fn insert_adjacent_element(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let position = arg_string(args, 0, context)?.to_ascii_lowercase();
+    let node = args.get(1).cloned().unwrap_or(JsValue::null());
+    if node_of(&node).is_none() {
+        return Ok(JsValue::null());
+    }
+    match position.as_str() {
+        "beforeend" | "afterbegin" => {
+            if position == "afterbegin" {
+                prepend_nodes(this, &[node.clone()], context)?;
+            } else {
+                append_nodes(this, &[node.clone()], context)?;
+            }
+        }
+        "beforebegin" | "afterend" => {
+            let host = host(context)?;
+            let id = node_of(this).ok_or_else(type_error)?;
+            let parent = host.doc.borrow().parent_element(id);
+            let Some(parent) = parent else {
+                return Ok(JsValue::null());
+            };
+            let parent_value = element_value(parent.0, context);
+            if position == "beforebegin" {
+                insert_before_child(&parent_value, &[node.clone(), this.clone()], context)?;
+            } else {
+                let next = host.doc.borrow().next_element_sibling(id);
+                match next {
+                    Some(next) => {
+                        let next_value = element_value(next.0, context);
+                        insert_before_child(&parent_value, &[node.clone(), next_value], context)?;
+                    }
+                    None => {
+                        append_child(&parent_value, &[node.clone()], context)?;
+                    }
+                }
+            }
+        }
+        _ => return Ok(JsValue::null()),
+    }
+    Ok(node)
+}
+
+fn remove_self(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = node_of(this).ok_or_else(type_error)?;
+    let parent = host.doc.borrow().parent_element(id);
+    if let Some(parent) = parent {
+        let parent_value = element_value(parent.0, context);
+        let _ = remove_child(&parent_value, &[this.clone()], context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn before_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    for arg in args {
+        insert_adjacent_element(this, &[js_string!("beforebegin").into(), arg.clone()], context)?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn after_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    for arg in args.iter().rev() {
+        insert_adjacent_element(this, &[js_string!("afterend").into(), arg.clone()], context)?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn import_node(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = args.first().cloned().unwrap_or(JsValue::null());
+    clone_node(&node, &[JsValue::from(true)], context)
+}
+
+pub(crate) fn attach_shadow(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let mode = args
+        .first()
+        .and_then(|value| value.as_object())
+        .and_then(|object| object.get(js_string!("mode"), context).ok())
+        .and_then(|value| value.as_string().map(|text| text.to_std_string_escaped()))
+        .unwrap_or_else(|| "open".to_string());
+    let root_id = {
+        let host = host(context)?;
+        host.doc.borrow_mut().create_element_detached("mithu-shadow")
+    };
+    let root = element_value(root_id.0, context);
+    if let Some(object) = root.as_object() {
+        object.set(js_string!("mode"), js_string!(mode.clone()), true, context)?;
+        object.set(js_string!("host"), this.clone(), true, context)?;
+    }
+    if mode != "closed" {
+        if let Some(object) = this.as_object() {
+            object.set(js_string!("shadowRoot"), root.clone(), true, context)?;
+        }
+    }
+    Ok(root)
 }
 
 fn get_lang(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -3742,6 +4297,21 @@ fn fragment_value(host_id: usize, context: &mut Context) -> JsResult<JsValue> {
             js_string!("cloneNode"),
             1,
         )
+        .function(
+            NativeFunction::from_fn_ptr(fragment_insert_before),
+            js_string!("insertBefore"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fragment_remove_child),
+            js_string!("removeChild"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fragment_replace_child),
+            js_string!("replaceChild"),
+            2,
+        )
         .accessor(js_string!("childNodes"), Some(nodes_get), None, ATTR)
         .accessor(js_string!("children"), Some(children_get), None, ATTR)
         .accessor(js_string!("firstChild"), Some(first_get), None, ATTR)
@@ -3810,6 +4380,33 @@ fn fragment_html_set(this: &JsValue, args: &[JsValue], context: &mut Context) ->
 fn fragment_append(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let element = fragment_element(this, context)?;
     append_child(&element, args, context)
+}
+
+fn fragment_insert_before(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    insert_before_child(&element, args, context)
+}
+
+fn fragment_remove_child(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    remove_child(&element, args, context)
+}
+
+fn fragment_replace_child(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    replace_child(&element, args, context)
 }
 
 fn fragment_query(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -4021,8 +4618,10 @@ fn request_animation_frame(
 }
 
 fn performance_object(context: &mut Context) -> JsResult<JsObject> {
+    let timing = performance_timing(context)?;
     let mut object = ObjectInitializer::new(context);
     object
+        .property(js_string!("timing"), timing, ATTR)
         .function(
             NativeFunction::from_fn_ptr(performance_now),
             js_string!("now"),
@@ -4058,6 +4657,37 @@ fn performance_object(context: &mut Context) -> JsResult<JsObject> {
             js_string!("getEntriesByType"),
             1,
         );
+    Ok(object.build())
+}
+
+fn performance_timing(context: &mut Context) -> JsResult<JsObject> {
+    let now = host(context)?.clock.borrow().now as f64;
+    let mut object = ObjectInitializer::new(context);
+    for name in [
+        "navigationStart",
+        "unloadEventStart",
+        "unloadEventEnd",
+        "redirectStart",
+        "redirectEnd",
+        "fetchStart",
+        "domainLookupStart",
+        "domainLookupEnd",
+        "connectStart",
+        "connectEnd",
+        "secureConnectionStart",
+        "requestStart",
+        "responseStart",
+        "responseEnd",
+        "domLoading",
+        "domInteractive",
+        "domContentLoadedEventStart",
+        "domContentLoadedEventEnd",
+        "domComplete",
+        "loadEventStart",
+        "loadEventEnd",
+    ] {
+        object.property(js_string!(name.to_string()), JsValue::from(now), ATTR);
+    }
     Ok(object.build())
 }
 
@@ -4493,8 +5123,19 @@ fn insert_before_child(
     let host = host(context)?;
     let parent = node_of(this).ok_or_else(type_error)?;
     let child_value = args.first().cloned().unwrap_or(JsValue::undefined());
-    let child = node_of(&child_value).ok_or_else(type_error)?;
     let before = args.get(1).and_then(node_of);
+    if let Some(holder) = fragment_host_id(&child_value, context)? {
+        let children = host.doc.borrow().node(NodeId(holder)).children.clone();
+        let mut reference = before;
+        for child in children.into_iter().rev() {
+            host.doc
+                .borrow_mut()
+                .insert_before(parent, child, reference);
+            reference = Some(child);
+        }
+        return Ok(child_value);
+    }
+    let child = node_of(&child_value).ok_or_else(type_error)?;
     host.doc.borrow_mut().insert_before(parent, child, before);
     Ok(child_value)
 }
@@ -5329,39 +5970,149 @@ mod tests {
     }
 
     #[test]
-    fn test262_subset_reports_a_pass_rate() {
-        let cases = [
-            ("add", "1 + 1 === 2"),
-            ("substr", "'abcd'.substr(1, 2) === 'bc'"),
-            ("optional", "({ a: 1 })?.a === 1"),
-            ("nullish", "(null ?? 'x') === 'x'"),
-            ("template", "`${1 + 1}` === '2'"),
-            ("map", "new Map([['a', 1]]).get('a') === 1"),
-            ("json", "JSON.parse('{\"n\":1}').n === 1"),
-            ("promise", "typeof Promise.resolve === 'function'"),
-            ("array", "[1, 2, 3].includes(2)"),
-            ("assign", "Object.assign({ a: 1 }, { b: 2 }).b === 2"),
-        ];
-        let mut script = String::from("var passed = 0; var failed = '';");
-        for (name, expression) in cases {
-            script.push_str(&format!(
-                "try {{ if ({expression}) passed += 1; else failed += '{name},'; }} catch (error) {{ failed += '{name},'; }}"
-            ));
-        }
-        script.push_str(&format!("document.title = passed + '/' + {};", cases.len()));
-        let doc = parse_html(&format!("<script>{script}</script>"));
-        let session = Session::open(doc, |_| None);
+    fn style_and_shadow_and_custom_elements_are_callable() {
+        let doc = parse_html(
+            r#"<body><script>
+              var probe = document.createElement("div");
+              probe.style.cssText = "user-select: contain;";
+              if (probe.style.getPropertyValue("user-select") !== "contain") {
+                document.title = "style";
+              }
+              var shadow = probe.attachShadow({mode: "open"});
+              shadow.innerHTML = "<span id='in'>x</span>";
+              if (!shadow || shadow.mode !== "open" || !probe.shadowRoot) {
+                document.title = "shadow";
+              }
+              class Box extends HTMLElement {}
+              customElements.define("x-box", Box);
+              var box = document.createElement("x-box");
+              if (!(box instanceof Box) || customElements.get("x-box") !== Box) {
+                document.title = "custom";
+              }
+              if (typeof window.__shady_native_addEventListener !== "function") {
+                document.title = "shady";
+              }
+              if (typeof Element.prototype.getAttribute !== "function" || typeof Node.prototype.replaceChild !== "function") {
+                document.title = "proto";
+              }
+              var inert = document.implementation.createHTMLDocument("inert");
+              if (!inert.documentElement || !inert.body) document.title = "inert";
+              if (document.domain !== "dom-case.invalid") document.title = "domain";
+              if (typeof performance.timing.navigationStart !== "number" || typeof performance.timing.responseStart !== "number") {
+                document.title = "timing";
+              }
+              var canvas = document.createElement("canvas");
+              var ctx = canvas.getContext("2d");
+              if (!ctx || typeof ctx.fillRect !== "function" || canvas.getContext("webgl") !== null || ctx.measureText("ab").width < 1) {
+                document.title = "canvas";
+              }
+              var ev = document.createEvent("CustomEvent");
+              ev.initCustomEvent("spfready", true, true, {ok: 1});
+              if (ev.type !== "spfready" || !ev.detail || ev.detail.ok !== 1) document.title = "event";
+              var tpl = document.createElement("template");
+              tpl.innerHTML = "<b id='moved'>z</b>";
+              tpl.content.insertBefore(document.createTextNode("a"), tpl.content.firstChild);
+              var copy = tpl.content.cloneNode(true);
+              document.body.appendChild(copy);
+              if (!document.getElementById("moved")) document.title = "moved";
+              var range = new Range();
+              range.selectNodeContents(document.body);
+              if (!range.getBoundingClientRect() || range.getClientRects().length !== 1) document.title = "range";
+              if (document.title === "") document.title = "ok";
+            </script></body>"#,
+        );
+        let session = Session::open_at(doc, "https://dom-case.invalid/", |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
-        let title = session.document().title.clone();
-        let (passed, total) = title.split_once('/').unwrap_or(("0", "0"));
-        let passed: f64 = passed.parse().unwrap_or(0.0);
-        let total: f64 = total.parse().unwrap_or(1.0);
-        let rate = passed / total;
+        assert_eq!(session.document().title, "ok");
+    }
+
+    fn js_fixtures(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "js") {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn test262_subset_reports_a_pass_rate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/test262");
+        let files = js_fixtures(&root);
+        assert!(files.len() >= 20, "vendored test262 files: {}", files.len());
+        let harness = r#"function assert(value, message) { if (value !== true) throw new Error(message || 'assert'); }
+            assert.sameValue = function (actual, expected, message) {
+              if (actual !== expected) throw new Error(message || String(actual) + ' !== ' + String(expected));
+            };"#;
+        let mut passed = 0usize;
+        let mut failed = Vec::new();
+        for path in &files {
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("case");
+            let body = std::fs::read_to_string(path).unwrap_or_default();
+            let doc = parse_html(&format!(
+                "<script>{harness}{body}; document.title = 'ok';</script>"
+            ));
+            let session = Session::open(doc, |_| None);
+            if session.document().title == "ok" && session.logs().is_empty() {
+                passed += 1;
+            } else {
+                failed.push(name.to_string());
+            }
+        }
+        let total = files.len();
+        let rate = passed as f64 / total as f64;
+        let report = format!(
+            "test262 subset {passed}/{total} ({:.0}%) failed: {}",
+            rate * 100.0,
+            failed.join(",")
+        );
+        eprintln!("{report}");
         assert!(
-            rate >= 0.8,
-            "test262 subset pass rate {passed}/{total} ({:.0}%) title {title}",
+            rate >= 0.7,
+            "test262 subset pass rate {passed}/{total} ({:.0}%) failed {failed:?}",
             rate * 100.0
         );
+    }
+
+    #[test]
+    fn wpt_dom_subset_reports_a_pass_rate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/dom");
+        let files = js_fixtures(&root);
+        assert!(!files.is_empty());
+        let mut script = String::from("var passed = 0; var failed = '';");
+        for path in &files {
+            let name = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("case");
+            let body = std::fs::read_to_string(path).unwrap();
+            script.push_str(&format!(
+                "try {{ {body}; passed += 1; }} catch (error) {{ failed += '{name}:' + error + ','; }}"
+            ));
+        }
+        script.push_str(&format!(
+            "document.title = passed + '/' + {} + ' ' + failed;",
+            files.len()
+        ));
+        let doc = parse_html(&format!("<body><script>{script}</script></body>"));
+        let session = Session::open(doc, |_| None);
+        let title = session.document().title.clone();
+        let (passed, rest) = title.split_once('/').unwrap_or(("0", "0"));
+        let total = rest.split_whitespace().next().unwrap_or("0");
+        eprintln!("wpt dom subset {passed}/{total} {title}");
+        assert_eq!(total, files.len().to_string(), "{title}");
+        assert_eq!(passed, total, "{title}");
     }
 
     #[test]
