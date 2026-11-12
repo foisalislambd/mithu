@@ -3202,7 +3202,14 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
         let ctor_value = JsValue::from(ctor.clone());
         if let Some(constructor) = ctor_value.as_constructor() {
             crate::web::begin_custom_upgrade(value.clone());
-            let _ = constructor.construct(&[], Some(&ctor), context);
+            if let Err(error) = constructor.construct(&[], Some(&ctor), context)
+                && std::env::var_os("MITHU_JS_DEBUG").is_some()
+            {
+                static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("custom element constructor: {error}");
+                }
+            }
             crate::web::end_custom_upgrade();
         } else if ctor.is_callable() {
             let _ = ctor.call(value, &[], context);
@@ -3898,6 +3905,14 @@ pub(crate) fn attach_shadow(
         if let Some(object) = this.as_object() {
             object.set(js_string!("shadowRoot"), root.clone(), true, context)?;
         }
+    }
+    if let Some(host_id) = node_of(this) {
+        let host = host(context)?;
+        host.doc.borrow_mut().set_attr(
+            host_id,
+            "mithu-shadow",
+            &root_id.0.to_string(),
+        );
     }
     Ok(root)
 }

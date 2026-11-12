@@ -1624,7 +1624,15 @@ fn append_box_children(
     id: NodeId,
     out: &mut Vec<NodeId>,
 ) {
-    for child in doc.node(id).children.clone() {
+    // A shadow root replaces the light-DOM children. The root is a detached
+    // element; its children are the tree the page stamped with `attachShadow`.
+    let source = doc
+        .attr(id, "mithu-shadow")
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|index| *index < doc.nodes.len())
+        .map(NodeId)
+        .unwrap_or(id);
+    for child in doc.node(source).children.clone() {
         if doc.element_name(child).is_some() && style_of(styles, child).display == Display::Contents
         {
             append_box_children(doc, styles, child, out);
@@ -3519,6 +3527,37 @@ mod tests {
             go.rect.width > 80.0,
             "border follows the label, width {}",
             go.rect.width
+        );
+    }
+
+    #[test]
+    fn a_shadow_root_replaces_the_light_dom() {
+        let mut doc = parse_html(r#"<div id="host">light</div>"#);
+        let host = doc.get_element_by_id("host").unwrap();
+        let shadow = doc.create_element_detached("mithu-shadow");
+        let paragraph = doc.create_element_detached("p");
+        doc.append_child(shadow, paragraph);
+        doc.set_text_content(paragraph, "shadow text");
+        doc.set_attr(host, "mithu-shadow", &shadow.0.to_string());
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 200.0, &NaiveMetrics, &HashMap::new());
+        let host_box = find(&tree.root, host).unwrap();
+        fn texts(box_: &LayoutBox) -> String {
+            let mut out = String::new();
+            for line in &box_.lines {
+                for fragment in &line.fragments {
+                    out.push_str(&fragment.text);
+                }
+            }
+            for child in &box_.children {
+                out.push_str(&texts(child));
+            }
+            out
+        }
+        let text = texts(host_box);
+        assert!(
+            text.contains("shadow") && !text.contains("light"),
+            "laid out {text:?}"
         );
     }
 
