@@ -58,11 +58,14 @@ struct Timer {
     id: u32,
     due: u64,
     repeat: Option<u64>,
+    /// 0 = callback, 1 = idle callback, 2 = async XHR completion.
+    kind: u8,
 }
 
 struct PageLoader {
     fetch: RefCell<Box<dyn FnMut(&str) -> Option<String>>>,
     cache: RefCell<HashMap<String, Module>>,
+    imports: HashMap<String, String>,
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]
@@ -75,6 +78,8 @@ struct NodeKey {
 struct ResponseKey {
     #[unsafe_ignore_trace]
     body: String,
+    #[unsafe_ignore_trace]
+    headers: String,
 }
 
 pub fn engine_name() -> &'static str {
@@ -144,6 +149,7 @@ impl Session {
     ) -> Self {
         let log = Rc::new(RefCell::new(Vec::new()));
         let prevented = Rc::new(Cell::new(false));
+        let imports = import_map(&doc);
         let shared = Rc::new(RefCell::new(doc));
         let location = Rc::new(RefCell::new(href.to_string()));
         let navigation = Rc::new(RefCell::new(None));
@@ -155,6 +161,7 @@ impl Session {
         let loader = Rc::new(PageLoader {
             fetch: RefCell::new(Box::new(fetch)),
             cache: RefCell::new(HashMap::new()),
+            imports,
         });
         let local = Rc::new(RefCell::new(local));
         let session_store = Rc::new(RefCell::new(session_store));
@@ -598,6 +605,9 @@ fn drive_scripts(
             if let Some(host) = context.get_data::<Host>() {
                 *host.current_script.borrow_mut() = None;
             }
+            if let Err(error) = deliver_mutations(&mut context) {
+                note_error(&context, &error);
+            }
         }
         if let Err(error) = run_due_timers(&mut context, 0) {
             note_error(&context, &error);
@@ -681,7 +691,56 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("localStorage"), local_storage, flags)?;
     context.register_global_property(js_string!("sessionStorage"), session_storage, flags)?;
     crate::web::register(context)?;
+    context.register_global_callable(
+        js_string!("requestIdleCallback"),
+        1,
+        NativeFunction::from_fn_ptr(request_idle),
+    )?;
+    context.register_global_callable(
+        js_string!("cancelIdleCallback"),
+        1,
+        NativeFunction::from_fn_ptr(clear_timer),
+    )?;
+    context.register_global_callable(
+        js_string!("matchMedia"),
+        1,
+        NativeFunction::from_fn_ptr(match_media),
+    )?;
+    context.register_global_callable(
+        js_string!("getComputedStyle"),
+        1,
+        NativeFunction::from_fn_ptr(get_computed_style),
+    )?;
+    context.register_global_callable(
+        js_string!("queueMicrotask"),
+        1,
+        NativeFunction::from_fn_ptr(queue_microtask),
+    )?;
+    let custom = custom_elements(context)?;
+    context.register_global_property(js_string!("customElements"), custom, flags)?;
+    if let Ok(script) = Script::parse(Source::from_bytes(DATASET_HELPER), None, context) {
+        let _ = script.evaluate(context);
+    }
     Ok(())
+}
+
+const DATASET_HELPER: &str = r#"
+function __mithuDataset(id) {
+  return new Proxy({}, {
+    get: function (_target, key) {
+      if (typeof key !== "string") return undefined;
+      return document.__dataGet(id, key);
+    },
+    set: function (_target, key, value) {
+      document.__dataSet(id, String(key), value == null ? "" : String(value));
+      return true;
+    }
+  });
+}
+"#;
+
+fn deliver_mutations(context: &mut Context) -> JsResult<()> {
+    crate::web::deliver_mutations(context)
 }
 
 fn storage_object(context: &mut Context, session: bool) -> JsResult<JsObject> {
@@ -828,15 +887,151 @@ fn navigator_object(context: &mut Context) -> JsResult<JsObject> {
     object.property(js_string!("userAgent"), js_string!("Mithu"), ATTR);
     object.property(js_string!("language"), js_string!("en"), ATTR);
     object.property(js_string!("languages"), languages, ATTR);
+    object.property(js_string!("doNotTrack"), JsValue::null(), ATTR);
+    object.property(js_string!("cookieEnabled"), JsValue::from(true), ATTR);
+    object.property(js_string!("onLine"), JsValue::from(true), ATTR);
+    object.function(
+        NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::from(true))),
+        js_string!("sendBeacon"),
+        1,
+    );
     Ok(object.build())
 }
 
 fn location_object(context: &mut Context) -> JsResult<JsObject> {
     let href_get = native(context, "get href", 0, get_location);
     let href_set = native(context, "set href", 1, set_location);
+    let protocol_get = native(context, "get protocol", 0, get_protocol);
+    let host_get = native(context, "get host", 0, get_host_part);
+    let hostname_get = native(context, "get hostname", 0, get_hostname);
+    let port_get = native(context, "get port", 0, get_port);
+    let path_get = native(context, "get pathname", 0, get_pathname);
+    let search_get = native(context, "get search", 0, get_search);
+    let hash_get = native(context, "get hash", 0, get_hash);
+    let origin_get = native(context, "get origin", 0, get_origin);
     let mut object = ObjectInitializer::new(context);
-    object.accessor(js_string!("href"), Some(href_get), Some(href_set), ATTR);
+    object
+        .accessor(js_string!("href"), Some(href_get), Some(href_set), ATTR)
+        .accessor(js_string!("protocol"), Some(protocol_get), None, ATTR)
+        .accessor(js_string!("host"), Some(host_get), None, ATTR)
+        .accessor(js_string!("hostname"), Some(hostname_get), None, ATTR)
+        .accessor(js_string!("port"), Some(port_get), None, ATTR)
+        .accessor(js_string!("pathname"), Some(path_get), None, ATTR)
+        .accessor(js_string!("search"), Some(search_get), None, ATTR)
+        .accessor(js_string!("hash"), Some(hash_get), None, ATTR)
+        .accessor(js_string!("origin"), Some(origin_get), None, ATTR);
     Ok(object.build())
+}
+
+fn location_url(context: &mut Context) -> Option<mithu_url::Url> {
+    let host = host(context).ok()?;
+    mithu_url::Url::parse(&host.location.borrow()).ok()
+}
+
+fn format_part(url: &mithu_url::Url, name: &str) -> String {
+    match name {
+        "protocol" => format!("{}:", url.scheme),
+        "host" => match url.port {
+            Some(port) => format!("{}:{port}", url.host),
+            None => url.host.clone(),
+        },
+        "hostname" => url.host.clone(),
+        "port" => url.port.map(|port| port.to_string()).unwrap_or_default(),
+        "pathname" => {
+            if url.path.is_empty() {
+                "/".to_string()
+            } else {
+                url.path.clone()
+            }
+        }
+        "search" => url
+            .query
+            .as_ref()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default(),
+        "hash" => url
+            .fragment
+            .as_ref()
+            .map(|fragment| format!("#{fragment}"))
+            .unwrap_or_default(),
+        "origin" => {
+            let port = url.port.map(|port| format!(":{port}")).unwrap_or_default();
+            format!("{}://{}{port}", url.scheme, url.host)
+        }
+        _ => String::new(),
+    }
+}
+
+fn get_protocol(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!(
+        location_url(context)
+            .map(|url| format_part(&url, "protocol"))
+            .unwrap_or_default()
+    )
+    .into())
+}
+
+fn get_host_part(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!(
+        location_url(context)
+            .map(|url| format_part(&url, "host"))
+            .unwrap_or_default()
+    )
+    .into())
+}
+
+fn get_hostname(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!(
+        location_url(context)
+            .map(|url| format_part(&url, "hostname"))
+            .unwrap_or_default()
+    )
+    .into())
+}
+
+fn get_port(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!(
+        location_url(context)
+            .map(|url| format_part(&url, "port"))
+            .unwrap_or_default()
+    )
+    .into())
+}
+
+fn get_pathname(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!(
+        location_url(context)
+            .map(|url| format_part(&url, "pathname"))
+            .unwrap_or_default()
+    )
+    .into())
+}
+
+fn get_search(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!(
+        location_url(context)
+            .map(|url| format_part(&url, "search"))
+            .unwrap_or_default()
+    )
+    .into())
+}
+
+fn get_hash(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!(
+        location_url(context)
+            .map(|url| format_part(&url, "hash"))
+            .unwrap_or_default()
+    )
+    .into())
+}
+
+fn get_origin(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(js_string!(
+        location_url(context)
+            .map(|url| format_part(&url, "origin"))
+            .unwrap_or_default()
+    )
+    .into())
 }
 
 fn document_object(context: &mut Context) -> JsResult<JsObject> {
@@ -850,6 +1045,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let base_get = native(context, "get baseURI", 0, get_location);
     let cookie_get = native(context, "get cookie", 0, get_cookie);
     let cookie_set = native(context, "set cookie", 1, set_cookie);
+    let window = context.global_object().clone();
     let mut object = ObjectInitializer::new(context);
     object
         .function(
@@ -909,8 +1105,76 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             Some(cookie_get),
             Some(cookie_set),
             ATTR,
+        )
+        .property(js_string!("referrer"), js_string!(""), ATTR)
+        .property(js_string!("visibilityState"), js_string!("visible"), ATTR)
+        .property(js_string!("hidden"), JsValue::from(false), ATTR)
+        .property(js_string!("prerendering"), JsValue::from(false), ATTR)
+        .property(js_string!("compatMode"), js_string!("CSS1Compat"), ATTR)
+        .property(js_string!("nodeType"), JsValue::from(9), ATTR)
+        .property(js_string!("defaultView"), window, ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(create_element_ns),
+            js_string!("createElementNS"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(data_get),
+            js_string!("__dataGet"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(data_set),
+            js_string!("__dataSet"),
+            3,
         );
     Ok(object.build())
+}
+
+fn data_attribute(key: &str) -> String {
+    let mut name = String::from("data-");
+    for ch in key.chars() {
+        if ch.is_ascii_uppercase() {
+            name.push('-');
+            name.push(ch.to_ascii_lowercase());
+        } else {
+            name.push(ch);
+        }
+    }
+    name
+}
+
+fn data_get(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = args
+        .first()
+        .and_then(|value| value.as_number())
+        .unwrap_or(0.0) as usize;
+    let key = arg_string(args, 1, context)?;
+    match host.doc.borrow().attr(NodeId(id), &data_attribute(&key)) {
+        Some(value) => Ok(js_string!(value.to_string()).into()),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn data_set(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = args
+        .first()
+        .and_then(|value| value.as_number())
+        .unwrap_or(0.0) as usize;
+    let key = arg_string(args, 1, context)?;
+    let value = arg_string(args, 2, context)?;
+    host.doc
+        .borrow_mut()
+        .set_attr(NodeId(id), &data_attribute(&key), &value);
+    note_mutation(
+        context,
+        NodeId(id),
+        "attributes",
+        Some(data_attribute(&key)),
+    )?;
+    Ok(JsValue::undefined())
 }
 
 fn get_current_script(
@@ -1143,6 +1407,14 @@ fn collect_matching(
     }
 }
 
+fn create_element_ns(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| args.first().cloned().unwrap_or(JsValue::undefined()));
+    create_element(this, &[name], context)
+}
+
 fn create_element(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let name = arg_string(args, 0, context)?;
@@ -1150,7 +1422,7 @@ fn create_element(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(element_value(id.0, context))
 }
 
-fn element_value(id: usize, context: &mut Context) -> JsValue {
+pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let text_get = native(context, "get textContent", 0, get_text);
     let text_set = native(context, "set textContent", 1, set_text);
     let inner_get = native(context, "get innerText", 0, get_text);
@@ -1200,6 +1472,20 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
     });
     let src_get = reflect_src.then(|| native(context, "get src", 0, get_src));
     let src_set = reflect_src.then(|| native(context, "set src", 1, set_src));
+    let dataset_get = native(context, "get dataset", 0, get_dataset);
+    let owner_get = native(context, "get ownerDocument", 0, get_owner_document);
+    let anchor = context.get_data::<Host>().is_some_and(|host| {
+        matches!(
+            host.doc.borrow().element_name(NodeId(id)).unwrap_or(""),
+            "a" | "area"
+        )
+    });
+    let anchor_host = native(context, "get anchor host", 0, get_anchor_host);
+    let anchor_hostname = native(context, "get anchor hostname", 0, get_anchor_hostname);
+    let anchor_path = native(context, "get anchor pathname", 0, get_anchor_pathname);
+    let anchor_protocol = native(context, "get anchor protocol", 0, get_anchor_protocol);
+    let anchor_search = native(context, "get anchor search", 0, get_anchor_search);
+    let anchor_hash = native(context, "get anchor hash", 0, get_anchor_hash);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(
@@ -1368,8 +1654,241 @@ fn element_value(id: usize, context: &mut Context) -> JsValue {
     }
     object
         .property(js_string!("classList"), class_list, ATTR)
-        .property(js_string!("style"), style, ATTR);
+        .property(js_string!("style"), style, ATTR)
+        .property(js_string!("nodeType"), JsValue::from(1), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(get_bounding_rect),
+            js_string!("getBoundingClientRect"),
+            0,
+        );
+    object
+        .accessor(js_string!("dataset"), Some(dataset_get), None, ATTR)
+        .accessor(js_string!("ownerDocument"), Some(owner_get), None, ATTR);
+    if anchor {
+        object
+            .accessor(js_string!("host"), Some(anchor_host), None, ATTR)
+            .accessor(js_string!("hostname"), Some(anchor_hostname), None, ATTR)
+            .accessor(js_string!("pathname"), Some(anchor_path), None, ATTR)
+            .accessor(js_string!("protocol"), Some(anchor_protocol), None, ATTR)
+            .accessor(js_string!("search"), Some(anchor_search), None, ATTR)
+            .accessor(js_string!("hash"), Some(anchor_hash), None, ATTR);
+    }
     object.build().into()
+}
+
+fn get_dataset(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = node_of(this).ok_or_else(type_error)?;
+    let global = context.global_object();
+    let factory = global.get(js_string!("__mithuDataset"), context)?;
+    let Some(factory) = factory.as_object().filter(|object| object.is_callable()) else {
+        return Ok(JsObject::from(JsArray::from_iter([], context)).into());
+    };
+    factory.call(
+        &JsValue::undefined(),
+        &[JsValue::from(id.0 as u32)],
+        context,
+    )
+}
+
+fn get_owner_document(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    context.global_object().get(js_string!("document"), context)
+}
+
+fn get_bounding_rect(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let mut object = ObjectInitializer::new(context);
+    for name in [
+        "x", "y", "width", "height", "top", "left", "right", "bottom",
+    ] {
+        object.property(js_string!(name), JsValue::from(0), ATTR);
+    }
+    Ok(object.build().into())
+}
+
+fn anchor_url(this: &JsValue, context: &mut Context) -> Option<mithu_url::Url> {
+    let host = host(context).ok()?;
+    let id = node_of(this)?;
+    let raw = host.doc.borrow().attr(id, "href").unwrap_or("").to_string();
+    let base = host.location.borrow().clone();
+    mithu_url::Url::parse(&base)
+        .ok()
+        .and_then(|base| base.resolve(&raw).ok())
+        .or_else(|| mithu_url::Url::parse(&raw).ok())
+}
+
+fn anchor_part(this: &JsValue, context: &mut Context, name: &str) -> JsResult<JsValue> {
+    Ok(js_string!(
+        anchor_url(this, context)
+            .map(|url| format_part(&url, name))
+            .unwrap_or_default()
+    )
+    .into())
+}
+
+fn get_anchor_host(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    anchor_part(this, context, "host")
+}
+
+fn get_anchor_hostname(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    anchor_part(this, context, "hostname")
+}
+
+fn get_anchor_pathname(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    anchor_part(this, context, "pathname")
+}
+
+fn get_anchor_protocol(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    anchor_part(this, context, "protocol")
+}
+
+fn get_anchor_search(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    anchor_part(this, context, "search")
+}
+
+fn get_anchor_hash(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    anchor_part(this, context, "hash")
+}
+
+fn note_mutation(
+    context: &mut Context,
+    target: NodeId,
+    kind: &str,
+    attribute: Option<String>,
+) -> JsResult<()> {
+    let host = host(context)?;
+    host.doc
+        .borrow_mut()
+        .mutations
+        .push(mithu_dom::DomMutation {
+            target,
+            kind: kind.to_string(),
+            attribute,
+        });
+    Ok(())
+}
+
+fn match_media(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let query = arg_string(args, 0, context).unwrap_or_default();
+    let mut object = ObjectInitializer::new(context);
+    object
+        .property(js_string!("media"), js_string!(query), ATTR)
+        .property(js_string!("matches"), JsValue::from(false), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("addListener"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("removeListener"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("addEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("removeEventListener"),
+            2,
+        );
+    Ok(object.build().into())
+}
+
+fn get_computed_style(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.first().and_then(node_of).ok_or_else(type_error)?;
+    let mut object = ObjectInitializer::with_native_data(NodeKey { id: id.0 }, context);
+    object.function(
+        NativeFunction::from_fn_ptr(computed_property),
+        js_string!("getPropertyValue"),
+        1,
+    );
+    Ok(object.build().into())
+}
+
+fn computed_property(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let Some(object) = this.as_object() else {
+        return Ok(js_string!("").into());
+    };
+    let Some(key) = object.downcast_ref::<NodeKey>() else {
+        return Ok(js_string!("").into());
+    };
+    let name = arg_string(args, 0, context)?;
+    let style = host
+        .doc
+        .borrow()
+        .attr(NodeId(key.id), "style")
+        .unwrap_or("")
+        .to_string();
+    let value = parse_declarations(&style)
+        .into_iter()
+        .find(|declaration| declaration.name.eq_ignore_ascii_case(&name))
+        .map(|declaration| declaration.value)
+        .unwrap_or_default();
+    Ok(js_string!(value).into())
+}
+
+fn queue_microtask(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(function) = args
+        .first()
+        .and_then(|value| value.as_object())
+        .filter(|object| object.is_callable())
+    {
+        let _ = function.call(&JsValue::undefined(), &[], context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn custom_elements(context: &mut Context) -> JsResult<JsObject> {
+    let mut object = ObjectInitializer::new(context);
+    object
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("define"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("get"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                Ok(JsPromise::resolve(JsValue::undefined(), context)?.into())
+            }),
+            js_string!("whenDefined"),
+            1,
+        );
+    Ok(object.build())
 }
 
 fn style_object(id: usize, context: &mut Context) -> JsObject {
@@ -1707,6 +2226,7 @@ fn set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let name = arg_string(args, 0, context)?;
     let value = arg_string(args, 1, context)?;
     host.doc.borrow_mut().set_attr(id, &name, &value);
+    note_mutation(context, id, "attributes", Some(name))?;
     Ok(JsValue::undefined())
 }
 
@@ -2171,13 +2691,15 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
             break;
         };
         ran = true;
-        let repeat = {
+        let (repeat, kind) = {
+            let (repeat, kind) = {
+                let clock = host.clock.borrow();
+                match clock.queue.iter().find(|timer| timer.id == id) {
+                    Some(timer) => (timer.repeat, timer.kind),
+                    None => (None, 0),
+                }
+            };
             let mut clock = host.clock.borrow_mut();
-            let repeat = clock
-                .queue
-                .iter()
-                .find(|timer| timer.id == id)
-                .and_then(|timer| timer.repeat);
             if let Some(every) = repeat {
                 let due = clock.now.saturating_add(every);
                 if let Some(timer) = clock.queue.iter_mut().find(|timer| timer.id == id) {
@@ -2186,28 +2708,100 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
             } else {
                 clock.queue.retain(|timer| timer.id != id);
             }
-            repeat
+            (repeat, kind)
         };
-        let function = timer_function(context, id)?;
-        if let Some(function) = function {
-            function.call(&JsValue::undefined(), &[], context)?;
+        let item = timer_value(context, id)?;
+        match kind {
+            1 => {
+                if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
+                    let deadline = idle_deadline(context)?;
+                    function.call(&JsValue::undefined(), &[deadline], context)?;
+                }
+            }
+            2 => crate::web::finish_xhr(&item, context)?,
+            _ => {
+                if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
+                    function.call(&JsValue::undefined(), &[], context)?;
+                }
+            }
         }
         if repeat.is_none() {
             forget_timer(context, id)?;
         }
         context.run_jobs()?;
+        deliver_mutations(context)?;
     }
     Ok(ran)
 }
 
-fn timer_function(context: &mut Context, id: u32) -> JsResult<Option<JsObject>> {
+fn timer_value(context: &mut Context, id: u32) -> JsResult<JsValue> {
     let global = context.global_object();
     let bag = global.get(js_string!("__mithuTimers"), context)?;
     let Some(bag) = bag.as_object() else {
-        return Ok(None);
+        return Ok(JsValue::undefined());
     };
-    let item = bag.get(js_string!(id.to_string()), context)?;
-    Ok(item.as_object().filter(|object| object.is_callable()))
+    bag.get(js_string!(id.to_string()), context)
+}
+
+fn idle_deadline(context: &mut Context) -> JsResult<JsValue> {
+    let mut object = ObjectInitializer::new(context);
+    object
+        .property(js_string!("didTimeout"), JsValue::from(false), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::from(50))),
+            js_string!("timeRemaining"),
+            0,
+        );
+    Ok(object.build().into())
+}
+
+/// Queue a host callback. `kind` 1 is an idle callback, 2 finishes an async XHR.
+pub(crate) fn schedule_callback(
+    context: &mut Context,
+    value: JsValue,
+    kind: u8,
+    delay: u64,
+) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = {
+        let mut clock = host.clock.borrow_mut();
+        clock.next = clock.next.saturating_add(1);
+        let id = clock.next;
+        let due = clock.now.saturating_add(delay);
+        clock.queue.push(Timer {
+            id,
+            due,
+            repeat: None,
+            kind,
+        });
+        id
+    };
+    let global = context.global_object();
+    let bag = global
+        .get(js_string!("__mithuTimers"), context)?
+        .as_object()
+        .ok_or_else(type_error)?;
+    bag.set(js_string!(id.to_string()), value, true, context)?;
+    Ok(JsValue::from(id))
+}
+
+fn request_idle(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let _ = this;
+    let function = args.first().cloned().unwrap_or(JsValue::undefined());
+    if !function
+        .as_object()
+        .is_some_and(|object| object.is_callable())
+    {
+        return Ok(JsValue::from(0));
+    }
+    let delay = args
+        .get(1)
+        .and_then(|value| value.as_object())
+        .and_then(|object| object.get(js_string!("timeout"), context).ok())
+        .and_then(|value| value.as_number())
+        .unwrap_or(1.0)
+        .max(1.0) as u64;
+    schedule_callback(context, function, 1, delay)
 }
 
 fn forget_timer(context: &mut Context, id: u32) -> JsResult<()> {
@@ -2245,6 +2839,7 @@ fn schedule_timer(context: &mut Context, args: &[JsValue], repeat: bool) -> JsRe
             id,
             due,
             repeat: repeat.then_some(delay),
+            kind: 0,
         });
         id
     };
@@ -2258,7 +2853,10 @@ fn schedule_timer(context: &mut Context, args: &[JsValue], repeat: bool) -> JsRe
 }
 
 fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let spec = arg_string(args, 0, context)?;
+    let spec = fetch_spec(args, context)?;
+    if spec.is_empty() {
+        return reject_promise(context, "fetch requires a url");
+    }
     let host = host(context)?;
     let location = host.location.borrow().clone();
     let outcome = resolve_request(&location, &spec).and_then(|url| {
@@ -2285,12 +2883,18 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
                     (200..300).contains(&response.status),
                     response.url.to_string(),
                     response.text(),
+                    response
+                        .headers
+                        .iter()
+                        .map(|(name, value)| format!("{name}: {value}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 ))
             })
     });
     match outcome {
-        Ok((status, ok, url, body)) => {
-            let response = response_object(status, ok, url, body, context);
+        Ok((status, ok, url, body, headers)) => {
+            let response = response_object(status, ok, url, body, headers, context);
             Ok(JsPromise::resolve(response, context)?.into())
         }
         Err(message) => reject_promise(context, &message),
@@ -2330,34 +2934,111 @@ fn reject_promise(context: &mut Context, message: &str) -> JsResult<JsValue> {
     Ok(promise.into())
 }
 
+fn fetch_spec(args: &[JsValue], context: &mut Context) -> JsResult<String> {
+    let Some(value) = args.first() else {
+        return Ok(String::new());
+    };
+    if !value.is_string()
+        && let Some(object) = value.as_object()
+    {
+        let url = object.get(js_string!("url"), context)?;
+        if url.is_string() {
+            return Ok(url.to_string(context)?.to_std_string_lossy());
+        }
+    }
+    arg_string(args, 0, context)
+}
+
 fn response_object(
     status: u16,
     ok: bool,
     url: String,
     body: String,
+    headers: String,
     context: &mut Context,
 ) -> JsValue {
-    let mut object = ObjectInitializer::with_native_data(ResponseKey { body }, context);
+    let headers_object = {
+        let mut headers_object = ObjectInitializer::with_native_data(
+            ResponseKey {
+                body: String::new(),
+                headers: headers.clone(),
+            },
+            context,
+        );
+        headers_object.function(
+            NativeFunction::from_fn_ptr(response_header),
+            js_string!("get"),
+            1,
+        );
+        headers_object.build()
+    };
+    let mut object = ObjectInitializer::with_native_data(ResponseKey { body, headers }, context);
     object
         .property(js_string!("status"), JsValue::from(i32::from(status)), ATTR)
         .property(js_string!("ok"), JsValue::from(ok), ATTR)
         .property(js_string!("url"), js_string!(url), ATTR)
+        .property(js_string!("headers"), headers_object, ATTR)
         .function(
             NativeFunction::from_fn_ptr(response_text),
             js_string!("text"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(response_json),
+            js_string!("json"),
             0,
         );
     object.build().into()
 }
 
-fn response_text(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let Some(object) = this.as_object() else {
-        return Ok(JsPromise::resolve(JsValue::undefined(), context)?.into());
+fn response_json(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let body = response_body(this);
+    let json = context.global_object().get(js_string!("JSON"), context)?;
+    let Some(json_object) = json.as_object() else {
+        return reject_promise(context, "JSON is not available");
     };
-    let body = object
+    let parse = json_object.get(js_string!("parse"), context)?;
+    let Some(parse) = parse.as_object() else {
+        return reject_promise(context, "JSON.parse is not available");
+    };
+    match parse.call(&json, &[js_string!(body).into()], context) {
+        Ok(value) => Ok(JsPromise::resolve(value, context)?.into()),
+        Err(error) => reject_promise(context, &error.to_string()),
+    }
+}
+
+fn response_header(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::null());
+    };
+    let headers = object
         .downcast_ref::<ResponseKey>()
-        .map(|key| key.body.clone())
+        .map(|key| key.headers.clone())
         .unwrap_or_default();
+    let name = arg_string(args, 0, context)?.to_ascii_lowercase();
+    for line in headers.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case(&name) {
+            return Ok(js_string!(value.trim().to_string()).into());
+        }
+    }
+    Ok(JsValue::null())
+}
+
+fn response_body(this: &JsValue) -> String {
+    this.as_object()
+        .and_then(|object| {
+            object
+                .downcast_ref::<ResponseKey>()
+                .map(|key| key.body.clone())
+        })
+        .unwrap_or_default()
+}
+
+fn response_text(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let body = response_body(this);
     Ok(JsPromise::resolve(js_string!(body), context)?.into())
 }
 
@@ -2935,6 +3616,97 @@ fn drop_listener(context: &mut Context, key: &str, value: &JsValue) -> JsResult<
     Ok(())
 }
 
+fn import_map(doc: &Document) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for json in &doc.import_maps {
+        collect_imports(json, &mut map);
+    }
+    map
+}
+
+fn collect_imports(json: &str, map: &mut HashMap<String, String>) {
+    let Some(start) = json.find("\"imports\"") else {
+        return;
+    };
+    let rest = &json[start + "\"imports\"".len()..];
+    let Some(open) = rest.find('{') else {
+        return;
+    };
+    let body = &rest[open + 1..];
+    let bytes = body.as_bytes();
+    let mut depth = 1usize;
+    let mut index = 0usize;
+    while index < bytes.len() && depth > 0 {
+        match bytes[index] {
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                index += 1;
+            }
+            b'"' if depth == 1 => {
+                let (key, next) = read_json_string(body, index);
+                index = next;
+                while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                if index < bytes.len() && bytes[index] == b':' {
+                    index += 1;
+                }
+                while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                if index < bytes.len() && bytes[index] == b'"' {
+                    let (value, next) = read_json_string(body, index);
+                    index = next;
+                    if !key.is_empty() && !value.is_empty() {
+                        map.insert(key, value);
+                    }
+                }
+            }
+            _ => index += 1,
+        }
+    }
+}
+
+fn read_json_string(text: &str, start: usize) -> (String, usize) {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if index + 1 < bytes.len() => {
+                out.push(bytes[index + 1] as char);
+                index += 2;
+            }
+            b'"' => return (out, index + 1),
+            byte => {
+                out.push(byte as char);
+                index += 1;
+            }
+        }
+    }
+    (out, index)
+}
+
+fn map_specifier(imports: &HashMap<String, String>, spec: &str) -> Option<String> {
+    if let Some(url) = imports.get(spec) {
+        return Some(url.clone());
+    }
+    let mut best: Option<(&str, &str)> = None;
+    for (key, value) in imports {
+        if key.ends_with('/')
+            && spec.starts_with(key.as_str())
+            && best.is_none_or(|(current, _)| key.len() > current.len())
+        {
+            best = Some((key, value));
+        }
+    }
+    best.map(|(key, value)| format!("{value}{}", &spec[key.len()..]))
+}
+
 impl ModuleLoader for PageLoader {
     fn load_imported_module(
         self: Rc<Self>,
@@ -2943,12 +3715,17 @@ impl ModuleLoader for PageLoader {
         context: &RefCell<&mut Context>,
     ) -> impl std::future::Future<Output = JsResult<Module>> {
         let requested = request.specifier().to_std_string_lossy();
-        let specifier = referrer
-            .path()
-            .and_then(|path| path.to_str())
-            .and_then(|base| resolve_request(base, &requested).ok())
-            .map(|url| url.to_display())
-            .unwrap_or(requested);
+        let mapped = map_specifier(&self.imports, &requested);
+        let specifier = if let Some(mapped) = mapped {
+            mapped
+        } else {
+            referrer
+                .path()
+                .and_then(|path| path.to_str())
+                .and_then(|base| resolve_request(base, &requested).ok())
+                .map(|url| url.to_display())
+                .unwrap_or(requested)
+        };
         let result = (|| {
             if let Some(module) = self.cache.borrow().get(&specifier).cloned() {
                 return Ok(module);
@@ -3070,7 +3847,7 @@ pub(crate) fn arg_string(
     Ok(value.to_string(context)?.to_std_string_lossy())
 }
 
-fn node_of(value: &JsValue) -> Option<NodeId> {
+pub(crate) fn node_of(value: &JsValue) -> Option<NodeId> {
     let object = value.as_object()?;
     let key = object.downcast_ref::<NodeKey>()?;
     Some(NodeId(key.id))
@@ -3651,5 +4428,81 @@ mod tests {
         assert!(doc.has_class(host, "hit"));
         assert_eq!(doc.title, "true");
         assert_eq!(doc.attr(host, "value"), Some("no"));
+    }
+
+    #[test]
+    fn pages_get_image_ports_crypto_and_import_maps() {
+        let doc = parse_html(
+            r#"<body id="page"></body>
+            <script type="importmap">{"imports":{"react-dom/client":"https://cdn.example/client.js"}}</script>
+            <script type="module">
+              import { name } from "react-dom/client";
+              document.documentElement.setAttribute("data-mod", name);
+            </script>
+            <script>
+              var img = new Image();
+              img.src = "https://example.com/pixel.png";
+              var channel = new MessageChannel();
+              channel.port1.onmessage = function (event) { img.alt = event.data; };
+              channel.port2.postMessage("ported");
+              var bytes = new Uint8Array(4);
+              crypto.getRandomValues(bytes);
+              var link = document.createElement("a");
+              link.href = "https://cdn.example/app?q=1#top";
+              document.documentElement.dataset.theme = "dark";
+              var order = "s";
+              var xhr = new XMLHttpRequest();
+              xhr.open("GET", "about:blank");
+              xhr.onload = function () { order += "l"; };
+              xhr.send();
+              order += "d";
+              requestIdleCallback(function (deadline) { document.getElementById("page").setAttribute("data-idle", String(deadline.timeRemaining())); });
+              var observer = new MutationObserver(function (records) {
+                document.getElementById("page").setAttribute("data-seen", records[0].type);
+              });
+              observer.observe(document.getElementById("page"), { attributes: true });
+              document.getElementById("page").setAttribute("data-x", "1");
+              document.title = [
+                img.src,
+                img.alt,
+                crypto.randomUUID().length,
+                link.host,
+                location.search,
+                document.referrer,
+                document.documentElement.getAttribute("data-theme"),
+                order,
+                typeof fetch,
+                typeof HTMLElement
+              ].join("|");
+            </script>"#,
+        );
+        let mut session = Session::open_at(doc, "https://example.com/docs?q=mithu", |src| {
+            (src == "https://cdn.example/client.js")
+                .then(|| "export const name = \"react\";".to_string())
+        });
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let title = session.document().title.clone();
+        assert_eq!(
+            title,
+            "https://example.com/pixel.png|ported|36|cdn.example|?q=mithu||dark|sd|function|function"
+        );
+        let html = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(mithu_dom::NodeId(index)) == Some("html"))
+                    .then_some(mithu_dom::NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(session.document().attr(html, "data-mod"), Some("react"));
+        let page = session.document().get_element_by_id("page").unwrap();
+        assert_eq!(
+            session.document().attr(page, "data-seen"),
+            Some("attributes")
+        );
+        assert!(session.advance(5));
+        assert_eq!(session.document().attr(page, "data-idle"), Some("50"));
     }
 }

@@ -270,12 +270,18 @@ fn fetch(
             return Ok(hit);
         }
     }
+    let top_host = if top_level {
+        url.host.as_str()
+    } else {
+        initiator.unwrap_or(url.host.as_str())
+    };
     let cookie = with_profile(|profile| {
         profile.cookies.header_for_request(&cookies::CookieRequest {
             url,
             initiator_host: initiator,
             top_level,
             method,
+            top_level_host: Some(top_host),
         })
     });
     let port = url.effective_port().unwrap_or(80);
@@ -290,7 +296,7 @@ fn fetch(
     parsed
         .headers
         .retain(|(name, _)| name != "content-encoding");
-    with_profile(|profile| profile.cookies.ingest(url, &parsed.headers));
+    with_profile(|profile| profile.cookies.ingest_for(url, &parsed.headers, top_host));
     if matches!(parsed.status, 301 | 302 | 303 | 307 | 308)
         && let Some(location) = header(&parsed.headers, "location")
     {
@@ -353,7 +359,7 @@ fn build_request(
         _ => url.host.clone(),
     };
     let mut head = format!(
-        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mithu/0.1 (Rust)\r\nAccept: text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1\r\nAccept-Encoding: gzip, deflate, br\r\nConnection: close\r\n",
+        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mithu/0.1 (Rust)\r\nAccept: text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nConnection: close\r\n",
         url.request_target()
     );
     if let Some(content_type) = content_type {
@@ -498,6 +504,7 @@ fn decode_body(headers: &[(String, String)], mut body: Vec<u8>) -> Result<Vec<u8
             "gzip" | "x-gzip" => inflate_gzip(&body)?,
             "deflate" => inflate_deflate(&body)?,
             "br" => inflate_brotli(&body)?,
+            "zstd" => inflate_zstd(&body)?,
             _ => {
                 return Err(NetError::Io(format!(
                     "unsupported content-encoding {coding}"
@@ -527,6 +534,16 @@ fn inflate_deflate(body: &[u8]) -> Result<Vec<u8>, NetError> {
     }
     out.clear();
     flate2::read::DeflateDecoder::new(body)
+        .read_to_end(&mut out)
+        .map_err(|error| NetError::Io(error.to_string()))?;
+    Ok(out)
+}
+
+fn inflate_zstd(body: &[u8]) -> Result<Vec<u8>, NetError> {
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(body)
+        .map_err(|error| NetError::Io(error.to_string()))?;
+    let mut out = Vec::new();
+    decoder
         .read_to_end(&mut out)
         .map_err(|error| NetError::Io(error.to_string()))?;
     Ok(out)
@@ -714,6 +731,16 @@ mod tests {
         assert_eq!(message.status, 200);
         assert_eq!(message.body, b"hello");
         assert!(message_complete(raw));
+    }
+
+    #[test]
+    fn zstd_body_is_inflated() {
+        let encoded = ruzstd::encoding::compress_to_vec(
+            &b"hello zstd"[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let body = decode_body(&[("content-encoding".into(), "zstd".into())], encoded).unwrap();
+        assert_eq!(body, b"hello zstd");
     }
 
     #[test]

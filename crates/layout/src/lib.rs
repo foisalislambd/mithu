@@ -59,6 +59,12 @@ pub struct LayoutBox {
     pub fixed: bool,
     pub gradient: Option<(mithu_base::Color, mithu_base::Color)>,
     pub shapes: Vec<VectorShape>,
+    /// `position: sticky`. The box stays in flow; paint pins it.
+    pub sticky: bool,
+    pub sticky_top: f32,
+    pub shadow: Option<mithu_style::BoxShadow>,
+    /// A nested document painted inside an iframe.
+    pub frame: Option<Box<LayoutTree>>,
 }
 
 /// One filled or stroked contour in the border box's local coordinates.
@@ -438,6 +444,10 @@ fn layout_node(
             style.z_index
         },
         shapes: Vec::new(),
+        sticky: style.position == Position::Sticky,
+        sticky_top: resolve_length(style.insets[0], font, view.height, view).unwrap_or(0.0),
+        shadow: style.shadow,
+        frame: None,
     };
     if doc.element_name(id) == Some("svg") {
         let shapes = svg::shapes(
@@ -467,6 +477,7 @@ fn layout_node(
             .unwrap_or(0.0);
         translate(&mut laid_out, dx, dy);
     }
+    expand_ink(&mut laid_out);
     Some(laid_out)
 }
 
@@ -739,8 +750,10 @@ fn layout_grid(
     let gap = style.gap.max(0.0);
     let widths = resolve_tracks(&tracks, content_w, gap);
     let columns = widths.len().max(1);
-    let mut rows: Vec<Vec<(NodeId, usize, usize)>> = vec![Vec::new()];
-    let mut column = 0usize;
+    let mut cells = Vec::new();
+    let mut occupied: Vec<Vec<bool>> = Vec::new();
+    let mut cursor_col = 0usize;
+    let mut cursor_row = 0usize;
     for child in doc.node(id).children.clone() {
         if is_skipped(doc, styles, child) {
             continue;
@@ -748,62 +761,150 @@ fn layout_grid(
         if matches!(&doc.node(child).data, NodeData::Text(text) if text.trim().is_empty()) {
             continue;
         }
-        let span = (style_of(styles, child).grid_span as usize).clamp(1, columns);
-        if column + span > columns && column != 0 {
-            rows.push(Vec::new());
-            column = 0;
-        }
-        rows.last_mut().unwrap().push((child, column, span));
-        column += span;
-        if column >= columns {
-            rows.push(Vec::new());
-            column = 0;
-        }
+        let area = style_of(styles, child);
+        let span = (area.grid_column.span as usize).clamp(1, columns);
+        let row_span = (area.grid_row.span as usize).max(1);
+        let explicit_col = area
+            .grid_column
+            .start
+            .map(|line| (line as usize).saturating_sub(1));
+        let explicit_row = area
+            .grid_row
+            .start
+            .map(|line| (line as usize).saturating_sub(1));
+        let (column, row) = if let (Some(column), Some(row)) = (explicit_col, explicit_row) {
+            (column.min(columns.saturating_sub(span)), row)
+        } else if let Some(column) = explicit_col {
+            let column = column.min(columns.saturating_sub(span));
+            let mut row = 0usize;
+            while grid_occupied(&occupied, row, column, row_span, span) {
+                row += 1;
+            }
+            (column, row)
+        } else if let Some(row) = explicit_row {
+            let mut column = 0usize;
+            while column + span <= columns && grid_occupied(&occupied, row, column, row_span, span)
+            {
+                column += 1;
+            }
+            (column.min(columns.saturating_sub(span)), row)
+        } else {
+            if cursor_col + span > columns && cursor_col != 0 {
+                cursor_col = 0;
+                cursor_row += 1;
+            }
+            while grid_occupied(&occupied, cursor_row, cursor_col, row_span, span) {
+                cursor_col += 1;
+                if cursor_col + span > columns {
+                    cursor_col = 0;
+                    cursor_row += 1;
+                }
+            }
+            let placed = (cursor_col, cursor_row);
+            cursor_col += span;
+            if cursor_col >= columns {
+                cursor_col = 0;
+                cursor_row += 1;
+            }
+            placed
+        };
+        grid_mark(&mut occupied, row, column, row_span, span, columns);
+        cells.push((child, column, span, row));
     }
-    if rows.last().is_some_and(|row| row.is_empty()) {
-        rows.pop();
+    let row_count = cells
+        .iter()
+        .map(|(_, _, _, row)| *row)
+        .max()
+        .map(|row| row + 1)
+        .unwrap_or(0);
+    let mut row_heights = vec![0.0_f32; row_count];
+    let mut laid = Vec::new();
+    for (child, column, span, row) in cells {
+        let x = content_x + widths[..column].iter().sum::<f32>() + gap * column as f32;
+        let width =
+            widths[column..column + span].iter().sum::<f32>() + gap * span.saturating_sub(1) as f32;
+        if let Some(mut layout) = layout_node(
+            doc,
+            styles,
+            measure,
+            images,
+            child,
+            0.0,
+            0.0,
+            width.max(0.0),
+            href.clone(),
+            false,
+            view,
+        ) {
+            let dx = x - layout.rect.x + layout.margin.left;
+            translate(&mut layout, dx, 0.0);
+            let outer = layout.margin.top + layout.rect.height + layout.margin.bottom;
+            if row < row_heights.len() {
+                row_heights[row] = row_heights[row].max(outer);
+            }
+            laid.push((row, layout));
+        }
     }
     let mut y = content_y;
+    let mut row_y = vec![content_y; row_count];
+    for row in 0..row_count {
+        row_y[row] = y;
+        y += row_heights[row];
+        if row + 1 < row_count {
+            y += gap;
+        }
+    }
     let mut placed = Vec::new();
-    for row in rows {
-        let mut row_h = 0.0_f32;
-        let mut boxes = Vec::new();
-        for (child, column, span) in row {
-            let x = content_x + widths[..column].iter().sum::<f32>() + gap * column as f32;
-            let width = widths[column..column + span].iter().sum::<f32>()
-                + gap * span.saturating_sub(1) as f32;
-            if let Some(mut layout) = layout_node(
-                doc,
-                styles,
-                measure,
-                images,
-                child,
-                0.0,
-                0.0,
-                width.max(0.0),
-                href.clone(),
-                false,
-                view,
-            ) {
-                let dx = x - layout.rect.x + layout.margin.left;
-                translate(&mut layout, dx, 0.0);
-                row_h = row_h.max(layout.margin.top + layout.rect.height + layout.margin.bottom);
-                boxes.push(layout);
-            }
-        }
-        for mut layout in boxes {
-            let dy = y + layout.margin.top - layout.rect.y;
-            translate(&mut layout, 0.0, dy);
-            placed.push(layout);
-        }
-        y += row_h + gap;
+    for (row, mut layout) in laid {
+        let dy = row_y[row] + layout.margin.top - layout.rect.y;
+        translate(&mut layout, 0.0, dy);
+        placed.push(layout);
     }
     let height = if placed.is_empty() {
         0.0
     } else {
-        (y - content_y - gap).max(0.0)
+        (y - content_y).max(0.0)
     };
     (Vec::new(), placed, height)
+}
+
+fn grid_occupied(
+    occupied: &[Vec<bool>],
+    row: usize,
+    column: usize,
+    row_span: usize,
+    span: usize,
+) -> bool {
+    for row in row..row + row_span {
+        let Some(line) = occupied.get(row) else {
+            continue;
+        };
+        for column in column..column + span {
+            if line.get(column).copied().unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn grid_mark(
+    occupied: &mut Vec<Vec<bool>>,
+    row: usize,
+    column: usize,
+    row_span: usize,
+    span: usize,
+    columns: usize,
+) {
+    let rows = row + row_span;
+    while occupied.len() < rows {
+        occupied.push(vec![false; columns]);
+    }
+    for row in row..rows {
+        for column in column..(column + span).min(columns) {
+            occupied[row][column] = true;
+        }
+    }
 }
 
 fn resolve_tracks(tracks: &[GridTrack], content_w: f32, gap: f32) -> Vec<f32> {
@@ -1900,6 +2001,10 @@ fn text_flex_item(
         borders: [0.0; 4],
         fixed: false,
         shapes: Vec::new(),
+        sticky: false,
+        sticky_top: 0.0,
+        shadow: None,
+        frame: None,
     }
 }
 
@@ -2087,6 +2192,10 @@ fn generated_block(
         borders: [0.0; 4],
         fixed: false,
         shapes: Vec::new(),
+        sticky: false,
+        sticky_top: 0.0,
+        shadow: None,
+        frame: None,
     })
 }
 
@@ -2127,6 +2236,27 @@ fn empty_box(node: NodeId) -> LayoutBox {
         borders: [0.0; 4],
         fixed: false,
         shapes: Vec::new(),
+        sticky: false,
+        sticky_top: 0.0,
+        shadow: None,
+        frame: None,
+    }
+}
+
+/// Grow a box so a nowrap label is inside the border, not painted past it.
+fn expand_ink(box_: &mut LayoutBox) {
+    let border_right = box_.borders[1].max(0.0);
+    let mut edge = box_.rect.right();
+    for line in &box_.lines {
+        for fragment in &line.fragments {
+            edge = edge.max(fragment.x + fragment.width + border_right);
+        }
+    }
+    for child in &box_.children {
+        edge = edge.max(child.rect.right());
+    }
+    if edge > box_.rect.right() + 0.5 && edge < box_.rect.x + 8000.0 {
+        box_.rect.width += edge - box_.rect.right();
     }
 }
 
@@ -2453,6 +2583,11 @@ fn layout_table(
         visible: style.visible,
         z_index: style.z_index,
         shapes: Vec::new(),
+        sticky: style.position == Position::Sticky,
+        sticky_top: resolve_length(style.insets[0], style.font_size, view.height, view)
+            .unwrap_or(0.0),
+        shadow: style.shadow,
+        frame: None,
     })
 }
 
@@ -2768,6 +2903,54 @@ mod tests {
             (lead.rect.width - 120.0).abs() < 2.0,
             "lead {}",
             lead.rect.width
+        );
+        assert!(
+            lead.rect.x > 20.0,
+            "lead starts on the second track, x {}",
+            lead.rect.x
+        );
+    }
+
+    #[test]
+    fn grid_row_shares_a_line_and_sticky_stays_in_flow() {
+        let doc = parse_html(
+            r#"<div id="grid" style="display:grid;width:200px;grid-template-columns:1fr 1fr">
+              <div id="a" style="grid-column:1;grid-row:1;height:20px"></div>
+              <div id="b" style="grid-column:2;grid-row:1;height:30px"></div>
+              <div id="stick" style="position:sticky;top:0;height:10px">bar</div>
+            </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let a = find(&tree.root, doc.get_element_by_id("a").unwrap()).unwrap();
+        let b = find(&tree.root, doc.get_element_by_id("b").unwrap()).unwrap();
+        assert!(
+            (a.rect.y - b.rect.y).abs() < 1.0,
+            "same row a {} b {}",
+            a.rect.y,
+            b.rect.y
+        );
+        assert!(b.rect.x > a.rect.x, "b is to the right");
+        let stick = find(&tree.root, doc.get_element_by_id("stick").unwrap()).unwrap();
+        assert!(stick.sticky, "sticky is a flag, not an absolute box");
+        assert!(
+            stick.rect.y + 0.5 >= a.rect.bottom(),
+            "sticky stays in flow"
+        );
+    }
+
+    #[test]
+    fn nowrap_label_grows_the_border_box() {
+        let doc = parse_html(
+            r#"<a id="go" style="display:inline-block;white-space:nowrap;border:1px solid #00f">View services</a>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 40.0, 200.0, &NaiveMetrics, &HashMap::new());
+        let go = find(&tree.root, doc.get_element_by_id("go").unwrap()).unwrap();
+        assert!(
+            go.rect.width > 80.0,
+            "border follows the label, width {}",
+            go.rect.width
         );
     }
 

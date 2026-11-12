@@ -290,7 +290,7 @@ const STATIC: &[(&str, &str)] = &[
     (":status", "404"),
     (":status", "500"),
     ("accept-charset", ""),
-    ("accept-encoding", "gzip, deflate"),
+    ("accept-encoding", "gzip, deflate, br, zstd"),
     ("accept-language", ""),
     ("accept-ranges", ""),
     ("accept", ""),
@@ -487,7 +487,7 @@ fn encode_request(method: &str, url: &mithu_url::Url, cookie: Option<&str>) -> V
         "accept",
         "text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1",
     ));
-    block.extend(literal("accept-encoding", "gzip, deflate, br"));
+    block.extend(literal("accept-encoding", "gzip, deflate, br, zstd"));
     block.extend(literal("user-agent", "Mithu/0.1 (Rust)"));
     if let Some(cookie) = cookie {
         block.extend(literal("cookie", cookie));

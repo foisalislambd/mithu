@@ -1319,6 +1319,12 @@ impl Parser {
                     .unwrap_or("")
                     .trim()
                     .to_ascii_lowercase();
+                if kind == "importmap" {
+                    if !text.trim().is_empty() {
+                        self.doc.import_maps.push(text);
+                    }
+                    return;
+                }
                 let javascript = kind.is_empty()
                     || kind == "module"
                     || matches!(

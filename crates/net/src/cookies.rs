@@ -19,6 +19,9 @@ pub struct Cookie {
     pub secure: bool,
     pub expires_at: Option<u64>,
     pub same_site: SameSite,
+    /// CHIPS `Partitioned` cookies are stored under the top-level site.
+    pub partitioned: bool,
+    pub partition_key: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +37,9 @@ pub struct CookieRequest<'a> {
     pub initiator_host: Option<&'a str>,
     pub top_level: bool,
     pub method: &'a str,
+    /// Top-level site that is loading the document. Partitioned cookies
+    /// are sent only when this site matches the key stored at `Set-Cookie`.
+    pub top_level_host: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -57,7 +63,14 @@ impl CookieJar {
     }
 
     /// Stores every `Set-Cookie` header from a response.
+    ///
+    /// `top_level_host` is the page that caused the response. A `Partitioned`
+    /// cookie is keyed to that site, the way Chromium keys CHIPS cookies.
     pub fn ingest(&mut self, url: &Url, headers: &[(String, String)]) {
+        self.ingest_for(url, headers, &url.host);
+    }
+
+    pub fn ingest_for(&mut self, url: &Url, headers: &[(String, String)], top_level_host: &str) {
         let now = now_secs();
         self.cookies
             .retain(|cookie| cookie.expires_at.is_none_or(|expires| expires > now));
@@ -65,7 +78,7 @@ impl CookieJar {
             if name != "set-cookie" {
                 continue;
             }
-            let Some(parsed) = parse_set_cookie(value, url, now) else {
+            let Some(parsed) = parse_set_cookie(value, url, now, top_level_host) else {
                 continue;
             };
             self.cookies.retain(|cookie| !same_slot(cookie, &parsed));
@@ -83,6 +96,7 @@ impl CookieJar {
             initiator_host: None,
             top_level: true,
             method: "GET",
+            top_level_host: None,
         })
     }
 
@@ -104,6 +118,12 @@ impl CookieJar {
             if !same_site_allows(cookie, request) {
                 continue;
             }
+            if cookie.partitioned {
+                let top = request.top_level_host.unwrap_or(&request.url.host);
+                if site_of(top) != cookie.partition_key {
+                    continue;
+                }
+            }
             pairs.push(format!("{}={}", cookie.name, cookie.value));
         }
         if pairs.is_empty() {
@@ -114,7 +134,7 @@ impl CookieJar {
     }
 }
 
-pub fn parse_set_cookie(header: &str, url: &Url, now: u64) -> Option<Cookie> {
+pub fn parse_set_cookie(header: &str, url: &Url, now: u64, top_level_host: &str) -> Option<Cookie> {
     let mut parts = header.split(';');
     let pair = parts.next()?.trim();
     let (name, value) = pair.split_once('=')?;
@@ -131,6 +151,8 @@ pub fn parse_set_cookie(header: &str, url: &Url, now: u64) -> Option<Cookie> {
         secure: false,
         expires_at: None,
         same_site: SameSite::Default,
+        partitioned: false,
+        partition_key: String::new(),
     };
     let mut max_age_set = false;
     for attribute in parts {
@@ -176,6 +198,10 @@ pub fn parse_set_cookie(header: &str, url: &Url, now: u64) -> Option<Cookie> {
                     "none" => SameSite::None,
                     _ => SameSite::Lax,
                 };
+            }
+            "partitioned" => {
+                cookie.partitioned = true;
+                cookie.partition_key = site_of(top_level_host);
             }
             _ => {}
         }
@@ -264,6 +290,7 @@ fn same_slot(left: &Cookie, right: &Cookie) -> bool {
         && left.domain == right.domain
         && left.path == right.path
         && left.host_only == right.host_only
+        && left.partition_key == right.partition_key
 }
 
 fn domain_matches(cookie: &Cookie, host: &str) -> bool {
@@ -380,6 +407,7 @@ mod tests {
             initiator_host: Some("other.test"),
             top_level: true,
             method: "GET",
+            top_level_host: Some("other.test"),
         };
         let header = jar.header_for_request(&cross).unwrap_or_default();
         assert!(!header.contains("strict=1"), "{header}");
@@ -389,6 +417,7 @@ mod tests {
             initiator_host: Some("other.test"),
             top_level: false,
             method: "GET",
+            top_level_host: Some("other.test"),
         };
         assert!(jar.header_for_request(&sub).is_none());
         let same = CookieRequest {
@@ -396,6 +425,7 @@ mod tests {
             initiator_host: Some("example.com"),
             top_level: false,
             method: "POST",
+            top_level_host: Some("example.com"),
         };
         jar.ingest(
             &page,
@@ -426,5 +456,35 @@ mod tests {
             Some("theme=light")
         );
         assert!(jar.header_for(&url("https://example.org/")).is_none());
+    }
+
+    #[test]
+    fn partitioned_cookie_stays_on_the_top_level_site() {
+        let mut jar = CookieJar::new();
+        let cdn = url("https://cdn.example/pixel");
+        jar.ingest_for(
+            &cdn,
+            &[(
+                "set-cookie".into(),
+                "id=1; Secure; Path=/; SameSite=None; Partitioned".into(),
+            )],
+            "news.example",
+        );
+        let on_news = CookieRequest {
+            url: &cdn,
+            initiator_host: Some("news.example"),
+            top_level: false,
+            method: "GET",
+            top_level_host: Some("news.example"),
+        };
+        assert_eq!(jar.header_for_request(&on_news).as_deref(), Some("id=1"));
+        let on_other = CookieRequest {
+            url: &cdn,
+            initiator_host: Some("other.example"),
+            top_level: false,
+            method: "GET",
+            top_level_host: Some("other.example"),
+        };
+        assert!(jar.header_for_request(&on_other).is_none());
     }
 }

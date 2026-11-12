@@ -300,7 +300,7 @@ fn paint_box(
     scroll: f32,
     origin_y: f32,
 ) {
-    paint_box_with_opacity(canvas, box_, fonts, clip, scroll, origin_y, 1.0, false);
+    paint_box_with_opacity(canvas, box_, fonts, clip, scroll, origin_y, 1.0, false, 0.0);
 }
 
 fn paint_box_with_opacity(
@@ -312,18 +312,29 @@ fn paint_box_with_opacity(
     origin_y: f32,
     opacity: f32,
     pinned: bool,
+    shift: f32,
 ) {
     if !box_.visible {
         return;
     }
     let pinned = pinned || box_.fixed;
     let opacity = (opacity * box_.opacity).clamp(0.0, 1.0);
-    let screen_y = if pinned {
+    let natural_y = if pinned {
         box_.rect.y + origin_y
     } else {
         box_.rect.y - scroll + origin_y
     };
+    let stick = if box_.sticky && !pinned {
+        (origin_y + box_.sticky_top - natural_y).max(0.0)
+    } else {
+        0.0
+    };
+    let shift = shift + stick;
+    let screen_y = natural_y + shift;
     let screen = Rect::new(box_.rect.x, screen_y, box_.rect.width, box_.rect.height);
+    if let Some(shadow) = box_.shadow {
+        paint_shadow(canvas, screen, shadow, clip);
+    }
     let background = scale_alpha(box_.background, opacity);
     if let Some((top, bottom)) = box_.gradient {
         let top = scale_alpha(top, opacity);
@@ -426,7 +437,8 @@ fn paint_box_with_opacity(
                     line.baseline - scroll + origin_y
                 }
             })
-            .unwrap_or(screen.y + box_.font_size);
+            .unwrap_or(screen.y + box_.font_size)
+            + shift;
         canvas.text(
             fonts,
             screen.x - 18.0,
@@ -445,7 +457,7 @@ fn paint_box_with_opacity(
             line.baseline + origin_y
         } else {
             line.baseline - scroll + origin_y
-        };
+        } + shift;
         for fragment in &line.fragments {
             canvas.text_family(
                 fonts,
@@ -474,7 +486,52 @@ fn paint_box_with_opacity(
             origin_y,
             opacity,
             pinned,
+            shift,
         );
+    }
+    if let Some(frame) = &box_.frame {
+        let mut nested = frame.root.clone();
+        let dx = screen.x - nested.rect.x;
+        let dy = screen.y - nested.rect.y;
+        shift_box(&mut nested, dx, dy);
+        let frame_clip = intersect(child_clip, screen).unwrap_or(screen);
+        paint_box_with_opacity(
+            canvas, &nested, fonts, frame_clip, 0.0, 0.0, opacity, true, 0.0,
+        );
+    }
+}
+
+fn shift_box(box_: &mut LayoutBox, dx: f32, dy: f32) {
+    box_.rect.x += dx;
+    box_.rect.y += dy;
+    for line in &mut box_.lines {
+        line.baseline += dy;
+        for fragment in &mut line.fragments {
+            fragment.x += dx;
+        }
+    }
+    for child in &mut box_.children {
+        shift_box(child, dx, dy);
+    }
+}
+
+fn paint_shadow(canvas: &mut Canvas<'_>, screen: Rect, shadow: mithu_style::BoxShadow, clip: Rect) {
+    let layers = 4;
+    for layer in 1..=layers {
+        let t = layer as f32 / layers as f32;
+        let grow = shadow.blur.max(0.0) * t + shadow.spread;
+        let alpha = (f32::from(shadow.color.a) * (1.0 - t) * 0.45) as u8;
+        if alpha == 0 {
+            continue;
+        }
+        let color = mithu_base::Color::rgba(shadow.color.r, shadow.color.g, shadow.color.b, alpha);
+        let rect = Rect::new(
+            screen.x + shadow.x - grow,
+            screen.y + shadow.y - grow,
+            (screen.width + grow * 2.0).max(0.0),
+            (screen.height + grow * 2.0).max(0.0),
+        );
+        canvas.fill_round(rect, color, screen.height.min(8.0) + grow, clip);
     }
 }
 

@@ -85,6 +85,35 @@ pub enum Position {
     Relative,
     Absolute,
     Fixed,
+    Sticky,
+}
+
+/// One `grid-column` or `grid-row` placement.
+///
+/// `start` is a 1-based line. `None` means the auto-placement cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridSpan {
+    pub start: Option<u16>,
+    pub span: u16,
+}
+
+impl Default for GridSpan {
+    fn default() -> Self {
+        Self {
+            start: None,
+            span: 1,
+        }
+    }
+}
+
+/// A single `box-shadow`. Chromium paints a Gaussian; mithu approximates it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxShadow {
+    pub x: f32,
+    pub y: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,7 +234,9 @@ pub struct ComputedStyle {
     pub float: FloatSide,
     pub clear: Clear,
     pub grid_columns: Vec<GridTrack>,
-    pub grid_span: u16,
+    pub grid_column: GridSpan,
+    pub grid_row: GridSpan,
+    pub shadow: Option<BoxShadow>,
     pub box_sizing: BoxSizing,
     pub overflow_hidden: bool,
     pub border_radius: f32,
@@ -271,7 +302,9 @@ impl ComputedStyle {
             float: FloatSide::None,
             clear: Clear::None,
             grid_columns: Vec::new(),
-            grid_span: 1,
+            grid_column: GridSpan::default(),
+            grid_row: GridSpan::default(),
+            shadow: None,
             box_sizing: BoxSizing::ContentBox,
             overflow_hidden: false,
             border_radius: 0.0,
@@ -348,7 +381,9 @@ struct Specified {
     float: Option<Ranked<FloatSide>>,
     clear: Option<Ranked<Clear>>,
     grid_columns: Option<Ranked<Vec<GridTrack>>>,
-    grid_span: Option<Ranked<u16>>,
+    grid_column: Option<Ranked<GridSpan>>,
+    grid_row: Option<Ranked<GridSpan>>,
+    shadow: Option<Ranked<BoxShadow>>,
     box_sizing: Option<Ranked<BoxSizing>>,
     overflow_hidden: Option<Ranked<bool>>,
     border_radius: Option<Ranked<f32>>,
@@ -1069,9 +1104,19 @@ fn apply_declaration(
                 rank(&mut specified.grid_columns, tracks, spec);
             }
         }
-        "grid-column" => {
+        "grid-column" | "grid-column-start" => {
             if let Some(span) = parse_grid_span(value) {
-                rank(&mut specified.grid_span, span, spec);
+                rank(&mut specified.grid_column, span, spec);
+            }
+        }
+        "grid-row" | "grid-row-start" => {
+            if let Some(span) = parse_grid_span(value) {
+                rank(&mut specified.grid_row, span, spec);
+            }
+        }
+        "box-shadow" => {
+            if let Some(shadow) = parse_box_shadow(value) {
+                rank(&mut specified.shadow, shadow, spec);
             }
         }
         "box-sizing" => {
@@ -1370,12 +1415,17 @@ fn concretize(
             .as_ref()
             .map(|item| item.value.clone())
             .unwrap_or_default(),
-        grid_span: specified
-            .grid_span
+        grid_column: specified
+            .grid_column
             .as_ref()
             .map(|item| item.value)
-            .unwrap_or(1)
-            .max(1),
+            .unwrap_or_default(),
+        grid_row: specified
+            .grid_row
+            .as_ref()
+            .map(|item| item.value)
+            .unwrap_or_default(),
+        shadow: specified.shadow.as_ref().map(|item| item.value),
     };
     apply_presentational_hints(doc, id, &mut computed);
     computed
@@ -1775,7 +1825,7 @@ fn parse_position(value: &str) -> Option<Position> {
         "static" => Position::Static,
         "relative" => Position::Relative,
         "absolute" => Position::Absolute,
-        "sticky" => Position::Relative,
+        "sticky" => Position::Sticky,
         "fixed" => Position::Fixed,
         _ => return None,
     })
@@ -1800,23 +1850,117 @@ fn parse_clear(value: &str) -> Option<Clear> {
     })
 }
 
-fn parse_grid_span(value: &str) -> Option<u16> {
+fn parse_grid_span(value: &str) -> Option<GridSpan> {
     let value = value.trim().to_ascii_lowercase();
-    // `span 12`, `7 / span 12`, and `1 / 13`.
-    if let Some(index) = value.find("span") {
-        let rest = value[index + 4..].trim();
-        let span = rest.split_whitespace().next()?.parse::<u16>().ok()?;
-        return Some(span.max(1));
-    }
+    // `span 12`, `7 / span 12`, `1 / 13`, and a bare line `2`.
     if let Some((start, end)) = value.split_once('/') {
-        let start: i32 = start.trim().parse().ok()?;
-        let end: i32 = end.trim().parse().ok()?;
-        if end > start {
-            return Some((end - start) as u16);
+        let start = start.trim();
+        let end = end.trim();
+        let line = start.parse::<u16>().ok().filter(|line| *line > 0);
+        let span = if let Some(rest) = end.strip_prefix("span") {
+            rest.trim().parse::<u16>().ok()?
+        } else if let Some(rest) = start.strip_prefix("span") {
+            let _end_line = end.parse::<u16>().ok();
+            rest.trim().parse::<u16>().ok()?
+        } else {
+            let end_line: i32 = end.parse().ok()?;
+            let start_line = line? as i32;
+            if end_line <= start_line {
+                return None;
+            }
+            (end_line - start_line) as u16
+        };
+        return Some(GridSpan {
+            start: line,
+            span: span.max(1),
+        });
+    }
+    if let Some(rest) = value.strip_prefix("span") {
+        let span = rest.trim().parse::<u16>().ok()?;
+        return Some(GridSpan {
+            start: None,
+            span: span.max(1),
+        });
+    }
+    let line = value.split_whitespace().next()?.parse::<u16>().ok()?;
+    Some(GridSpan {
+        start: Some(line.max(1)),
+        span: 1,
+    })
+}
+
+fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let first = first_shadow(value);
+    let mut color = Color::rgba(0, 0, 0, 76);
+    let mut lengths = Vec::new();
+    for token in shadow_tokens(first) {
+        if token.eq_ignore_ascii_case("inset") {
+            continue;
+        }
+        if let Some(parsed) = parse_color(&token) {
+            color = parsed;
+            continue;
+        }
+        if let Some(Length::Px(px)) = parse_length(&token) {
+            lengths.push(px);
         }
     }
-    let span = value.split_whitespace().next()?.parse::<u16>().ok()?;
-    Some(span.max(1))
+    if lengths.is_empty() {
+        return None;
+    }
+    Some(BoxShadow {
+        x: lengths.first().copied().unwrap_or(0.0),
+        y: lengths.get(1).copied().unwrap_or(0.0),
+        blur: lengths.get(2).copied().unwrap_or(0.0).max(0.0),
+        spread: lengths.get(3).copied().unwrap_or(0.0),
+        color,
+    })
+}
+
+fn first_shadow(value: &str) -> &str {
+    let mut depth = 0;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => return &value[..index],
+            _ => {}
+        }
+    }
+    value
+}
+
+fn shadow_tokens(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ch if ch.is_whitespace() && depth == 0 => {
+                if !current.trim().is_empty() {
+                    tokens.push(current.trim().to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        tokens.push(current.trim().to_string());
+    }
+    tokens
 }
 
 fn parse_grid_tracks(value: &str) -> Option<Vec<GridTrack>> {
@@ -1852,6 +1996,35 @@ fn parse_grid_tracks(value: &str) -> Option<Vec<GridTrack>> {
             for _ in 0..count {
                 tracks.extend(inner.iter().cloned());
             }
+        } else if tokens[0].eq_ignore_ascii_case("minmax")
+            || tokens[0].eq_ignore_ascii_case("fit-content")
+        {
+            let kind = tokens.remove(0).to_ascii_lowercase();
+            if tokens.first().is_some_and(|token| token == "(") {
+                tokens.remove(0);
+            }
+            let mut inner = Vec::new();
+            while let Some(token) = tokens.first() {
+                if token == ")" {
+                    tokens.remove(0);
+                    break;
+                }
+                if token == "," {
+                    tokens.remove(0);
+                    continue;
+                }
+                inner.push(tokens.remove(0));
+            }
+            let track = if kind == "fit-content" {
+                inner.first().and_then(|token| parse_track(token))
+            } else {
+                inner
+                    .iter()
+                    .rev()
+                    .find_map(|token| parse_track(token))
+                    .or(Some(GridTrack::Auto))
+            };
+            tracks.push(track?);
         } else {
             tracks.push(parse_track(&tokens.remove(0))?);
         }

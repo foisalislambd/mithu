@@ -12,6 +12,7 @@ description = "Software rasterizer for layout trees"
 mithu-base = { path = "../base" }
 mithu-image = { path = "../image" }
 mithu-layout = { path = "../layout" }
+mithu-style = { path = "../style" }
 mithu-text = { path = "../text" }
 
 [lints]

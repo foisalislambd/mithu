@@ -17,6 +17,18 @@ pub struct Document {
     pub stylesheet_links: Vec<String>,
     pub scripts: Vec<Script>,
     pub base_href: Option<String>,
+    /// Inline `<script type="importmap">` bodies, in document order.
+    pub import_maps: Vec<String>,
+    /// Child and attribute changes since the last observer delivery.
+    pub mutations: Vec<DomMutation>,
+}
+
+/// One DOM change a `MutationObserver` can report.
+#[derive(Clone, Debug)]
+pub struct DomMutation {
+    pub target: NodeId,
+    pub kind: String,
+    pub attribute: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +81,8 @@ impl Document {
             stylesheet_links: Vec::new(),
             scripts: Vec::new(),
             base_href: None,
+            import_maps: Vec::new(),
+            mutations: Vec::new(),
         }
     }
 

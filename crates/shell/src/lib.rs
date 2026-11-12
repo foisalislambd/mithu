@@ -12,7 +12,7 @@ use mithu_dom::{Document, NodeId};
 use mithu_html::parse_html;
 use mithu_image::Bitmap;
 use mithu_js::{Session, Submission};
-use mithu_layout::{LayoutTree, hit_test, layout_tree};
+use mithu_layout::{LayoutBox, LayoutTree, hit_test, layout_tree};
 use mithu_net::{get, post};
 use mithu_paint::{Canvas, paint_layout};
 use mithu_style::{ComputedStyle, StyleState, font_faces, style_with};
@@ -32,6 +32,8 @@ pub const BOOKMARK_BAR_H: f32 = 34.0;
 pub const CONTENT_TOP: f32 = TAB_H + TOOLBAR_H + BOOKMARK_BAR_H;
 pub const FIND_H: f32 = 36.0;
 pub const STATUS_H: f32 = 26.0;
+/// Gap between the page and the status line so the last text line is not covered.
+const PAGE_GAP: f32 = 16.0;
 /// `kToolbarButtonHeight`.
 const BTN: f32 = 34.0;
 const CAPTION_W: f32 = 46.0;
@@ -1635,13 +1637,14 @@ impl Browser {
 
     fn layout_height(&self) -> f32 {
         let find = if self.page().find_open { FIND_H } else { 0.0 };
-        ((self.viewport_h - CONTENT_TOP - STATUS_H - find) / self.page().zoom.max(0.01)).max(1.0)
+        ((self.viewport_h - CONTENT_TOP - STATUS_H - PAGE_GAP - find) / self.page().zoom.max(0.01))
+            .max(1.0)
     }
 
     fn relayout(&mut self) {
         let width = self.layout_width();
         let height = self.layout_height();
-        let layout = {
+        let mut layout = {
             let page = self.tabs.page();
             layout_tree(
                 &page.document,
@@ -1652,7 +1655,70 @@ impl Browser {
                 &page.images,
             )
         };
+        self.attach_frames(&mut layout);
         self.page_mut().layout = layout;
+    }
+
+    /// Load each iframe `src` into a nested document and paint it in the frame.
+    fn attach_frames(&self, layout: &mut LayoutTree) {
+        let base = self.page().base.clone();
+        let page_url = self.page().current.to_display();
+        let frames = self
+            .page()
+            .document
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _node)| {
+                let id = NodeId(index);
+                if self.page().document.element_name(id) != Some("iframe") {
+                    return None;
+                }
+                let src = self.page().document.attr(id, "src")?.to_string();
+                if src.is_empty() || src.starts_with("about:") {
+                    return None;
+                }
+                Some((id, src))
+            })
+            .collect::<Vec<_>>();
+        for (id, src) in frames {
+            let Some(html) = fetch_text(&base, &src) else {
+                continue;
+            };
+            if html.len() > 500_000 {
+                continue;
+            }
+            let resolved = base.resolve(&src).ok();
+            if resolved
+                .as_ref()
+                .is_some_and(|url| url.to_display() == page_url)
+            {
+                continue;
+            }
+            let nested_base = resolved.unwrap_or_else(|| base.clone());
+            let doc = parse_html(&html);
+            let author = author_css(&doc, &nested_base);
+            let (width, height) = {
+                let size = frame_size(&layout.root, id);
+                (
+                    if size.0 < 1.0 { 300.0 } else { size.0 },
+                    if size.1 < 1.0 { 150.0 } else { size.1 },
+                )
+            };
+            let styles = style_with(
+                &doc,
+                &author,
+                StyleState {
+                    hover: None,
+                    viewport_width: width,
+                },
+            );
+            let images = load_images(&doc, &nested_base);
+            let nested = layout_tree(&doc, &styles, width, height, &self.fonts, &images);
+            if let Some(slot) = find_box_mut(&mut layout.root, id) {
+                slot.frame = Some(Box::new(nested));
+            }
+        }
     }
 
     pub fn pointer_up(&mut self) {
@@ -1866,7 +1932,7 @@ impl Browser {
 
     fn device_page_height(&self) -> f32 {
         let find = if self.page().find_open { FIND_H } else { 0.0 };
-        (self.viewport_h - CONTENT_TOP - STATUS_H - find).max(1.0)
+        (self.viewport_h - CONTENT_TOP - STATUS_H - PAGE_GAP - find).max(1.0)
     }
 
     fn page_height(&self) -> f32 {
@@ -1902,7 +1968,7 @@ impl Browser {
             0.0,
             origin_y,
             width as f32,
-            (height as f32 - origin_y - STATUS_H - find).max(1.0),
+            (height as f32 - origin_y - STATUS_H - PAGE_GAP - find).max(1.0),
         );
         let mut canvas = Canvas {
             pixels,
@@ -1923,7 +1989,7 @@ impl Browser {
     fn paint_zoomed_page(&self, pixels: &mut [u32], width: u32, height: u32, zoom: f32) {
         let scroll = self.page().scroll;
         let find = if self.page().find_open { FIND_H } else { 0.0 };
-        let device_h = (height as f32 - CONTENT_TOP - STATUS_H - find).max(1.0);
+        let device_h = (height as f32 - CONTENT_TOP - STATUS_H - PAGE_GAP - find).max(1.0);
         let css_w = ((width as f32) / zoom).round().max(1.0) as i32;
         let css_h = (device_h / zoom).round().max(1.0) as i32;
         let mut page_pixels =
@@ -3320,6 +3386,34 @@ fn retrieve(url: &Url, bypass_cache: bool, initiator: Option<&str>) -> Result<Fe
         }
         other => Err(format!("Mithu cannot open {other} URLs")),
     }
+}
+
+fn frame_size(box_: &LayoutBox, id: NodeId) -> (f32, f32) {
+    if box_.node == id && box_.rect.width > 1.0 && box_.rect.height > 1.0 {
+        return (box_.rect.width, box_.rect.height);
+    }
+    for child in &box_.children {
+        let size = frame_size(child, id);
+        if size.0 > 1.0 {
+            return size;
+        }
+    }
+    if box_.node == id {
+        return (box_.rect.width.max(300.0), box_.rect.height.max(150.0));
+    }
+    (0.0, 0.0)
+}
+
+fn find_box_mut(box_: &mut LayoutBox, id: NodeId) -> Option<&mut LayoutBox> {
+    if box_.node == id {
+        return Some(box_);
+    }
+    for child in &mut box_.children {
+        if let Some(found) = find_box_mut(child, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn author_css(document: &Document, base: &Url) -> String {
