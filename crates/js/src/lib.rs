@@ -208,7 +208,7 @@ impl Session {
             history: Rc::new(RefCell::new(vec![href.to_string()])),
             history_index: Rc::new(Cell::new(0)),
             current_script: Rc::new(RefCell::new(None)),
-            ready_state: Rc::new(RefCell::new("interactive".to_string())),
+            ready_state: Rc::new(RefCell::new("loading".to_string())),
             geometry: Rc::new(RefCell::new(HashMap::new())),
             scroll: Rc::new(Cell::new(0.0)),
             sources: Rc::new(RefCell::new(HashMap::new())),
@@ -950,14 +950,18 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     proto.set(js_string!("insertBefore"), insert, true, context)?;
     let remove = native(context, "removeChild", 1, remove_child);
     proto.set(js_string!("removeChild"), remove, true, context)?;
+    // These four are not also own properties of each element. An enumerable
+    // prototype method shows up in `for-in` and `getOwnPropertyDescriptor`
+    // returns undefined, which is the Zod `.get` throw on a host object.
+    // Blink's for-in on a fresh element does not surface them that way.
     let equal = native(context, "isEqualNode", 1, is_equal_node);
-    proto.set(js_string!("isEqualNode"), equal, true, context)?;
+    define_hidden(&proto, context, "isEqualNode", JsValue::from(equal))?;
     let same = native(context, "isSameNode", 1, is_same_node);
-    proto.set(js_string!("isSameNode"), same, true, context)?;
+    define_hidden(&proto, context, "isSameNode", JsValue::from(same))?;
     let clone = native(context, "cloneNode", 1, clone_node);
-    proto.set(js_string!("cloneNode"), clone, true, context)?;
+    define_hidden(&proto, context, "cloneNode", JsValue::from(clone))?;
     let replace = native(context, "replaceChild", 2, replace_child);
-    proto.set(js_string!("replaceChild"), replace, true, context)?;
+    define_hidden(&proto, context, "replaceChild", JsValue::from(replace))?;
     let text_get = native(context, "get textContent", 0, get_text);
     let text_set = native(context, "set textContent", 1, set_text);
     define_accessor(&proto, context, "textContent", text_get, Some(text_set))?;
@@ -1200,6 +1204,17 @@ fn canvas_2d(context: &mut Context) -> JsResult<JsObject> {
         .property(js_string!("lineWidth"), JsValue::from(1), ATTR)
         .property(js_string!("globalAlpha"), JsValue::from(1), ATTR);
     Ok(object.build())
+}
+
+fn define_hidden(proto: &JsObject, context: &mut Context, name: &str, value: JsValue) -> JsResult<()> {
+    let property = boa_engine::property::PropertyDescriptor::builder()
+        .value(value)
+        .writable(true)
+        .enumerable(false)
+        .configurable(true);
+    proto
+        .define_property_or_throw(js_string!(name.to_string()), property, context)
+        .map(|_| ())
 }
 
 fn define_accessor(
@@ -2091,13 +2106,18 @@ fn get_ready_state(_this: &JsValue, _args: &[JsValue], context: &mut Context) ->
 fn signal_document_loaded(context: &mut Context) {
     let Some(html) = (|| {
         let host = context.get_data::<Host>().cloned()?;
-        *host.ready_state.borrow_mut() = "complete".to_string();
+        *host.ready_state.borrow_mut() = "interactive".to_string();
         find_tag(&host.doc.borrow(), "html")
     })() else {
         return;
     };
+    // Blink fires DOMContentLoaded while readyState is still `interactive`,
+    // then moves to `complete` and fires `load`.
     fire_node_listeners(context, html, "DOMContentLoaded");
     fire_window_listeners(context, html, "DOMContentLoaded");
+    if let Some(host) = context.get_data::<Host>().cloned() {
+        *host.ready_state.borrow_mut() = "complete".to_string();
+    }
     fire_window_listeners(context, html, "load");
 }
 
@@ -3092,9 +3112,7 @@ fn custom_elements(context: &mut Context) -> JsResult<JsObject> {
             1,
         )
         .function(
-            NativeFunction::from_fn_ptr(|_, _, context| {
-                Ok(JsPromise::resolve(JsValue::undefined(), context)?.into())
-            }),
+            NativeFunction::from_fn_ptr(when_defined),
             js_string!("whenDefined"),
             1,
         );
@@ -3121,7 +3139,8 @@ fn define_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     let name = arg_string(args, 0, context)?;
     let ctor = args.get(1).cloned().unwrap_or(JsValue::undefined());
     let bag = custom_registry(context)?;
-    bag.set(js_string!(name.clone()), ctor, true, context)?;
+    bag.set(js_string!(name.clone()), ctor.clone(), true, context)?;
+    resolve_when_defined(&name, &ctor, context)?;
     if let Ok(host) = host(context) {
         let ids: Vec<usize> = host
             .doc
@@ -3142,6 +3161,70 @@ fn define_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
         }
     }
     Ok(JsValue::undefined())
+}
+
+fn when_defined_bag(context: &mut Context) -> JsResult<JsObject> {
+    let global = context.global_object();
+    let existing = global.get(js_string!("__mithuWhen"), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+    let created = ObjectInitializer::new(context).build();
+    context.global_object().set(
+        js_string!("__mithuWhen"),
+        created.clone(),
+        false,
+        context,
+    )?;
+    Ok(created)
+}
+
+fn when_defined(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let name = arg_string(args, 0, context).unwrap_or_default();
+    let bag = custom_registry(context)?;
+    let existing = bag.get(js_string!(name.clone()), context)?;
+    if existing.as_object().is_some() && !existing.is_null() && !existing.is_undefined() {
+        return Ok(JsPromise::resolve(existing, context)?.into());
+    }
+    let (promise, resolvers) = JsPromise::new_pending(context);
+    let waits = when_defined_bag(context)?;
+    let key = js_string!(name);
+    let current = waits.get(key.clone(), context)?;
+    let list = if let Some(object) = current.as_object() {
+        object.clone()
+    } else {
+        JsObject::from(JsArray::from_iter([], context))
+    };
+    let length = list
+        .get(js_string!("length"), context)?
+        .to_u32(context)
+        .unwrap_or(0);
+    list.set(length, resolvers.resolve, true, context)?;
+    waits.set(key, list, true, context)?;
+    Ok(promise.into())
+}
+
+fn resolve_when_defined(name: &str, ctor: &JsValue, context: &mut Context) -> JsResult<()> {
+    let waits = when_defined_bag(context)?;
+    let key = js_string!(name);
+    let current = waits.get(key.clone(), context)?;
+    let Some(list) = current.as_object() else {
+        return Ok(());
+    };
+    let length = list
+        .get(js_string!("length"), context)?
+        .to_u32(context)
+        .unwrap_or(0);
+    for index in 0..length {
+        let resolve = list.get(index, context)?;
+        if let Some(resolve) = resolve.as_object()
+            && resolve.is_callable()
+        {
+            let _ = resolve.call(&JsValue::undefined(), &[ctor.clone()], context);
+        }
+    }
+    let _ = waits.set(key, JsValue::undefined(), true, context);
+    Ok(())
 }
 
 fn get_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -6448,6 +6531,7 @@ mod tests {
     fn style_and_shadow_and_custom_elements_are_callable() {
         let doc = parse_html(
             r#"<body><script>
+              if (document.readyState !== "loading") document.title = "ready:" + document.readyState;
               var probe = document.createElement("div");
               probe.style.cssText = "user-select: contain;";
               if (probe.style.getPropertyValue("user-select") !== "contain") {
@@ -6525,11 +6609,20 @@ mod tests {
               for (var key2 in methods) {
                 if (!Object.getOwnPropertyDescriptor(methods, key2)) missing.push(key2);
               }
+              var hostEl = document.createElement("div");
+              var hostMissing = [];
+              for (var hostKey in hostEl) {
+                if (!Object.getOwnPropertyDescriptor(hostEl, hostKey)) hostMissing.push(hostKey);
+              }
+              if (hostMissing.length) document.title = "host:" + hostMissing.join(",");
+              customElements.whenDefined("x-stamp").then(function (ctor) {
+                if (document.title === "when") document.title = ctor === Stamp ? "ok" : "when-bad";
+              });
               if (window.top !== window || window.parent !== window) document.title = "top";
               if (inherited.length || missing.length || typeof WheelEvent !== "function") {
                 document.title = "forin:" + inherited.join(",") + "/" + missing.join(",") + ":" + typeof WheelEvent;
               }
-              if (document.title === "") document.title = "ok";
+              if (document.title === "") document.title = "when";
             </script></body>"#,
         );
         let session = Session::open_at(doc, "https://dom-case.invalid/", |_| None);
