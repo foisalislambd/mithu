@@ -853,6 +853,9 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     if let Ok(script) = Script::parse(Source::from_bytes(DATASET_HELPER), None, context) {
         let _ = script.evaluate(context);
     }
+    if let Ok(script) = Script::parse(Source::from_bytes(LANGUAGE_EXTRAS), None, context) {
+        let _ = script.evaluate(context);
+    }
     let _ = wire_document_prototype(context);
     let _ = wire_prototype_chain(context);
     let _ = install_group(context);
@@ -1253,6 +1256,160 @@ fn link_prototype(context: &mut Context, child: &str, parent: &str) -> JsResult<
     }
     Ok(())
 }
+
+const LANGUAGE_EXTRAS: &str = r#"
+(function () {
+  if (typeof structuredClone !== "function") {
+    globalThis.structuredClone = function (value) {
+      var seen = new Map();
+      function clone(v) {
+        if (v === null || (typeof v !== "object" && typeof v !== "function")) return v;
+        if (typeof v === "function" || typeof v === "symbol") {
+          throw new TypeError("Value could not be cloned");
+        }
+        if (seen.has(v)) return seen.get(v);
+        if (v instanceof Date) {
+          var date = new Date(v.getTime());
+          seen.set(v, date);
+          return date;
+        }
+        if (v instanceof RegExp) {
+          var regexp = new RegExp(v.source, v.flags);
+          seen.set(v, regexp);
+          return regexp;
+        }
+        if (v instanceof ArrayBuffer) {
+          var buffer = v.slice(0);
+          seen.set(v, buffer);
+          return buffer;
+        }
+        if (ArrayBuffer.isView(v)) {
+          var view = new v.constructor(v);
+          seen.set(v, view);
+          return view;
+        }
+        if (v instanceof Map) {
+          var map = new Map();
+          seen.set(v, map);
+          v.forEach(function (item, key) { map.set(clone(key), clone(item)); });
+          return map;
+        }
+        if (v instanceof Set) {
+          var set = new Set();
+          seen.set(v, set);
+          v.forEach(function (item) { set.add(clone(item)); });
+          return set;
+        }
+        if (v instanceof Error) {
+          var error = new v.constructor(v.message);
+          error.name = v.name;
+          seen.set(v, error);
+          return error;
+        }
+        if (Array.isArray(v)) {
+          var list = new Array(v.length);
+          seen.set(v, list);
+          for (var i = 0; i < v.length; i++) list[i] = clone(v[i]);
+          return list;
+        }
+        var object = {};
+        seen.set(v, object);
+        var keys = Object.keys(v);
+        for (var j = 0; j < keys.length; j++) object[keys[j]] = clone(v[keys[j]]);
+        return object;
+      }
+      return clone(value);
+    };
+  }
+  if (typeof Error.isError !== "function") {
+    Error.isError = function (value) { return value instanceof Error; };
+  }
+  if (typeof SuppressedError !== "function") {
+    function SuppressedError(error, suppressed, message) {
+      var self = new Error(message === undefined ? "An error was suppressed during disposal" : String(message));
+      Object.setPrototypeOf(self, SuppressedError.prototype);
+      self.name = "SuppressedError";
+      self.error = error;
+      self.suppressed = suppressed;
+      return self;
+    }
+    SuppressedError.prototype = Object.create(Error.prototype);
+    SuppressedError.prototype.constructor = SuppressedError;
+    globalThis.SuppressedError = SuppressedError;
+  }
+  if (typeof Array.fromAsync !== "function") {
+    Array.fromAsync = function (items, mapfn, thisArg) {
+      var mapper = typeof mapfn === "function" ? mapfn : function (item) { return item; };
+      return Promise.resolve(items).then(function (seq) {
+        return Promise.all(Array.from(seq, function (item, index) {
+          return Promise.resolve(mapper.call(thisArg, item, index));
+        }));
+      });
+    };
+  }
+  if (typeof ArrayBuffer.prototype.transfer !== "function") {
+    ArrayBuffer.prototype.transfer = function (newLength) {
+      var length = newLength === undefined ? this.byteLength : Number(newLength);
+      var next = new ArrayBuffer(length);
+      new Uint8Array(next).set(new Uint8Array(this, 0, Math.min(this.byteLength, length)));
+      return next;
+    };
+  }
+  var standard = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var urlTable = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  function encode64(bytes, alphabet, omitPadding) {
+    var table = alphabet === "base64url" ? urlTable : standard;
+    var out = "";
+    var i = 0;
+    for (; i + 2 < bytes.length; i += 3) {
+      var n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+      out += table[(n >> 18) & 63] + table[(n >> 12) & 63] + table[(n >> 6) & 63] + table[n & 63];
+    }
+    if (i < bytes.length) {
+      var rest = bytes.length - i;
+      var m = bytes[i] << 16;
+      if (rest === 2) m |= bytes[i + 1] << 8;
+      out += table[(m >> 18) & 63] + table[(m >> 12) & 63];
+      if (rest === 2) out += table[(m >> 6) & 63];
+      else if (!omitPadding) out += "=";
+      if (!omitPadding) out += "=";
+      if (rest === 2 && !omitPadding) out = out.slice(0, -1);
+    }
+    return out;
+  }
+  function decode64(text, alphabet) {
+    var table = alphabet === "base64url" ? urlTable : standard;
+    var clean = String(text).replace(/[\t\n\f\r ]/g, "");
+    var pad = 0;
+    while (clean.endsWith("=")) { pad += 1; clean = clean.slice(0, -1); }
+    var bytes = [];
+    var buffer = 0;
+    var bits = 0;
+    for (var i = 0; i < clean.length; i++) {
+      var value = table.indexOf(clean.charAt(i));
+      if (value < 0) throw new SyntaxError("Invalid base64");
+      buffer = (buffer << 6) | value;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        bytes.push((buffer >> bits) & 255);
+      }
+    }
+    if (pad) bytes = bytes.slice(0, bytes.length);
+    return new Uint8Array(bytes);
+  }
+  if (typeof Uint8Array.prototype.toBase64 !== "function") {
+    Uint8Array.prototype.toBase64 = function (options) {
+      return encode64(this, options && options.alphabet, !!(options && options.omitPadding));
+    };
+  }
+  if (typeof Uint8Array.fromBase64 !== "function") {
+    Uint8Array.fromBase64 = function (string, options) {
+      return decode64(string, options && options.alphabet);
+    };
+  }
+})();
+"#;
 
 const DATASET_HELPER: &str = r#"
 function __mithuDataset(id) {
