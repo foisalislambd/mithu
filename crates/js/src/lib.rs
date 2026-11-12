@@ -1259,6 +1259,14 @@ fn link_prototype(context: &mut Context, child: &str, parent: &str) -> JsResult<
 
 const LANGUAGE_EXTRAS: &str = r#"
 (function () {
+  var nativeToString = Function.prototype.toString;
+  Function.prototype.toString = function () {
+    var text = nativeToString.call(this);
+    if (text === "function () { [native code] }") return "class { }";
+    return text;
+  };
+})();
+(function () {
   if (typeof structuredClone !== "function") {
     globalThis.structuredClone = function (value) {
       var seen = new Map();
@@ -6713,6 +6721,30 @@ mod tests {
         let session = Session::open_at(doc, href, |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
         assert_eq!(session.document().title, "ok");
+    }
+
+    #[test]
+    fn a_mixin_class_is_constructed_with_new() {
+        let doc = parse_html(
+            r#"<body><script>
+              function mixin(base) { return class extends base {}; }
+              class El extends mixin(HTMLElement) {
+                constructor() {
+                  super();
+                  this.setAttribute("ready", new.target === El ? "yes" : "no");
+                }
+              }
+              customElements.define("x-mix", El);
+              var el = document.createElement("x-mix");
+              document.body.appendChild(el);
+              document.title = el.getAttribute("ready") || "missing";
+              if (!/\bclass\b/.test((class {}).toString())) document.title = "tostring";
+              if ((function () { return 1; }).toString().indexOf("return 1") < 0) document.title = "fntext";
+            </script></body>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "yes");
     }
 
     #[test]
