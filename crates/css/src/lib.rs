@@ -189,7 +189,7 @@ impl CssParser {
     fn parse_stylesheet(&mut self) -> Stylesheet {
         let mut rules = Vec::new();
         let mut faces = Vec::new();
-        self.parse_rule_list(&mut rules, &mut faces, None);
+        self.parse_rule_list(&mut rules, &mut faces, None, false);
         Stylesheet {
             rules,
             font_faces: faces,
@@ -594,13 +594,50 @@ impl CssParser {
             return None;
         }
         self.bump();
+        // A semicolon or brace inside url(), a function, or a string is part of
+        // the value. GitHub's primer sheets use data:image/svg+xml;base64 URLs;
+        // ending the declaration at that semicolon leaves the real `}` to close
+        // the whole stylesheet.
         let mut value = String::new();
+        let mut parens = 0i32;
+        let mut quote = None;
         while let Some(ch) = self.peek() {
-            if ch == ';' || ch == '}' {
-                break;
+            if let Some(q) = quote {
+                value.push(ch);
+                self.bump();
+                if ch == '\\' {
+                    if let Some(escaped) = self.bump() {
+                        value.push(escaped);
+                    }
+                } else if ch == q {
+                    quote = None;
+                }
+                continue;
             }
-            value.push(ch);
-            self.pos += 1;
+            match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    value.push(ch);
+                    self.bump();
+                }
+                '(' => {
+                    parens += 1;
+                    value.push(ch);
+                    self.bump();
+                }
+                ')' => {
+                    if parens > 0 {
+                        parens -= 1;
+                    }
+                    value.push(ch);
+                    self.bump();
+                }
+                ';' | '}' if parens == 0 => break,
+                _ => {
+                    value.push(ch);
+                    self.bump();
+                }
+            }
         }
         if self.peek() == Some(';') {
             self.bump();
@@ -689,16 +726,25 @@ impl CssParser {
         rules: &mut Vec<Rule>,
         faces: &mut Vec<FontFace>,
         media: Option<Media>,
+        in_block: bool,
     ) {
         self.skip_ws();
-        if self.peek() == Some('{') {
+        if in_block && self.peek() == Some('{') {
             self.bump();
         }
         while self.pos < self.chars.len() {
             self.skip_ws();
-            if self.peek().is_none() || self.peek() == Some('}') {
-                self.bump();
+            if self.peek().is_none() {
                 break;
+            }
+            // A closing brace ends a media, layer, or supports block. At the top
+            // level it is a parse error and the rest of the sheet still applies.
+            if self.peek() == Some('}') {
+                self.bump();
+                if in_block {
+                    break;
+                }
+                continue;
             }
             if self.peek() == Some('@') {
                 match self.take_at_rule() {
@@ -707,10 +753,11 @@ impl CssParser {
                             rules,
                             faces,
                             Some(combine_media(media.clone(), inner)),
+                            true,
                         );
                     }
                     AtRule::FontFace(face) => faces.push(face),
-                    AtRule::Enter => self.parse_rule_list(rules, faces, media.clone()),
+                    AtRule::Enter => self.parse_rule_list(rules, faces, media.clone(), true),
                     AtRule::Done => {}
                 }
                 continue;
@@ -1182,7 +1229,10 @@ fn eval_media_product(expr: &str) -> Option<f32> {
 
 fn eval_media_factor(expr: &str) -> Option<f32> {
     let expr = expr.trim();
-    if let Some(inner) = expr.strip_prefix('(').and_then(|rest| rest.strip_suffix(')')) {
+    if let Some(inner) = expr
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
         return eval_media_sum(inner);
     }
     if let Ok(number) = expr.parse::<f32>() {
@@ -1209,6 +1259,52 @@ fn split_media_op(expr: &str, op: char) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hover_media_does_not_end_the_stylesheet() {
+        let sheet = parse_css(
+            "@media (hover:hover){:is([aria-disabled=true]:is(.A .B) .C):hover{cursor:not-allowed}[aria-disabled=true]:is(.A .B):hover{cursor:not-allowed;background-color:initial}}.after{display:none}",
+        );
+        let keeps = sheet.rules.iter().any(|rule| {
+            format!("{rule:?}").contains("after")
+                && rule.declarations.iter().any(|d| d.value == "none")
+        });
+        assert!(keeps, "rules {}", sheet.rules.len());
+    }
+
+    #[test]
+    fn data_url_semicolon_does_not_swallow_the_next_rule() {
+        // Reduced from GitHub primer: a mask image uses data:image/svg+xml;base64.
+        let sheet = parse_css(
+            ":is(.item):before{mask-image:url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiPjwvc3ZnPg)}\
+             @media (hover:hover){.skip{display:none}}\
+             .toggle__kPg75-{display:none}",
+        );
+        let toggle = sheet.rules.iter().any(|rule| {
+            format!("{rule:?}").contains("toggle__kPg75-")
+                && rule
+                    .declarations
+                    .iter()
+                    .any(|d| d.name == "display" && d.value == "none")
+        });
+        assert!(toggle, "rules {}", sheet.rules.len());
+        let mask = sheet
+            .rules
+            .iter()
+            .flat_map(|rule| &rule.declarations)
+            .find(|d| d.name == "mask-image")
+            .expect("mask");
+        assert!(mask.value.contains("base64,PHN2"));
+    }
+
+    #[test]
+    fn a_stray_brace_does_not_drop_later_rules() {
+        let sheet = parse_css(".a{color:red}}.toggle{display:none}");
+        assert!(sheet.rules.iter().any(|rule| {
+            format!("{rule:?}").contains("toggle")
+                && rule.declarations.iter().any(|d| d.value == "none")
+        }));
+    }
 
     #[test]
     fn parses_grouped_selectors_and_important() {
@@ -1306,9 +1402,10 @@ mod tests {
         let bound = |class: &str| {
             sheet.rules.iter().find(|rule| {
                 rule.selectors.iter().any(|selector| {
-                    selector.compounds.iter().any(|compound| {
-                        compound.classes.iter().any(|item| item == class)
-                    })
+                    selector
+                        .compounds
+                        .iter()
+                        .any(|compound| compound.classes.iter().any(|item| item == class))
                 })
             })
         };
