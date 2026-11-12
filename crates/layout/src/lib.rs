@@ -3523,6 +3523,26 @@ mod tests {
     }
 
     #[test]
+    fn a_floated_infobox_does_not_cover_the_lead() {
+        let doc = parse_html(
+            r#"<div id="out"><table id="box" style="float:right;width:160px"><tr><td><img id="pic" width="128" height="128" alt=""></td></tr></table><p id="lead">Rust is a general-purpose programming language that emphasizes performance and safety.</p></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 800.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let pic = find(&tree.root, doc.get_element_by_id("pic").unwrap()).unwrap();
+        let lead = find(&tree.root, doc.get_element_by_id("lead").unwrap()).unwrap();
+        let overlaps = lead.rect.x < pic.rect.right()
+            && lead.rect.right() > pic.rect.x
+            && lead.rect.y < pic.rect.bottom()
+            && lead.rect.bottom() > pic.rect.y;
+        assert!(
+            !overlaps,
+            "lead {:?} overlaps the logo {:?}",
+            lead.rect, pic.rect
+        );
+    }
+
+    #[test]
     fn an_inline_image_lifts_the_line() {
         let doc = parse_html(
             r#"<p id="p">Hi <img id="pic" width="40" height="80" alt=""> tail</p>"#,

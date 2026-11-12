@@ -748,7 +748,14 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     let navigator = navigator_object(context)?;
     let location = location_object(context)?;
     context.register_global_property(js_string!("window"), window.clone(), flags)?;
-    context.register_global_property(js_string!("self"), window, flags)?;
+    context.register_global_property(js_string!("self"), window.clone(), flags)?;
+    // A top-level page is its own browsing context. YouTube reads
+    // `window.top[name]` and throws when `top` is missing.
+    context.register_global_property(js_string!("top"), window.clone(), flags)?;
+    context.register_global_property(js_string!("parent"), window.clone(), flags)?;
+    context.register_global_property(js_string!("frames"), window.clone(), flags)?;
+    context.register_global_property(js_string!("frameElement"), JsValue::null(), flags)?;
+    context.register_global_property(js_string!("length"), JsValue::from(0), flags)?;
     let performance = performance_object(context)?;
     context.register_global_property(js_string!("performance"), performance, flags)?;
     context.register_global_property(js_string!("navigator"), navigator, flags)?;
@@ -6376,6 +6383,7 @@ mod tests {
               for (var key2 in methods) {
                 if (!Object.getOwnPropertyDescriptor(methods, key2)) missing.push(key2);
               }
+              if (window.top !== window || window.parent !== window) document.title = "top";
               if (inherited.length || missing.length || typeof WheelEvent !== "function") {
                 document.title = "forin:" + inherited.join(",") + "/" + missing.join(",") + ":" + typeof WheelEvent;
               }
