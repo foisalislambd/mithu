@@ -3523,6 +3523,47 @@ mod tests {
     }
 
     #[test]
+    fn vector_rows_stack_and_the_infobox_floats() {
+        let doc = parse_html(
+            r#"<style>
+            @media (min-width: 1120px) {
+              .mw-body { display: grid; grid-template: min-content min-content min-content 1fr / minmax(0, 59.25rem) min-content;
+                grid-template-areas: 'titlebar-cx .' 'titlebar columnEnd' 'toolbar columnEnd' 'content columnEnd'; }
+              .vector-page-titlebar { grid-area: titlebar; }
+              .vector-page-toolbar { grid-area: toolbar; }
+              #bodyContent { grid-area: content; }
+            }
+            @media (min-width: 640px) { .infobox { float: right; width: 160px; } }
+            </style>
+            <div class="mw-body"><div class="vector-page-titlebar"><h1 id="title">Rust</h1></div>
+            <div class="vector-page-toolbar" id="tools">Read Edit</div>
+            <div id="bodyContent"><table class="infobox"><tr><td><img id="pic" width="128" height="128" alt=""></td></tr></table>
+            <p id="lead">Rust is a general-purpose programming language that emphasizes performance and safety.</p></div></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+        let title = find(&tree.root, doc.get_element_by_id("title").unwrap()).unwrap();
+        let tools = find(&tree.root, doc.get_element_by_id("tools").unwrap()).unwrap();
+        let pic = find(&tree.root, doc.get_element_by_id("pic").unwrap()).unwrap();
+        let lead = find(&tree.root, doc.get_element_by_id("lead").unwrap()).unwrap();
+        assert!(
+            tools.rect.y + 1.0 >= title.rect.bottom(),
+            "toolbar y {} overlaps title bottom {}",
+            tools.rect.y,
+            title.rect.bottom()
+        );
+        let overlaps = lead.rect.x < pic.rect.right()
+            && lead.rect.right() > pic.rect.x
+            && lead.rect.y < pic.rect.bottom()
+            && lead.rect.bottom() > pic.rect.y;
+        assert!(
+            !overlaps,
+            "lead {:?} overlaps the logo {:?}",
+            lead.rect, pic.rect
+        );
+    }
+
+    #[test]
     fn a_floated_infobox_does_not_cover_the_lead() {
         let doc = parse_html(
             r#"<div id="out"><table id="box" style="float:right;width:160px"><tr><td><img id="pic" width="128" height="128" alt=""></td></tr></table><p id="lead">Rust is a general-purpose programming language that emphasizes performance and safety.</p></div>"#,

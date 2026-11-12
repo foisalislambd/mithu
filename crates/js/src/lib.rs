@@ -3184,6 +3184,33 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
     };
     if let (Some(proto), Some(object)) = (proto.as_object(), value.as_object()) {
         object.set_prototype(Some(proto.clone()));
+        let upgraded = object
+            .get(js_string!("__mithuUpgraded"), context)
+            .ok()
+            .is_some_and(|flag| flag.as_boolean() == Some(true));
+        if upgraded {
+            return;
+        }
+        let _ = object.set(
+            js_string!("__mithuUpgraded"),
+            JsValue::from(true),
+            false,
+            context,
+        );
+        // Class constructors reject a bare call. A function-style element
+        // constructor runs with the element as `this`, which is what Polymer
+        // uses to stamp its template.
+        if ctor.is_callable() {
+            let _ = ctor.call(value, &[], context);
+        }
+        let connected = node_of(value).is_some_and(|id| {
+            host(context)
+                .ok()
+                .is_some_and(|host| host.doc.borrow().is_connected(id))
+        });
+        if connected {
+            call_connected(value, context);
+        }
     }
 }
 
@@ -4002,7 +4029,48 @@ fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     }
     let child = node_of(&child_value).ok_or_else(type_error)?;
     host.doc.borrow_mut().append_child(parent, child);
+    notify_connected(child, context);
     Ok(child_value)
+}
+
+fn call_connected(value: &JsValue, context: &mut Context) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let done = object
+        .get(js_string!("__mithuConnected"), context)
+        .ok()
+        .is_some_and(|flag| flag.as_boolean() == Some(true));
+    if done {
+        return;
+    }
+    let _ = object.set(
+        js_string!("__mithuConnected"),
+        JsValue::from(true),
+        false,
+        context,
+    );
+    if let Ok(callback) = object.get(js_string!("connectedCallback"), context)
+        && let Some(callback) = callback.as_object()
+        && callback.is_callable()
+    {
+        let _ = callback.call(value, &[], context);
+    }
+}
+
+fn notify_connected(id: NodeId, context: &mut Context) {
+    let tag = host(context)
+        .ok()
+        .and_then(|host| host.doc.borrow().element_name(id).map(str::to_string));
+    if tag.as_deref().is_some_and(|name| name.contains('-')) {
+        call_connected(&element_value(id.0, context), context);
+    }
+    let children = host(context)
+        .map(|host| host.doc.borrow().node(id).children.clone())
+        .unwrap_or_default();
+    for child in children {
+        notify_connected(child, context);
+    }
 }
 
 fn add_event_listener(
@@ -5488,6 +5556,7 @@ fn insert_before_child(
     }
     let child = node_of(&child_value).ok_or_else(type_error)?;
     host.doc.borrow_mut().insert_before(parent, child, before);
+    notify_connected(child, context);
     Ok(child_value)
 }
 
@@ -6335,6 +6404,11 @@ mod tests {
                 document.title = "shadow";
               }
               class Box extends HTMLElement {}
+              class Stamp extends HTMLElement { connectedCallback() { this.setAttribute("ready", "1"); } }
+              customElements.define("x-stamp", Stamp);
+              var stamp = document.createElement("x-stamp");
+              document.body.appendChild(stamp);
+              if (stamp.getAttribute("ready") !== "1") document.title = "stamp";
               customElements.define("x-box", Box);
               var box = document.createElement("x-box");
               if (!(box instanceof Box) || customElements.get("x-box") !== Box) {
