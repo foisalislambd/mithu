@@ -1655,6 +1655,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let head_get = native(context, "get head", 0, get_head);
     let script_get = native(context, "get currentScript", 0, get_current_script);
     let sheets_get = native(context, "get styleSheets", 0, get_style_sheets);
+    let scripts_get = native(context, "get scripts", 0, get_scripts);
     let ready_get = native(context, "get readyState", 0, get_ready_state);
     let base_get = native(context, "get baseURI", 0, get_location);
     let cookie_get = native(context, "get cookie", 0, get_cookie);
@@ -1727,6 +1728,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
         .accessor(js_string!("head"), Some(head_get), None, ATTR)
         .accessor(js_string!("currentScript"), Some(script_get), None, ATTR)
         .accessor(js_string!("styleSheets"), Some(sheets_get), None, ATTR)
+        .accessor(js_string!("scripts"), Some(scripts_get), None, ATTR)
         .accessor(js_string!("readyState"), Some(ready_get), None, ATTR)
         .accessor(js_string!("baseURI"), Some(base_get), None, ATTR)
         .accessor(
@@ -3729,6 +3731,30 @@ fn get_previous_sibling(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     sibling_value(this, context, false)
+}
+
+fn get_scripts(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let mut ids = Vec::new();
+    let root = host.doc.borrow().root;
+    collect_tags(&host.doc.borrow(), root, "script", &mut ids);
+    let values = ids
+        .into_iter()
+        .map(|id| element_value(id.0, context))
+        .collect::<Vec<_>>();
+    Ok(JsObject::from(JsArray::from_iter(values, context)).into())
+}
+
+fn collect_tags(doc: &mithu_dom::Document, id: NodeId, tag: &str, out: &mut Vec<NodeId>) {
+    if doc
+        .element_name(id)
+        .is_some_and(|name| name.eq_ignore_ascii_case(tag))
+    {
+        out.push(id);
+    }
+    for child in doc.node(id).children.clone() {
+        collect_tags(doc, child, tag, out);
+    }
 }
 
 fn get_children(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -6484,6 +6510,7 @@ mod tests {
               var range = new Range();
               range.selectNodeContents(document.body);
               if (!range.getBoundingClientRect() || range.getClientRects().length !== 1) document.title = "range";
+              if (!document.scripts || typeof document.scripts.length !== "number" || document.scripts.length < 1) document.title = "scripts";
               if (getComputedStyle(document.documentElement).fontSize.replace("px","") !== "16") document.title = "font";
               if (navigator.mimeTypes.length !== 0 || navigator.plugins.length !== 0) document.title = "plugins";
               if (!screen.width || !navigator.userAgentData || navigator.userAgentData.mobile !== false) document.title = "screen";
