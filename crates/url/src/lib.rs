@@ -336,7 +336,27 @@ fn encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b'/'
+            | b':'
+            | b'@'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'=' => {
                 out.push(byte as char);
             }
             _ => out.push_str(&format!("%{byte:02X}")),
@@ -358,6 +378,10 @@ mod tests {
         assert_eq!(url.path, "/a/b");
         assert_eq!(url.query.as_deref(), Some("q=1"));
         assert_eq!(url.fragment.as_deref(), Some("frag"));
+        assert_eq!(
+            Url::parse("https://example.com/a,b/c:d").unwrap().request_target(),
+            "/a,b/c:d"
+        );
         assert_eq!(url.to_display(), "https://example.com:8443/a/b?q=1#frag");
         assert_eq!(url.request_target(), "/a/b?q=1");
     }
