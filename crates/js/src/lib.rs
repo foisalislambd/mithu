@@ -3892,6 +3892,16 @@ pub(crate) fn attach_shadow(
         .and_then(|object| object.get(js_string!("mode"), context).ok())
         .and_then(|value| value.as_string().map(|text| text.to_std_string_escaped()))
         .unwrap_or_else(|| "open".to_string());
+    if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n < 4 {
+            let tag = node_of(this)
+                .and_then(|id| host(context).ok().and_then(|host| host.doc.borrow().element_name(id).map(str::to_string)))
+                .unwrap_or_default();
+            eprintln!("attachShadow {n} {tag}");
+        }
+    }
     let root_id = {
         let host = host(context)?;
         host.doc.borrow_mut().create_element_detached("mithu-shadow")
@@ -6431,6 +6441,15 @@ mod tests {
               var stamp = document.createElement("x-stamp");
               document.body.appendChild(stamp);
               if (stamp.getAttribute("ready") !== "yes") document.title = "stamp:" + stamp.getAttribute("ready");
+              class Mid extends HTMLElement { constructor() { super(); this.mid = "a"; } }
+              class Top extends Mid {
+                constructor() { super(); this.top = "b"; }
+                connectedCallback() { this.setAttribute("ready", (this.mid || "") + (this.top || "")); }
+              }
+              customElements.define("x-top", Top);
+              var topEl = document.createElement("x-top");
+              document.body.appendChild(topEl);
+              if (topEl.getAttribute("ready") !== "ab") document.title = "chain:" + topEl.getAttribute("ready");
               customElements.define("x-box", Box);
               var box = document.createElement("x-box");
               if (!(box instanceof Box) || customElements.get("x-box") !== Box) {
