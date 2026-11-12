@@ -41,6 +41,7 @@ pub(crate) fn apply_size(style: &mut ComputedStyle, doc: &Document, id: NodeId) 
 
 pub(crate) fn shapes(
     doc: &Document,
+    styles: &[ComputedStyle],
     id: NodeId,
     width: f32,
     height: f32,
@@ -55,10 +56,15 @@ pub(crate) fn shapes(
     let mut out = Vec::new();
     walk(
         doc,
+        styles,
         id,
         &view,
         width,
         height,
+        0.0,
+        0.0,
+        false,
+        &mut Vec::new(),
         Paint {
             fill: Some(Color::BLACK),
             stroke: None,
@@ -97,15 +103,69 @@ struct Paint {
 
 fn walk(
     doc: &Document,
+    styles: &[ComputedStyle],
     id: NodeId,
     view: &ViewBox,
     width: f32,
     height: f32,
+    dx: f32,
+    dy: f32,
+    paint_hidden: bool,
+    seen: &mut Vec<NodeId>,
     mut paint: Paint,
     out: &mut Vec<VectorShape>,
 ) {
-    paint = paint_of(doc, id, paint);
     let name = doc.element_name(id).unwrap_or("");
+    if !paint_hidden && matches!(name, "defs" | "symbol" | "clippath" | "mask") {
+        return;
+    }
+    if let Some(style) = styles.get(id.0) {
+        paint.color = style.color;
+        if let Some(fill) = style.fill {
+            paint.fill = Some(fill);
+        }
+    }
+    paint = paint_of(doc, id, paint);
+    if name == "use" {
+        let href = doc
+            .attr(id, "href")
+            .or_else(|| doc.attr(id, "xlink:href"))
+            .unwrap_or("");
+        let Some(target) = href
+            .strip_prefix('#')
+            .and_then(|id| doc.get_element_by_id(id))
+        else {
+            return;
+        };
+        if seen.contains(&target) {
+            return;
+        }
+        let ox = doc
+            .attr(id, "x")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0);
+        let oy = doc
+            .attr(id, "y")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0);
+        seen.push(target);
+        walk(
+            doc,
+            styles,
+            target,
+            view,
+            width,
+            height,
+            dx + ox,
+            dy + oy,
+            true,
+            seen,
+            paint,
+            out,
+        );
+        seen.pop();
+        return;
+    }
     let contours = match name {
         "path" => doc.attr(id, "d").map(parse_path).unwrap_or_default(),
         "rect" => rect_contour(doc, id),
@@ -121,7 +181,7 @@ fn walk(
         }
         let mapped = points
             .into_iter()
-            .map(|(x, y)| map_point(x, y, view, width, height))
+            .map(|(x, y)| map_point(x + dx, y + dy, view, width, height))
             .collect();
         let scale = uniform_scale(view, width, height);
         out.push(VectorShape {
@@ -133,7 +193,20 @@ fn walk(
     }
     for child in doc.node(id).children.clone() {
         if matches!(doc.node(child).data, NodeData::Element(_)) {
-            walk(doc, child, view, width, height, paint, out);
+            walk(
+                doc,
+                styles,
+                child,
+                view,
+                width,
+                height,
+                dx,
+                dy,
+                paint_hidden,
+                seen,
+                paint,
+                out,
+            );
         }
     }
 }
@@ -360,7 +433,21 @@ fn parse_path(d: &str) -> Vec<Vec<(f32, f32)>> {
             index += 1;
         } else if matches!(
             prev,
-            'M' | 'm' | 'L' | 'l' | 'C' | 'c' | 'Q' | 'q' | 'S' | 's' | 'H' | 'h' | 'V' | 'v'
+            'M' | 'm'
+                | 'L'
+                | 'l'
+                | 'C'
+                | 'c'
+                | 'Q'
+                | 'q'
+                | 'S'
+                | 's'
+                | 'H'
+                | 'h'
+                | 'V'
+                | 'v'
+                | 'A'
+                | 'a'
         ) {
             command = if prev == 'M' {
                 'L'
@@ -465,6 +552,42 @@ fn parse_path(d: &str) -> Vec<Vec<(f32, f32)>> {
                 y = start_y;
                 prev = command;
             }
+            'A' => {
+                let Some(rx) = take_one(bytes, &mut index) else {
+                    break;
+                };
+                let Some(ry) = take_one(bytes, &mut index) else {
+                    break;
+                };
+                let Some(rotation) = take_one(bytes, &mut index) else {
+                    break;
+                };
+                let Some(large) = take_one(bytes, &mut index) else {
+                    break;
+                };
+                let Some(sweep) = take_one(bytes, &mut index) else {
+                    break;
+                };
+                let Some((nx, ny)) = take_pair(bytes, &mut index) else {
+                    break;
+                };
+                let (nx, ny) = abs(relative, x, y, nx, ny);
+                arc(
+                    &mut current,
+                    x,
+                    y,
+                    rx,
+                    ry,
+                    rotation,
+                    large != 0.0,
+                    sweep != 0.0,
+                    nx,
+                    ny,
+                );
+                x = nx;
+                y = ny;
+                prev = command;
+            }
             _ => break,
         }
     }
@@ -472,6 +595,88 @@ fn parse_path(d: &str) -> Vec<Vec<(f32, f32)>> {
         contours.push(current);
     }
     contours
+}
+
+fn arc(
+    points: &mut Vec<(f32, f32)>,
+    x1: f32,
+    y1: f32,
+    mut rx: f32,
+    mut ry: f32,
+    rotation: f32,
+    large: bool,
+    sweep: bool,
+    x2: f32,
+    y2: f32,
+) {
+    if (x1 - x2).abs() < f32::EPSILON && (y1 - y2).abs() < f32::EPSILON {
+        return;
+    }
+    if rx.abs() < f32::EPSILON || ry.abs() < f32::EPSILON {
+        points.push((x2, y2));
+        return;
+    }
+    let phi = rotation.to_radians();
+    let (sin_phi, cos_phi) = phi.sin_cos();
+    let dx = (x1 - x2) / 2.0;
+    let dy = (y1 - y2) / 2.0;
+    let x1p = cos_phi * dx + sin_phi * dy;
+    let y1p = -sin_phi * dx + cos_phi * dy;
+    rx = rx.abs();
+    ry = ry.abs();
+    let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+    if lambda > 1.0 {
+        let scale = lambda.sqrt();
+        rx *= scale;
+        ry *= scale;
+    }
+    let sign = if large == sweep { -1.0 } else { 1.0 };
+    let numer = (rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p).max(0.0);
+    let denom = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+    let coef = if denom <= f32::EPSILON {
+        0.0
+    } else {
+        sign * (numer / denom).sqrt()
+    };
+    let cxp = coef * rx * y1p / ry;
+    let cyp = coef * -ry * x1p / rx;
+    let cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0;
+    let cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0;
+    let theta1 = vector_angle(1.0, 0.0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+    let mut delta = vector_angle(
+        (x1p - cxp) / rx,
+        (y1p - cyp) / ry,
+        (-x1p - cxp) / rx,
+        (-y1p - cyp) / ry,
+    );
+    if !sweep && delta > 0.0 {
+        delta -= std::f32::consts::TAU;
+    }
+    if sweep && delta < 0.0 {
+        delta += std::f32::consts::TAU;
+    }
+    let steps = ((delta.abs() / (std::f32::consts::PI / 8.0)).ceil() as i32).max(1);
+    for step in 1..=steps {
+        let angle = theta1 + delta * step as f32 / steps as f32;
+        let (sin_t, cos_t) = angle.sin_cos();
+        points.push((
+            cx + rx * cos_t * cos_phi - ry * sin_t * sin_phi,
+            cy + rx * cos_t * sin_phi + ry * sin_t * cos_phi,
+        ));
+    }
+}
+
+fn vector_angle(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
+    let dot = ux * vx + uy * vy;
+    let len = ((ux * ux + uy * uy) * (vx * vx + vy * vy)).sqrt();
+    if len <= f32::EPSILON {
+        return 0.0;
+    }
+    let mut angle = (dot / len).clamp(-1.0, 1.0).acos();
+    if ux * vy - uy * vx < 0.0 {
+        angle = -angle;
+    }
+    angle
 }
 
 fn abs(relative: bool, x: f32, y: f32, nx: f32, ny: f32) -> (f32, f32) {

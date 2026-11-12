@@ -268,6 +268,10 @@ fn layout_node(
     };
     let blockish = synthetic.is_none() && has_block_child(doc, styles, id);
     let inline_flex = display == Display::InlineFlex;
+    // A float (and inline-flex) with `width: auto` uses the shrink-to-fit width.
+    // Stretching it to the line is what made Wikipedia's star icon push the
+    // tagline into a one-word column.
+    let fit = shrink_to_fit || inline_flex;
     let (lines, mut children, flowed) = if display == Display::Flex || inline_flex {
         let mut laid = layout_flex(
             doc,
@@ -282,7 +286,7 @@ fn layout_node(
             href.clone(),
             view,
         );
-        if inline_flex && width_is_auto {
+        if fit && width_is_auto {
             let gaps = style.gap.max(0.0) * laid.1.len().saturating_sub(1) as f32;
             let used = laid
                 .1
@@ -456,6 +460,7 @@ fn layout_node(
     if doc.element_name(id) == Some("svg") {
         let shapes = svg::shapes(
             doc,
+            styles,
             id,
             laid_out.rect.width,
             laid_out.rect.height,
@@ -694,6 +699,7 @@ fn place_float(
     let mut cursor = *y;
     for _ in 0..4 {
         let (band_x, band_w) = float_band(cursor, content_x, content_w, floats);
+        let shrink = matches!(style_of(styles, id).width, Length::Auto);
         let mut layout = layout_node(
             doc,
             styles,
@@ -704,7 +710,7 @@ fn place_float(
             cursor,
             band_w.max(1.0),
             href.clone(),
-            false,
+            shrink,
             view,
         )?;
         let outer = layout.margin.left + layout.rect.width + layout.margin.right;
@@ -1597,8 +1603,7 @@ fn append_box_children(
     out: &mut Vec<NodeId>,
 ) {
     for child in doc.node(id).children.clone() {
-        if doc.element_name(child).is_some()
-            && style_of(styles, child).display == Display::Contents
+        if doc.element_name(child).is_some() && style_of(styles, child).display == Display::Contents
         {
             append_box_children(doc, styles, child, out);
         } else {
@@ -2969,6 +2974,56 @@ mod tests {
     }
 
     #[test]
+    fn a_right_float_shrinks_to_its_content() {
+        let doc = parse_html(
+            r#"<div id="host">
+              <div id="flag" style="float:right;display:flex"><span style="display:inline-block;width:20px;height:20px"></span></div>
+              <div id="tag">From Wikipedia, the free encyclopedia</div>
+            </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 800.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let flag = find(&tree.root, doc.get_element_by_id("flag").unwrap()).unwrap();
+        let tag = find(&tree.root, doc.get_element_by_id("tag").unwrap()).unwrap();
+        assert!(
+            flag.rect.width < 80.0,
+            "float stretched to {}",
+            flag.rect.width
+        );
+        assert!(
+            tag.rect.width > 200.0,
+            "tagline squeezed to {}",
+            tag.rect.width
+        );
+        assert!(flag.rect.x > tag.rect.x + 100.0, "float x {}", flag.rect.x);
+    }
+
+    #[test]
+    fn an_svg_arc_and_use_paint_and_css_fill_is_kept() {
+        let doc = parse_html(
+            r##"<svg id="logo" width="80" height="24" viewBox="0 0 80 24">
+              <defs><path id="mark" d="M2 20 L10 2 L18 20 Z"/></defs>
+              <use href="#mark"></use>
+              <path id="word" class="word" d="M30 16 a8 8 0 0 1 16 0"/>
+            </svg>"##,
+        );
+        let styles = style_document(&doc, ".word { fill: #0a5dbd; }");
+        let tree = layout_tree(&doc, &styles, 200.0, 80.0, &NaiveMetrics, &HashMap::new());
+        let logo = find(&tree.root, doc.get_element_by_id("logo").unwrap()).unwrap();
+        assert!(
+            logo.shapes.len() >= 2,
+            "expected the symbol and the arc, got {}",
+            logo.shapes.len()
+        );
+        let word = logo
+            .shapes
+            .iter()
+            .find(|shape| shape.points.len() > 4)
+            .expect("the arc should flatten to several points");
+        assert_eq!(word.fill, Some(mithu_base::Color::rgb(0x0a, 0x5d, 0xbd)));
+    }
+
+    #[test]
     fn a_left_float_narrows_the_next_block() {
         let doc = parse_html(
             r#"<div id="host" style="width:300px"><div id="side" style="float:left;width:80px;height:40px"></div><div id="main" style="height:40px"></div><div id="below" style="clear:both;height:10px"></div></div>"#,
@@ -3242,7 +3297,11 @@ mod tests {
         let title = find(&tree.root, doc.get_element_by_id("title").unwrap()).unwrap();
         let body = find(&tree.root, doc.get_element_by_id("body").unwrap()).unwrap();
         let side = find(&tree.root, doc.get_element_by_id("side").unwrap()).unwrap();
-        assert!(title.rect.x > side.rect.right() - 2.0, "title x {}", title.rect.x);
+        assert!(
+            title.rect.x > side.rect.right() - 2.0,
+            "title x {}",
+            title.rect.x
+        );
         assert!(
             body.rect.y < title.rect.bottom() + 40.0 && body.rect.y < side.rect.height,
             "article dropped below the sidebar: title {} body {}",

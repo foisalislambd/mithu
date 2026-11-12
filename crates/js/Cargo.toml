@@ -9,7 +9,7 @@ publish.workspace = true
 description = "JavaScript virtual machine and DOM bindings"
 
 [dependencies]
-boa_engine = "0.22.0"
+boa_engine = { version = "0.22.0", features = ["annex-b"] }
 boa_gc = "0.22.0"
 mithu-css = { path = "../css" }
 mithu-dom = { path = "../dom" }

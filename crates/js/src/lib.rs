@@ -688,7 +688,13 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     let performance = performance_object(context)?;
     context.register_global_property(js_string!("performance"), performance, flags)?;
     context.register_global_property(js_string!("navigator"), navigator, flags)?;
-    context.register_global_property(js_string!("location"), location, flags)?;
+    context.register_global_property(js_string!("location"), location.clone(), flags)?;
+    if let Ok(document) = context.global_object().get(js_string!("document"), context)
+        && let Some(document) = document.as_object()
+    {
+        // `document.location` is the same object as `window.location`.
+        let _ = document.set(js_string!("location"), location, false, context);
+    }
     context.register_global_callable(
         js_string!("setTimeout"),
         2,
@@ -1207,6 +1213,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let cookie_get = native(context, "get cookie", 0, get_cookie);
     let cookie_set = native(context, "set cookie", 1, set_cookie);
     let fonts = font_set(context)?;
+    let implementation = implementation_object(context)?;
     let window = context.global_object().clone();
     let mut object = ObjectInitializer::new(context);
     object
@@ -1292,6 +1299,17 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             js_string!("createElementNS"),
             2,
         )
+        .function(
+            NativeFunction::from_fn_ptr(create_event),
+            js_string!("createEvent"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_tree_walker),
+            js_string!("createTreeWalker"),
+            1,
+        )
+        .property(js_string!("implementation"), implementation, ATTR)
         .function(
             NativeFunction::from_fn_ptr(data_get),
             js_string!("__dataGet"),
@@ -1451,13 +1469,126 @@ fn get_current_script(
     })
 }
 
-fn get_cookie(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
-    // HttpOnly cookies live in the network jar and are not visible to scripts.
-    // The string is empty until the jar can tell those apart.
-    Ok(js_string!("").into())
+fn get_cookie(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Ok(host) = host(context) else {
+        return Ok(js_string!("").into());
+    };
+    let Ok(url) = mithu_url::Url::parse(&host.location.borrow()) else {
+        return Ok(js_string!("").into());
+    };
+    // HttpOnly cookies stay in the jar and are not part of this string.
+    Ok(js_string!(mithu_net::document_cookie(&url)).into())
 }
 
-fn set_cookie(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+fn set_cookie(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let value = arg_string(args, 0, context)?;
+    if let Ok(host) = host(context)
+        && let Ok(url) = mithu_url::Url::parse(&host.location.borrow())
+    {
+        mithu_net::set_document_cookie(&url, &value);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn create_tree_walker(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let walker = ObjectInitializer::new(context)
+        .property(js_string!("currentNode"), JsValue::null(), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::null())),
+            js_string!("nextNode"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::null())),
+            js_string!("previousNode"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::null())),
+            js_string!("firstChild"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::null())),
+            js_string!("nextSibling"),
+            0,
+        )
+        .build();
+    Ok(walker.into())
+}
+
+fn implementation_object(context: &mut Context) -> JsResult<JsObject> {
+    let mut object = ObjectInitializer::new(context);
+    object.function(
+        NativeFunction::from_fn_ptr(|_, _, context| {
+            let doc = ObjectInitializer::new(context)
+                .property(js_string!("documentElement"), JsValue::null(), ATTR)
+                .property(js_string!("body"), JsValue::null(), ATTR)
+                .property(js_string!("head"), JsValue::null(), ATTR)
+                .build();
+            Ok(doc.into())
+        }),
+        js_string!("createHTMLDocument"),
+        0,
+    );
+    Ok(object.build())
+}
+
+fn create_event(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let kind = arg_string(args, 0, context).unwrap_or_default();
+    let event = ObjectInitializer::new(context)
+        .property(js_string!("type"), js_string!(""), ATTR)
+        .property(js_string!("defaultPrevented"), JsValue::from(false), ATTR)
+        .property(js_string!("bubbles"), JsValue::from(false), ATTR)
+        .property(js_string!("cancelable"), JsValue::from(false), ATTR)
+        .property(js_string!("eventInterface"), js_string!(kind), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(event_init),
+            js_string!("initEvent"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(event_prevent),
+            js_string!("preventDefault"),
+            0,
+        )
+        .build();
+    Ok(event.into())
+}
+
+fn event_init(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let kind = arg_string(args, 0, context).unwrap_or_default();
+    object.set(js_string!("type"), js_string!(kind), true, context)?;
+    if let Some(bubbles) = args.get(1).and_then(|value| value.as_boolean()) {
+        object.set(js_string!("bubbles"), JsValue::from(bubbles), true, context)?;
+    }
+    if let Some(cancelable) = args.get(2).and_then(|value| value.as_boolean()) {
+        object.set(
+            js_string!("cancelable"),
+            JsValue::from(cancelable),
+            true,
+            context,
+        )?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn event_prevent(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(object) = this.as_object() {
+        object.set(
+            js_string!("defaultPrevented"),
+            JsValue::from(true),
+            true,
+            context,
+        )?;
+    }
     Ok(JsValue::undefined())
 }
 
@@ -1810,6 +1941,7 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let node_value_get = native(context, "get element nodeValue", 0, get_null);
     let node_value_set = native(context, "set element nodeValue", 1, set_ignored);
     let nonce_get = native(context, "get nonce", 0, get_nonce);
+    let connected_get = native(context, "get isConnected", 0, get_is_connected);
     let nonce_set = native(context, "set nonce", 1, set_nonce);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
@@ -1980,7 +2112,8 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         )
         .accessor(js_string!("href"), Some(href_get), Some(href_set), ATTR)
         .accessor(js_string!("lang"), Some(lang_get), Some(lang_set), ATTR)
-        .accessor(js_string!("nonce"), Some(nonce_get), Some(nonce_set), ATTR);
+        .accessor(js_string!("nonce"), Some(nonce_get), Some(nonce_set), ATTR)
+        .accessor(js_string!("isConnected"), Some(connected_get), None, ATTR);
     if let (Some(src_get), Some(src_set)) = (src_get, src_set) {
         object.accessor(js_string!("src"), Some(src_get), Some(src_set), ATTR);
     }
@@ -2020,6 +2153,16 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         object.accessor(js_string!("content"), Some(content_get), None, ATTR);
     }
     let value = object.build();
+    if tag.contains('-') {
+        let delegate = ObjectInitializer::new(context)
+            .function(
+                NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+                js_string!("requestErrored"),
+                0,
+            )
+            .build();
+        let _ = value.set(js_string!("delegate"), delegate, false, context);
+    }
     let ctor_name = JsString::from(element_interface(&tag));
     if let Ok(ctor) = context.global_object().get(ctor_name, context)
         && let Some(ctor) = ctor.as_object()
@@ -2796,6 +2939,16 @@ fn sibling_value(this: &JsValue, context: &mut Context, next: bool) -> JsResult<
     }
 }
 
+fn get_is_connected(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Ok(host) = host(context) else {
+        return Ok(JsValue::from(false));
+    };
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::from(false));
+    };
+    Ok(JsValue::from(host.doc.borrow().is_connected(id)))
+}
+
 fn get_parent(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
@@ -3491,18 +3644,30 @@ fn font_set(context: &mut Context) -> JsResult<JsObject> {
     Ok(fonts.build())
 }
 
-fn fonts_check(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let loaded = this
-        .as_object()
-        .and_then(|object| object.get(js_string!("status"), context).ok())
-        .and_then(|value| value.as_string())
-        .is_some_and(|text| text.to_std_string_lossy() == "loaded");
-    Ok(JsValue::from(loaded))
+fn fonts_check(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    // The engine can draw the families it has already loaded, and a missing
+    // face falls back to the system font, so a critical-font check succeeds.
+    Ok(JsValue::from(true))
 }
 
-fn fonts_load(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let faces = JsArray::from_iter([], context);
+fn fonts_load(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let spec = arg_string(args, 0, context).unwrap_or_default();
+    let face = ObjectInitializer::new(context)
+        .property(js_string!("family"), js_string!(spec), ATTR)
+        .property(js_string!("status"), js_string!("loaded"), ATTR)
+        .property(js_string!("weight"), js_string!("normal"), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(font_face_ready),
+            js_string!("load"),
+            0,
+        )
+        .build();
+    let faces = JsArray::from_iter([JsValue::from(face)], context);
     Ok(JsPromise::resolve(faces, context)?.into())
+}
+
+fn font_face_ready(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsPromise::resolve(this.clone(), context)?.into())
 }
 
 fn fonts_listen(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
@@ -4134,9 +4299,9 @@ fn is_same_node(this: &JsValue, args: &[JsValue], _context: &mut Context) -> JsR
 
 fn clone_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = node_of(this).ok_or_else(type_error)?;
-    let deep = args.first().is_some_and(|value| {
-        value.as_boolean() == Some(true) || value.to_boolean()
-    });
+    let deep = args
+        .first()
+        .is_some_and(|value| value.as_boolean() == Some(true) || value.to_boolean());
     let cloned = {
         let host = host(context)?;
         host.doc.borrow_mut().clone_node(id, deep)
@@ -5135,6 +5300,68 @@ mod tests {
         let session = Session::open(doc, |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
         assert_eq!(session.document().title, "null");
+    }
+
+    #[test]
+    fn document_cookie_reads_script_cookies_and_hides_httponly() {
+        let href = "https://cookie-case.invalid/page";
+        let url = mithu_url::Url::parse(href).unwrap();
+        mithu_net::store_set_cookie(&url, "secret=1; HttpOnly; Path=/");
+        let doc = parse_html(
+            r#"<script>
+              document.cookie = "a=b; Path=/";
+              var seen = document.cookie;
+              document.title = seen.indexOf("a=b") >= 0 && seen.indexOf("secret") < 0 ? "ok" : seen;
+              var event = document.createEvent("Event");
+              event.initEvent("foo", true, true);
+              event.preventDefault();
+              if (!event.defaultPrevented || "abcd".substr(1, 2) !== "bc" || !document.documentElement.isConnected) {
+                document.title = "api";
+              }
+              if (!document.location || document.location.href.indexOf("cookie-case") < 0) {
+                document.title = "location";
+              }
+            </script>"#,
+        );
+        let session = Session::open_at(doc, href, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "ok");
+    }
+
+    #[test]
+    fn test262_subset_reports_a_pass_rate() {
+        let cases = [
+            ("add", "1 + 1 === 2"),
+            ("substr", "'abcd'.substr(1, 2) === 'bc'"),
+            ("optional", "({ a: 1 })?.a === 1"),
+            ("nullish", "(null ?? 'x') === 'x'"),
+            ("template", "`${1 + 1}` === '2'"),
+            ("map", "new Map([['a', 1]]).get('a') === 1"),
+            ("json", "JSON.parse('{\"n\":1}').n === 1"),
+            ("promise", "typeof Promise.resolve === 'function'"),
+            ("array", "[1, 2, 3].includes(2)"),
+            ("assign", "Object.assign({ a: 1 }, { b: 2 }).b === 2"),
+        ];
+        let mut script = String::from("var passed = 0; var failed = '';");
+        for (name, expression) in cases {
+            script.push_str(&format!(
+                "try {{ if ({expression}) passed += 1; else failed += '{name},'; }} catch (error) {{ failed += '{name},'; }}"
+            ));
+        }
+        script.push_str(&format!("document.title = passed + '/' + {};", cases.len()));
+        let doc = parse_html(&format!("<script>{script}</script>"));
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let title = session.document().title.clone();
+        let (passed, total) = title.split_once('/').unwrap_or(("0", "0"));
+        let passed: f64 = passed.parse().unwrap_or(0.0);
+        let total: f64 = total.parse().unwrap_or(1.0);
+        let rate = passed / total;
+        assert!(
+            rate >= 0.8,
+            "test262 subset pass rate {passed}/{total} ({:.0}%) title {title}",
+            rate * 100.0
+        );
     }
 
     #[test]

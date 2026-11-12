@@ -4,6 +4,8 @@
 //! bodies, redirects, and `Cookie` / `Set-Cookie`. TLS is provided by Rustls
 //! so the certificate check is a real one, not a hand-rolled cipher. One
 //! profile-wide jar and cache stand in for Chromium's network service.
+//! HTTP/3 is not spoken: that needs a QUIC stack, and the client only
+//! advertises `h2` and `http/1.1`.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -20,6 +22,25 @@ mod http2;
 
 pub use cache::HttpCache;
 pub use cookies::{Cookie, CookieJar};
+
+/// Non-`HttpOnly` cookies visible to `document.cookie` on `url`.
+pub fn document_cookie(url: &Url) -> String {
+    with_profile(|profile| profile.cookies.document_cookie(url))
+}
+
+/// Stores a `document.cookie` assignment. `HttpOnly` cannot be set from script.
+pub fn set_document_cookie(url: &Url, line: &str) {
+    with_profile(|profile| profile.cookies.set_document_cookie(url, line));
+}
+
+/// Stores one `Set-Cookie` header, including `HttpOnly`, the way a response does.
+pub fn store_set_cookie(url: &Url, header: &str) {
+    with_profile(|profile| {
+        profile
+            .cookies
+            .ingest(url, &[("set-cookie".to_string(), header.to_string())]);
+    });
+}
 
 /// How a navigation uses the profile cache. Reload bypasses it; other loads may reuse a fresh response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

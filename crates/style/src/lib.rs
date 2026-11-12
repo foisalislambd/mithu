@@ -9,7 +9,7 @@ use mithu_css::{
 use mithu_dom::{Document, NodeId};
 
 pub const USER_AGENT_CSS: &str = r#"
-html, address, article, aside, blockquote, div, dl, fieldset, figcaption, figure,
+html, body, address, article, aside, blockquote, div, dl, fieldset, figcaption, figure,
 footer, form, h1, h2, h3, h4, h5, h6, header, hr, main, nav, ol, p, pre, section,
 table, ul, dd, dt { display: block; }
 li { display: list-item; }
@@ -200,6 +200,8 @@ pub enum TextTransform {
 pub struct ComputedStyle {
     pub display: Display,
     pub color: Color,
+    /// SVG `fill` when a rule sets one. `None` leaves the paint default.
+    pub fill: Option<Color>,
     pub background: Color,
     pub font_size: f32,
     pub bold: bool,
@@ -274,6 +276,7 @@ impl ComputedStyle {
         Self {
             display: Display::Inline,
             color: Color::BLACK,
+            fill: None,
             background: Color::TRANSPARENT,
             font_size: 16.0,
             bold: false,
@@ -358,6 +361,7 @@ struct Ranked<T> {
 struct Specified {
     display: Option<Ranked<Display>>,
     color: Option<Ranked<Color>>,
+    fill: Option<Ranked<Color>>,
     background: Option<Ranked<Color>>,
     gradient: Option<Ranked<(Color, Color)>>,
     font_size: Option<Ranked<FontSize>>,
@@ -875,6 +879,16 @@ fn apply_declaration(
                 rank(&mut specified.color, color, spec);
             }
         }
+        "fill" => {
+            let paint = if value.eq_ignore_ascii_case("currentcolor") {
+                Some(parent_fill_placeholder())
+            } else {
+                parse_color(value)
+            };
+            if let Some(color) = paint {
+                rank(&mut specified.fill, color, spec);
+            }
+        }
         "background-color" => {
             if let Some(color) = parse_color(value) {
                 rank(&mut specified.background, color, spec);
@@ -1254,6 +1268,11 @@ fn zero_auto(length: Length) -> Length {
     }
 }
 
+/// Stand-in so `fill: currentColor` can be stored before the used color exists.
+fn parent_fill_placeholder() -> Color {
+    Color::rgba(1, 2, 3, 1)
+}
+
 fn concretize(
     doc: &Document,
     id: NodeId,
@@ -1278,6 +1297,13 @@ fn concretize(
             .map(|item| item.value)
             .unwrap_or(Display::Inline),
         color,
+        fill: specified.fill.as_ref().map(|item| {
+            if item.value == parent_fill_placeholder() {
+                color
+            } else {
+                item.value
+            }
+        }),
         background: specified
             .background
             .as_ref()

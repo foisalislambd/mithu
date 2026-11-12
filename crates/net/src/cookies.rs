@@ -3,7 +3,7 @@
 //! Chromium stores cookies in the network service (`net/cookies`). Mithu keeps
 //! one jar for the browser profile and sends it on later requests to the same
 //! site. `Expires` and `SameSite` decide which later request includes the
-//! cookie. Scripts never read the jar, so `HttpOnly` stays on the browser side.
+//! cookie. `document.cookie` reads and writes the same jar, skipping `HttpOnly`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +22,8 @@ pub struct Cookie {
     /// CHIPS `Partitioned` cookies are stored under the top-level site.
     pub partitioned: bool,
     pub partition_key: String,
+    /// `HttpOnly` cookies are sent on requests and hidden from `document.cookie`.
+    pub http_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +134,38 @@ impl CookieJar {
             Some(pairs.join("; "))
         }
     }
+
+    /// `document.cookie` for `url`: every matching cookie except `HttpOnly`.
+    pub fn document_cookie(&self, url: &Url) -> String {
+        let now = now_secs();
+        let mut pairs = Vec::new();
+        for cookie in &self.cookies {
+            if cookie.http_only || cookie.expires_at.is_some_and(|expires| expires <= now) {
+                continue;
+            }
+            if cookie.secure && url.scheme != "https" {
+                continue;
+            }
+            if !domain_matches(cookie, &url.host) || !path_matches(&cookie.path, &url.path) {
+                continue;
+            }
+            pairs.push(format!("{}={}", cookie.name, cookie.value));
+        }
+        pairs.join("; ")
+    }
+
+    /// Stores one `document.cookie` assignment. Scripts cannot set `HttpOnly`.
+    pub fn set_document_cookie(&mut self, url: &Url, line: &str) {
+        let now = now_secs();
+        let Some(mut parsed) = parse_set_cookie(line, url, now, &url.host) else {
+            return;
+        };
+        parsed.http_only = false;
+        self.cookies.retain(|cookie| !same_slot(cookie, &parsed));
+        if parsed.expires_at != Some(0) {
+            self.cookies.push(parsed);
+        }
+    }
 }
 
 pub fn parse_set_cookie(header: &str, url: &Url, now: u64, top_level_host: &str) -> Option<Cookie> {
@@ -153,6 +187,7 @@ pub fn parse_set_cookie(header: &str, url: &Url, now: u64, top_level_host: &str)
         same_site: SameSite::Default,
         partitioned: false,
         partition_key: String::new(),
+        http_only: false,
     };
     let mut max_age_set = false;
     for attribute in parts {
@@ -178,6 +213,7 @@ pub fn parse_set_cookie(header: &str, url: &Url, now: u64, top_level_host: &str)
                 }
             }
             "secure" => cookie.secure = true,
+            "httponly" => cookie.http_only = true,
             "max-age" => match raw.parse::<i64>() {
                 Ok(age) if age <= 0 => {
                     cookie.expires_at = Some(0);

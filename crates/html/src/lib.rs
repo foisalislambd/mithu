@@ -617,7 +617,7 @@ impl Parser {
         }
     }
 
-    fn start_in_body(&mut self, name: String, attrs: Vec<(String, String)>, _self_closing: bool) {
+    fn start_in_body(&mut self, name: String, attrs: Vec<(String, String)>, self_closing: bool) {
         if matches!(name.as_str(), "html") {
             return;
         }
@@ -687,7 +687,9 @@ impl Parser {
         if is_formatting(&name) {
             self.active.push(Some(id));
         }
-        if is_void(&name) {
+        // In HTML, `/>` only closes a void element. Inside SVG it closes the
+        // element, so `<path/>` does not swallow the following `<use>`.
+        if is_void(&name) || (self_closing && self.in_svg()) {
             self.stack.pop();
         }
     }
@@ -1425,6 +1427,12 @@ impl Parser {
         self.current().and_then(|id| self.doc.element_name(id))
     }
 
+    fn in_svg(&self) -> bool {
+        self.stack
+            .iter()
+            .any(|id| self.doc.element_name(*id) == Some("svg"))
+    }
+
     fn head_id(&self) -> Option<NodeId> {
         self.doc
             .node(self.doc.root)
@@ -1667,6 +1675,23 @@ mod tests {
         let p = doc.get_element_by_id("hi").unwrap();
         assert!(doc.has_class(p, "a") && doc.has_class(p, "b"));
         assert_eq!(doc.text_content(p), "Hello world");
+    }
+
+    #[test]
+    fn a_self_closing_svg_path_does_not_swallow_the_next_use() {
+        let doc = parse_html(r##"<svg><path id="q" d="M0 0 L1 1"/><use href="#q"></use></svg>"##);
+        let path = doc.get_element_by_id("q").unwrap();
+        assert!(
+            doc.node(path).children.is_empty(),
+            "the path kept {} children",
+            doc.node(path).children.len()
+        );
+        let svg = doc
+            .node(path)
+            .parent
+            .and_then(|id| doc.element_name(id))
+            .unwrap_or("");
+        assert_eq!(svg, "svg");
     }
 
     #[test]
