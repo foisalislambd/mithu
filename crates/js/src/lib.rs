@@ -1438,7 +1438,11 @@ fn navigator_object(context: &mut Context) -> JsResult<JsObject> {
     let plugins = plugin_array(context)?;
     let ua_data = user_agent_data(context)?;
     let mut object = ObjectInitializer::new(context);
-    object.property(js_string!("userAgent"), js_string!("Mithu"), ATTR);
+    object.property(
+        js_string!("userAgent"),
+        js_string!(mithu_net::USER_AGENT.to_string()),
+        ATTR,
+    );
     object.property(js_string!("platform"), js_string!("Linux x86_64"), ATTR);
     object.property(js_string!("language"), js_string!("en"), ATTR);
     object.property(js_string!("languages"), languages, ATTR);
@@ -1480,12 +1484,22 @@ fn plugin_array(context: &mut Context) -> JsResult<JsObject> {
     Ok(object.build())
 }
 
+fn ua_brand(context: &mut Context, brand: &str, version: &str) -> JsObject {
+    ObjectInitializer::new(context)
+        .property(js_string!("brand"), js_string!(brand.to_string()), ATTR)
+        .property(js_string!("version"), js_string!(version.to_string()), ATTR)
+        .build()
+}
+
 fn user_agent_data(context: &mut Context) -> JsResult<JsObject> {
-    let brand = ObjectInitializer::new(context)
-        .property(js_string!("brand"), js_string!("Mithu"), ATTR)
-        .property(js_string!("version"), js_string!("0"), ATTR)
-        .build();
-    let brands = JsArray::from_iter([JsValue::from(brand)], context);
+    let brands = JsArray::from_iter(
+        [
+            JsValue::from(ua_brand(context, "Chromium", mithu_net::CHROME_MAJOR)),
+            JsValue::from(ua_brand(context, "Mithu", "0")),
+            JsValue::from(ua_brand(context, "Not)A;Brand", "24")),
+        ],
+        context,
+    );
     let mut object = ObjectInitializer::new(context);
     object
         .property(js_string!("brands"), brands, ATTR)
@@ -1505,6 +1519,25 @@ fn ua_high_entropy(_this: &JsValue, _args: &[JsValue], context: &mut Context) ->
     data.set(js_string!("bitness"), js_string!("64"), true, context)?;
     data.set(js_string!("model"), js_string!(""), true, context)?;
     data.set(js_string!("platformVersion"), js_string!(""), true, context)?;
+    data.set(
+        js_string!("uaFullVersion"),
+        js_string!(format!("{}.0.0.0", mithu_net::CHROME_MAJOR)),
+        true,
+        context,
+    )?;
+    let full = JsArray::from_iter(
+        [
+            JsValue::from(ua_brand(
+                context,
+                "Chromium",
+                &format!("{}.0.0.0", mithu_net::CHROME_MAJOR),
+            )),
+            JsValue::from(ua_brand(context, "Mithu", mithu_net::PRODUCT_VERSION)),
+            JsValue::from(ua_brand(context, "Not)A;Brand", "24.0.0.0")),
+        ],
+        context,
+    );
+    data.set(js_string!("fullVersionList"), full, true, context)?;
     Ok(JsPromise::resolve(data, context)?.into())
 }
 
@@ -6598,6 +6631,8 @@ mod tests {
               if (getComputedStyle(document.documentElement).fontSize.replace("px","") !== "16") document.title = "font";
               if (navigator.mimeTypes.length !== 0 || navigator.plugins.length !== 0) document.title = "plugins";
               if (!screen.width || !navigator.userAgentData || navigator.userAgentData.mobile !== false) document.title = "screen";
+              if (navigator.userAgent.indexOf("Mithu/0.1.0") < 0 || navigator.userAgent.indexOf("Chrome/157.0.0.0") < 0) document.title = "ua";
+              if (!navigator.userAgentData.brands || navigator.userAgentData.brands.length !== 3) document.title = "brands";
               var grouped = Object.groupBy([0,1,2,3], function (n) { return n % 2 ? "odd" : "even"; });
               if (!grouped.even || grouped.even.length !== 2 || [].group(function (n) { return n; }).length) document.title = "group";
               var described = Object.getOwnPropertyDescriptor({ email() { return 1; } }, "email");

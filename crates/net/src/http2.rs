@@ -344,6 +344,7 @@ pub fn roundtrip(
     url: &mithu_url::Url,
     cookie: Option<&str>,
     origin: Option<&str>,
+    referer: Option<&str>,
 ) -> Result<Message, String> {
     let mut out = Vec::new();
     out.extend_from_slice(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
@@ -351,7 +352,7 @@ pub fn roundtrip(
     settings.extend_from_slice(&4u16.to_be_bytes());
     settings.extend_from_slice(&(1024u32 * 1024).to_be_bytes());
     out.extend(frame(4, 0, 0, &settings));
-    let block = encode_request(method, url, cookie, origin);
+    let block = encode_request(method, url, cookie, origin, referer);
     let flags = if method.eq_ignore_ascii_case("GET") {
         0x5
     } else {
@@ -458,11 +459,22 @@ pub fn roundtrip(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn encode_request_for_test(
+    method: &str,
+    url: &mithu_url::Url,
+    cookie: Option<&str>,
+    origin: Option<&str>,
+) -> Vec<u8> {
+    encode_request(method, url, cookie, origin, None)
+}
+
 fn encode_request(
     method: &str,
     url: &mithu_url::Url,
     cookie: Option<&str>,
     origin: Option<&str>,
+    referer: Option<&str>,
 ) -> Vec<u8> {
     let mut block = Vec::new();
     if method.eq_ignore_ascii_case("GET") {
@@ -494,12 +506,18 @@ fn encode_request(
         "text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1",
     ));
     block.extend(literal("accept-encoding", "gzip, deflate, br, zstd"));
-    block.extend(literal("user-agent", "Mithu/0.1 (Rust)"));
+    block.extend(literal("user-agent", crate::USER_AGENT));
+    block.extend(literal("sec-ch-ua", crate::SEC_CH_UA));
+    block.extend(literal("sec-ch-ua-mobile", crate::SEC_CH_UA_MOBILE));
+    block.extend(literal("sec-ch-ua-platform", crate::SEC_CH_UA_PLATFORM));
     if let Some(cookie) = cookie {
         block.extend(literal("cookie", cookie));
     }
     if let Some(origin) = origin {
         block.extend(literal("origin", origin));
+    }
+    if let Some(referer) = referer {
+        block.extend(literal("referer", referer));
     }
     block
 }

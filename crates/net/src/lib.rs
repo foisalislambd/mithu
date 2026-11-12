@@ -23,6 +23,14 @@ mod http2;
 pub use cache::HttpCache;
 pub use cookies::{Cookie, CookieJar};
 
+/// Chrome's current stable major, with Mithu named after it the way Edge and Brave do.
+pub const CHROME_MAJOR: &str = "157";
+pub const PRODUCT_VERSION: &str = "0.1.0";
+pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Mithu/0.1.0";
+pub const SEC_CH_UA: &str = "\"Chromium\";v=\"157\", \"Mithu\";v=\"0\", \"Not)A;Brand\";v=\"24\"";
+pub const SEC_CH_UA_MOBILE: &str = "?0";
+pub const SEC_CH_UA_PLATFORM: &str = "\"Linux\"";
+
 /// Non-`HttpOnly` cookies visible to `document.cookie` on `url`.
 pub fn document_cookie(url: &Url) -> String {
     with_profile(|profile| profile.cookies.document_cookie(url))
@@ -403,7 +411,7 @@ fn build_request(
         _ => url.host.clone(),
     };
     let mut head = format!(
-        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mithu/0.1 (Rust)\r\nAccept: text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nConnection: close\r\n",
+        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {USER_AGENT}\r\nSec-CH-UA: {SEC_CH_UA}\r\nSec-CH-UA-Mobile: {SEC_CH_UA_MOBILE}\r\nSec-CH-UA-Platform: {SEC_CH_UA_PLATFORM}\r\nAccept: text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nConnection: close\r\n",
         url.request_target()
     );
     if let Some(content_type) = content_type {
@@ -420,6 +428,11 @@ fn build_request(
     if let Some(origin) = origin {
         head.push_str("Origin: ");
         head.push_str(origin);
+        head.push_str("\r\nReferer: ");
+        head.push_str(origin);
+        if !origin.ends_with('/') {
+            head.push('/');
+        }
         head.push_str("\r\n");
     }
     head.push_str("\r\n");
@@ -482,7 +495,15 @@ fn https_once(
     if allow_h2 && alpn.as_deref() == Some(b"h2".as_slice()) {
         let cookie = header_value_from_request(request, "cookie");
         let origin = header_value_from_request(request, "origin");
-        return http2::roundtrip(&mut tls, method, url, cookie.as_deref(), origin.as_deref())
+        let referer = header_value_from_request(request, "referer");
+        return http2::roundtrip(
+            &mut tls,
+            method,
+            url,
+            cookie.as_deref(),
+            origin.as_deref(),
+            referer.as_deref(),
+        )
             .map(|message| RawHttp {
                 status: message.status,
                 headers: message.headers,
@@ -761,6 +782,25 @@ fn find_slice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_advertise_mithu_after_chrome() {
+        let url = Url::parse("https://example.com/a").unwrap();
+        let bytes = build_request("GET", &url, None, b"", None, None);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(&format!("User-Agent: {USER_AGENT}")));
+        assert!(text.contains("Mithu/0.1.0"));
+        assert!(text.contains("Chrome/157.0.0.0"));
+        assert!(text.contains(&format!("Sec-CH-UA: {SEC_CH_UA}")));
+        assert!(text.contains("Sec-CH-UA-Mobile: ?0"));
+        assert!(text.contains("Sec-CH-UA-Platform: \"Linux\""));
+        let cors = build_request("GET", &url, None, b"", None, Some("https://www.prothomalo.com"));
+        let cors = String::from_utf8(cors).unwrap();
+        assert!(cors.contains("Referer: https://www.prothomalo.com/\r\n"));
+        let encoded = http2::encode_request_for_test("GET", &url, None, None);
+        let ua = USER_AGENT.as_bytes();
+        assert!(encoded.windows(ua.len()).any(|window| window == ua));
+    }
 
     #[test]
     fn windows_1252_bytes_become_characters() {
