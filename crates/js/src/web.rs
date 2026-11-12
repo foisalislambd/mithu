@@ -1595,6 +1595,21 @@ impl Class for DocumentHost {
 #[derive(Debug, Trace, Finalize, JsData)]
 struct HtmlElementHost;
 
+thread_local! {
+    /// The element currently being upgraded. `HTMLElement`'s constructor
+    /// returns it, so a subclass `super()` binds `this` to the existing node
+    /// instead of a fresh object that is not in the document.
+    static CUSTOM_UPGRADE: std::cell::RefCell<Option<JsValue>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn begin_custom_upgrade(element: JsValue) {
+    CUSTOM_UPGRADE.with(|slot| *slot.borrow_mut() = Some(element));
+}
+
+pub(crate) fn end_custom_upgrade() {
+    CUSTOM_UPGRADE.with(|slot| *slot.borrow_mut() = None);
+}
+
 impl Class for HtmlElementHost {
     const NAME: &'static str = "HTMLElement";
 
@@ -1608,6 +1623,33 @@ impl Class for HtmlElementHost {
         _context: &mut Context,
     ) -> JsResult<Self> {
         Ok(Self)
+    }
+
+    fn construct(
+        new_target: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsObject> {
+        let upgrading = CUSTOM_UPGRADE.with(|slot| slot.borrow_mut().take());
+        if let Some(existing) = upgrading
+            && let Some(object) = existing.as_object()
+        {
+            return Ok(object);
+        }
+        if new_target.is_undefined() {
+            return Err(JsNativeError::typ()
+                .with_message("cannot call constructor of native class `HTMLElement` without new")
+                .into());
+        }
+        let data = Self::data_constructor(new_target, args, context)?;
+        let object = Self::from_data(data, context)?;
+        if let Some(constructor) = new_target.as_object()
+            && let Ok(proto) = constructor.get(js_string!("prototype"), context)
+            && let Some(proto) = proto.as_object()
+        {
+            object.set_prototype(Some(proto));
+        }
+        Ok(object)
     }
 }
 

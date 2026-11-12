@@ -3197,10 +3197,14 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
             false,
             context,
         );
-        // Class constructors reject a bare call. A function-style element
-        // constructor runs with the element as `this`, which is what Polymer
-        // uses to stamp its template.
-        if ctor.is_callable() {
+        // `super()` inside the class returns this element. A function-style
+        // constructor is called with the element as `this`.
+        let ctor_value = JsValue::from(ctor.clone());
+        if let Some(constructor) = ctor_value.as_constructor() {
+            crate::web::begin_custom_upgrade(value.clone());
+            let _ = constructor.construct(&[], Some(&ctor), context);
+            crate::web::end_custom_upgrade();
+        } else if ctor.is_callable() {
             let _ = ctor.call(value, &[], context);
         }
         let connected = node_of(value).is_some_and(|id| {
@@ -6404,11 +6408,14 @@ mod tests {
                 document.title = "shadow";
               }
               class Box extends HTMLElement {}
-              class Stamp extends HTMLElement { connectedCallback() { this.setAttribute("ready", "1"); } }
+              class Stamp extends HTMLElement {
+                constructor() { super(); this.built = "yes"; }
+                connectedCallback() { this.setAttribute("ready", this.built || "no"); }
+              }
               customElements.define("x-stamp", Stamp);
               var stamp = document.createElement("x-stamp");
               document.body.appendChild(stamp);
-              if (stamp.getAttribute("ready") !== "1") document.title = "stamp";
+              if (stamp.getAttribute("ready") !== "yes") document.title = "stamp:" + stamp.getAttribute("ready");
               customElements.define("x-box", Box);
               var box = document.createElement("x-box");
               if (!(box instanceof Box) || customElements.get("x-box") !== Box) {
