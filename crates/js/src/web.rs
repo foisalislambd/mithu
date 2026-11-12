@@ -25,6 +25,9 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     context.register_global_class::<MutationObserverHost>()?;
     context.register_global_class::<HtmlImage>()?;
     context.register_global_class::<HtmlElementHost>()?;
+    context.register_global_class::<DocumentHost>()?;
+    context.register_global_class::<DomEvent>()?;
+    context.register_global_class::<CustomEventHost>()?;
     context.register_global_class::<MessageChannelHost>()?;
     context.register_global_class::<MessagePortHost>()?;
     let image = context.global_object().get(js_string!("Image"), context)?;
@@ -1274,6 +1277,121 @@ fn image_set_src(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
         object.set(js_string!("complete"), JsValue::from(true), true, context)?;
     }
     Ok(JsValue::undefined())
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct DomEvent;
+
+impl Class for DomEvent {
+    const NAME: &'static str = "Event";
+
+    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+
+    fn object_constructor(
+        instance: &JsObject<Self>,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let kind = args
+            .first()
+            .map(|value| {
+                value
+                    .to_string(context)
+                    .map(|text| text.to_std_string_lossy())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let object = instance.clone().upcast();
+        object.set(js_string!("type"), js_string!(kind), true, context)?;
+        object.set(js_string!("bubbles"), JsValue::from(false), true, context)?;
+        object.set(
+            js_string!("cancelable"),
+            JsValue::from(false),
+            true,
+            context,
+        )?;
+        object.set(js_string!("target"), JsValue::null(), true, context)?;
+        object.set(
+            js_string!("defaultPrevented"),
+            JsValue::from(false),
+            true,
+            context,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct CustomEventHost;
+
+impl Class for CustomEventHost {
+    const NAME: &'static str = "CustomEvent";
+
+    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+
+    fn object_constructor(
+        instance: &JsObject<Self>,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let kind = args
+            .first()
+            .map(|value| {
+                value
+                    .to_string(context)
+                    .map(|text| text.to_std_string_lossy())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let detail = args
+            .get(1)
+            .and_then(|value| value.as_object())
+            .and_then(|object| object.get(js_string!("detail"), context).ok())
+            .unwrap_or(JsValue::null());
+        let object = instance.clone().upcast();
+        object.set(js_string!("type"), js_string!(kind), true, context)?;
+        object.set(js_string!("detail"), detail, true, context)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct DocumentHost;
+
+impl Class for DocumentHost {
+    const NAME: &'static str = "Document";
+
+    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]

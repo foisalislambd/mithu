@@ -369,6 +369,14 @@ impl Browser {
         &self.page().status
     }
 
+    pub fn script_logs(&self) -> Vec<String> {
+        self.page()
+            .session
+            .as_ref()
+            .map(|session| session.logs())
+            .unwrap_or_default()
+    }
+
     pub fn new() -> Self {
         let mut browser = Self {
             fonts: FontBook::load(),
@@ -1478,23 +1486,40 @@ impl Browser {
         let origin = origin_key(&fetched.url);
         let local = self.local_data.get(&origin).cloned().unwrap_or_default();
         let session_store = self.session_data.get(&origin).cloned().unwrap_or_default();
-        let mut session = if self.cooperative {
-            Session::open_cooperative(
-                document,
-                &fetched.url.to_display(),
-                move |src| fetch_text(&module_base, src),
-                local,
-                session_store,
-            )
-        } else {
-            Session::open_with_storage(
-                document,
-                &fetched.url.to_display(),
-                move |src| fetch_text(&module_base, src),
-                local,
-                session_store,
-            )
-        };
+        let mut session = Session::open_cooperative(
+            document,
+            &fetched.url.to_display(),
+            move |src| fetch_text(&module_base, src),
+            local,
+            session_store,
+        );
+        {
+            let document = session.document();
+            let author = author_css(&document, &base);
+            let styles = style_with(
+                &document,
+                &author,
+                StyleState {
+                    hover: None,
+                    viewport_width: layout_width,
+                },
+            );
+            let images = load_images(&document, &base);
+            let layout = layout_tree(
+                &document,
+                &styles,
+                layout_width,
+                self.layout_height(),
+                &self.fonts,
+                &images,
+            );
+            session.set_geometry(Self::metrics_from(&layout.root), 0.0);
+        }
+        if !self.cooperative {
+            while session.scripts_pending() {
+                session.pump(Duration::from_secs(60));
+            }
+        }
         let scripts_pending = session.scripts_pending();
         self.local_data
             .insert(origin.clone(), session.local_storage());
@@ -1589,6 +1614,7 @@ impl Browser {
         page.hover = None;
         let reopen = page.find_open && !page.find_query.is_empty();
         let _ = page;
+        self.publish_geometry();
         if reopen {
             self.reveal_find();
         }
@@ -1657,6 +1683,53 @@ impl Browser {
         };
         self.attach_frames(&mut layout);
         self.page_mut().layout = layout;
+        self.publish_geometry();
+    }
+
+    fn publish_geometry(&mut self) {
+        let boxes = Self::metrics_from(&self.page().layout.root);
+        let scroll = self.page().scroll;
+        if let Some(session) = self.page().session.as_ref() {
+            session.set_geometry(boxes, scroll);
+        }
+    }
+
+    fn metrics_from(box_: &LayoutBox) -> HashMap<usize, mithu_js::BoxMetrics> {
+        let mut boxes = HashMap::new();
+        fn walk(box_: &LayoutBox, boxes: &mut HashMap<usize, mithu_js::BoxMetrics>) {
+            boxes.entry(box_.node.0).or_insert(mithu_js::BoxMetrics {
+                x: box_.rect.x,
+                y: box_.rect.y,
+                width: box_.rect.width,
+                height: box_.rect.height,
+                border_top: box_.borders[0],
+                border_right: box_.borders[1],
+                border_bottom: box_.borders[2],
+                border_left: box_.borders[3],
+            });
+            for child in &box_.children {
+                walk(child, boxes);
+            }
+        }
+        walk(box_, &mut boxes);
+        boxes
+    }
+
+    /// A frame document gets its own Boa realm. Scripts there cannot see the parent window.
+    fn run_frame_scripts(doc: Document, base: &Url) -> Document {
+        let module_base = base.clone();
+        let mut session = Session::open_cooperative(
+            doc,
+            &base.to_display(),
+            move |src| fetch_text(&module_base, src),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let start = Instant::now();
+        while session.scripts_pending() && start.elapsed() < Duration::from_millis(800) {
+            session.pump(Duration::from_millis(80));
+        }
+        session.document()
     }
 
     /// Load each iframe `src` into a nested document and paint it in the frame.
@@ -1697,6 +1770,7 @@ impl Browser {
             }
             let nested_base = resolved.unwrap_or_else(|| base.clone());
             let doc = parse_html(&html);
+            let doc = Self::run_frame_scripts(doc, &nested_base);
             let author = author_css(&doc, &nested_base);
             let (width, height) = {
                 let size = frame_size(&layout.root, id);

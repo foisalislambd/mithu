@@ -234,6 +234,12 @@ pub struct ComputedStyle {
     pub float: FloatSide,
     pub clear: Clear,
     pub grid_columns: Vec<GridTrack>,
+    pub grid_rows: Vec<GridTrack>,
+    /// `grid-auto-flow: column`.
+    pub column_flow: bool,
+    pub auto_columns: Vec<GridTrack>,
+    pub grid_areas: Vec<Vec<String>>,
+    pub grid_area: String,
     pub grid_column: GridSpan,
     pub grid_row: GridSpan,
     pub shadow: Option<BoxShadow>,
@@ -302,6 +308,11 @@ impl ComputedStyle {
             float: FloatSide::None,
             clear: Clear::None,
             grid_columns: Vec::new(),
+            grid_rows: Vec::new(),
+            column_flow: false,
+            auto_columns: Vec::new(),
+            grid_areas: Vec::new(),
+            grid_area: String::new(),
             grid_column: GridSpan::default(),
             grid_row: GridSpan::default(),
             shadow: None,
@@ -381,6 +392,11 @@ struct Specified {
     float: Option<Ranked<FloatSide>>,
     clear: Option<Ranked<Clear>>,
     grid_columns: Option<Ranked<Vec<GridTrack>>>,
+    grid_rows: Option<Ranked<Vec<GridTrack>>>,
+    column_flow: Option<Ranked<bool>>,
+    auto_columns: Option<Ranked<Vec<GridTrack>>>,
+    grid_areas: Option<Ranked<Vec<Vec<String>>>>,
+    grid_area: Option<Ranked<String>>,
     grid_column: Option<Ranked<GridSpan>>,
     grid_row: Option<Ranked<GridSpan>>,
     shadow: Option<Ranked<BoxShadow>>,
@@ -1104,6 +1120,42 @@ fn apply_declaration(
                 rank(&mut specified.grid_columns, tracks, spec);
             }
         }
+        "grid-template-rows" => {
+            if let Some(tracks) = parse_grid_tracks(value) {
+                rank(&mut specified.grid_rows, tracks, spec);
+            }
+        }
+        "grid-template" => {
+            if let Some((rows, columns)) = parse_grid_template(value) {
+                rank(&mut specified.grid_rows, rows, spec);
+                rank(&mut specified.grid_columns, columns, spec);
+            }
+        }
+        "grid-template-areas" => {
+            rank(&mut specified.grid_areas, parse_grid_areas(value), spec);
+        }
+        "grid-area" => {
+            let name = value
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"')
+                .to_string();
+            if !name.is_empty() && !name.eq_ignore_ascii_case("auto") {
+                rank(&mut specified.grid_area, name, spec);
+            }
+        }
+        "grid-auto-flow" => {
+            let column = value
+                .to_ascii_lowercase()
+                .split_whitespace()
+                .any(|part| part == "column");
+            rank(&mut specified.column_flow, column, spec);
+        }
+        "grid-auto-columns" => {
+            if let Some(tracks) = parse_grid_tracks(value) {
+                rank(&mut specified.auto_columns, tracks, spec);
+            }
+        }
         "grid-column" | "grid-column-start" => {
             if let Some(span) = parse_grid_span(value) {
                 rank(&mut specified.grid_column, span, spec);
@@ -1412,6 +1464,30 @@ fn concretize(
             .unwrap_or(Clear::None),
         grid_columns: specified
             .grid_columns
+            .as_ref()
+            .map(|item| item.value.clone())
+            .unwrap_or_default(),
+        grid_rows: specified
+            .grid_rows
+            .as_ref()
+            .map(|item| item.value.clone())
+            .unwrap_or_default(),
+        column_flow: specified
+            .column_flow
+            .as_ref()
+            .is_some_and(|item| item.value),
+        auto_columns: specified
+            .auto_columns
+            .as_ref()
+            .map(|item| item.value.clone())
+            .unwrap_or_default(),
+        grid_areas: specified
+            .grid_areas
+            .as_ref()
+            .map(|item| item.value.clone())
+            .unwrap_or_default(),
+        grid_area: specified
+            .grid_area
             .as_ref()
             .map(|item| item.value.clone())
             .unwrap_or_default(),
@@ -1963,6 +2039,67 @@ fn shadow_tokens(value: &str) -> Vec<String> {
     tokens
 }
 
+fn parse_grid_template(value: &str) -> Option<(Vec<GridTrack>, Vec<GridTrack>)> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let mut depth = 0i32;
+    let mut split = None;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            '/' if depth == 0 => {
+                split = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(at) = split else {
+        return Some((parse_grid_tracks(value)?, Vec::new()));
+    };
+    Some((
+        parse_grid_tracks(value[..at].trim())?,
+        parse_grid_tracks(value[at + 1..].trim())?,
+    ))
+}
+
+fn parse_grid_areas(value: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in value.chars() {
+        match ch {
+            '\'' | '"' if !quoted => {
+                quoted = true;
+                current.clear();
+            }
+            '\'' | '"' if quoted => {
+                quoted = false;
+                let cells = current
+                    .split_whitespace()
+                    .map(|cell| {
+                        if cell == "." {
+                            String::new()
+                        } else {
+                            cell.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !cells.is_empty() {
+                    rows.push(cells);
+                }
+                current.clear();
+            }
+            _ if quoted => current.push(ch),
+            _ => {}
+        }
+    }
+    rows
+}
+
 fn parse_grid_tracks(value: &str) -> Option<Vec<GridTrack>> {
     let value = value.trim();
     if value.is_empty() || value.eq_ignore_ascii_case("none") {
@@ -1970,7 +2107,26 @@ fn parse_grid_tracks(value: &str) -> Option<Vec<GridTrack>> {
     }
     let mut tokens = tokenize_tracks(value);
     let mut tracks = Vec::new();
+    let mut line_name = 0i32;
     while !tokens.is_empty() {
+        if tokens[0].starts_with('[') {
+            if tokens[0].ends_with(']') && tokens[0].len() > 1 {
+                tokens.remove(0);
+                continue;
+            }
+            line_name += 1;
+            tokens.remove(0);
+            continue;
+        }
+        if tokens[0] == "]" {
+            line_name = (line_name - 1).max(0);
+            tokens.remove(0);
+            continue;
+        }
+        if line_name > 0 {
+            tokens.remove(0);
+            continue;
+        }
         if tokens[0].eq_ignore_ascii_case("repeat") {
             tokens.remove(0);
             if tokens.first().is_some_and(|token| token == "(") {
@@ -2059,7 +2215,7 @@ fn tokenize_tracks(value: &str) -> Vec<String> {
 
 fn parse_track(token: &str) -> Option<GridTrack> {
     let token = token.trim().to_ascii_lowercase();
-    if token == "auto" {
+    if token == "auto" || token == "min-content" || token == "max-content" {
         return Some(GridTrack::Auto);
     }
     if let Some(number) = token.strip_suffix("fr") {

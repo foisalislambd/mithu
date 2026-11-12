@@ -78,6 +78,11 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
     if !browser.status_line().is_empty() {
         eprintln!("{}", browser.status_line());
     }
+    if std::env::var("MITHU_LOGS").is_ok() {
+        for line in browser.script_logs() {
+            eprintln!("LOG {line}");
+        }
+    }
     Ok(())
 }
 

@@ -61,7 +61,8 @@ pub struct LayoutBox {
     pub shapes: Vec<VectorShape>,
     /// `position: sticky`. The box stays in flow; paint pins it.
     pub sticky: bool,
-    pub sticky_top: f32,
+    pub sticky_top: Option<f32>,
+    pub sticky_bottom: Option<f32>,
     pub shadow: Option<mithu_style::BoxShadow>,
     /// A nested document painted inside an iframe.
     pub frame: Option<Box<LayoutTree>>,
@@ -445,7 +446,8 @@ fn layout_node(
         },
         shapes: Vec::new(),
         sticky: style.position == Position::Sticky,
-        sticky_top: resolve_length(style.insets[0], font, view.height, view).unwrap_or(0.0),
+        sticky_top: resolve_length(style.insets[0], font, view.height, view),
+        sticky_bottom: resolve_length(style.insets[2], font, view.height, view),
         shadow: style.shadow,
         frame: None,
     };
@@ -742,18 +744,13 @@ fn layout_grid(
     href: Option<String>,
     view: View,
 ) -> (Vec<LineBox>, Vec<LayoutBox>, f32) {
-    let tracks = if style.grid_columns.is_empty() {
-        vec![GridTrack::Fr(1.0)]
-    } else {
-        style.grid_columns.clone()
-    };
     let gap = style.gap.max(0.0);
-    let widths = resolve_tracks(&tracks, content_w, gap);
-    let columns = widths.len().max(1);
+    let explicit_rows = style.grid_rows.len();
     let mut cells = Vec::new();
     let mut occupied: Vec<Vec<bool>> = Vec::new();
     let mut cursor_col = 0usize;
     let mut cursor_row = 0usize;
+    let mut max_column = style.grid_columns.len().max(1);
     for child in doc.node(id).children.clone() {
         if is_skipped(doc, styles, child) {
             continue;
@@ -762,20 +759,45 @@ fn layout_grid(
             continue;
         }
         let area = style_of(styles, child);
-        let span = (area.grid_column.span as usize).clamp(1, columns);
-        let row_span = (area.grid_row.span as usize).max(1);
-        let explicit_col = area
-            .grid_column
-            .start
-            .map(|line| (line as usize).saturating_sub(1));
-        let explicit_row = area
-            .grid_row
-            .start
-            .map(|line| (line as usize).saturating_sub(1));
-        let (column, row) = if let (Some(column), Some(row)) = (explicit_col, explicit_row) {
-            (column.min(columns.saturating_sub(span)), row)
+        let named = find_grid_area(&style.grid_areas, &area.grid_area);
+        let span = (named
+            .map(|(_, _, span, _)| span)
+            .unwrap_or(area.grid_column.span as usize))
+        .max(1);
+        let row_span = (named
+            .map(|(_, _, _, span)| span)
+            .unwrap_or(area.grid_row.span as usize))
+        .max(1);
+        let explicit_col = named.map(|(column, _, _, _)| column).or_else(|| {
+            area.grid_column
+                .start
+                .map(|line| (line as usize).saturating_sub(1))
+        });
+        let explicit_row = named.map(|(_, row, _, _)| row).or_else(|| {
+            area.grid_row
+                .start
+                .map(|line| (line as usize).saturating_sub(1))
+        });
+        let columns_now = max_column.max(explicit_col.unwrap_or(0) + span);
+        let (column, row) = if style.column_flow
+            && explicit_rows > 0
+            && explicit_col.is_none()
+            && explicit_row.is_none()
+        {
+            if cursor_row + row_span > explicit_rows && cursor_row != 0 {
+                cursor_row = 0;
+                cursor_col += 1;
+            }
+            let placed = (cursor_col, cursor_row);
+            cursor_row += row_span;
+            if cursor_row >= explicit_rows {
+                cursor_row = 0;
+                cursor_col += 1;
+            }
+            placed
+        } else if let (Some(column), Some(row)) = (explicit_col, explicit_row) {
+            (column, row)
         } else if let Some(column) = explicit_col {
-            let column = column.min(columns.saturating_sub(span));
             let mut row = 0usize;
             while grid_occupied(&occupied, row, column, row_span, span) {
                 row += 1;
@@ -783,34 +805,68 @@ fn layout_grid(
             (column, row)
         } else if let Some(row) = explicit_row {
             let mut column = 0usize;
-            while column + span <= columns && grid_occupied(&occupied, row, column, row_span, span)
+            while column + span <= columns_now.max(column + span)
+                && grid_occupied(&occupied, row, column, row_span, span)
             {
                 column += 1;
             }
-            (column.min(columns.saturating_sub(span)), row)
+            (column, row)
         } else {
-            if cursor_col + span > columns && cursor_col != 0 {
+            let limit = if style.grid_columns.is_empty() && style.auto_columns.is_empty() {
+                1
+            } else {
+                style.grid_columns.len().max(1)
+            };
+            if cursor_col + span > limit && cursor_col != 0 {
                 cursor_col = 0;
                 cursor_row += 1;
             }
             while grid_occupied(&occupied, cursor_row, cursor_col, row_span, span) {
                 cursor_col += 1;
-                if cursor_col + span > columns {
+                if cursor_col + span > limit {
                     cursor_col = 0;
                     cursor_row += 1;
                 }
             }
             let placed = (cursor_col, cursor_row);
             cursor_col += span;
-            if cursor_col >= columns {
+            if cursor_col >= limit {
                 cursor_col = 0;
                 cursor_row += 1;
             }
             placed
         };
-        grid_mark(&mut occupied, row, column, row_span, span, columns);
+        max_column = max_column.max(column + span);
+        grid_mark(
+            &mut occupied,
+            row,
+            column,
+            row_span,
+            span,
+            max_column.max(column + span),
+        );
         cells.push((child, column, span, row));
     }
+    let tracks = if !style.grid_columns.is_empty() {
+        let mut tracks = style.grid_columns.clone();
+        let fill = style
+            .auto_columns
+            .first()
+            .cloned()
+            .unwrap_or(GridTrack::Auto);
+        while tracks.len() < max_column {
+            tracks.push(fill.clone());
+        }
+        tracks
+    } else if !style.auto_columns.is_empty() {
+        let fill = style.auto_columns[0].clone();
+        vec![fill; max_column.max(1)]
+    } else if max_column > 1 {
+        vec![GridTrack::Fr(1.0); max_column]
+    } else {
+        vec![GridTrack::Fr(1.0)]
+    };
+    let widths = resolve_tracks(&tracks, content_w, gap);
     let row_count = cells
         .iter()
         .map(|(_, _, _, row)| *row)
@@ -820,6 +876,8 @@ fn layout_grid(
     let mut row_heights = vec![0.0_f32; row_count];
     let mut laid = Vec::new();
     for (child, column, span, row) in cells {
+        let column = column.min(widths.len().saturating_sub(1));
+        let span = span.min(widths.len() - column).max(1);
         let x = content_x + widths[..column].iter().sum::<f32>() + gap * column as f32;
         let width =
             widths[column..column + span].iter().sum::<f32>() + gap * span.saturating_sub(1) as f32;
@@ -868,6 +926,34 @@ fn layout_grid(
     (Vec::new(), placed, height)
 }
 
+fn find_grid_area(areas: &[Vec<String>], name: &str) -> Option<(usize, usize, usize, usize)> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut min_col = usize::MAX;
+    let mut min_row = usize::MAX;
+    let mut max_col = 0usize;
+    let mut max_row = 0usize;
+    let mut found = false;
+    for (row, line) in areas.iter().enumerate() {
+        for (column, cell) in line.iter().enumerate() {
+            if cell == name {
+                found = true;
+                min_col = min_col.min(column);
+                min_row = min_row.min(row);
+                max_col = max_col.max(column);
+                max_row = max_row.max(row);
+            }
+        }
+    }
+    found.then_some((
+        min_col,
+        min_row,
+        max_col - min_col + 1,
+        max_row - min_row + 1,
+    ))
+}
+
 fn grid_occupied(
     occupied: &[Vec<bool>],
     row: usize,
@@ -897,11 +983,15 @@ fn grid_mark(
     columns: usize,
 ) {
     let rows = row + row_span;
+    let width = columns.max(column + span);
     while occupied.len() < rows {
-        occupied.push(vec![false; columns]);
+        occupied.push(vec![false; width]);
     }
     for row in row..rows {
-        for column in column..(column + span).min(columns) {
+        if occupied[row].len() < width {
+            occupied[row].resize(width, false);
+        }
+        for column in column..(column + span).min(width) {
             occupied[row][column] = true;
         }
     }
@@ -2002,7 +2092,8 @@ fn text_flex_item(
         fixed: false,
         shapes: Vec::new(),
         sticky: false,
-        sticky_top: 0.0,
+        sticky_top: None,
+        sticky_bottom: None,
         shadow: None,
         frame: None,
     }
@@ -2193,7 +2284,8 @@ fn generated_block(
         fixed: false,
         shapes: Vec::new(),
         sticky: false,
-        sticky_top: 0.0,
+        sticky_top: None,
+        sticky_bottom: None,
         shadow: None,
         frame: None,
     })
@@ -2237,7 +2329,8 @@ fn empty_box(node: NodeId) -> LayoutBox {
         fixed: false,
         shapes: Vec::new(),
         sticky: false,
-        sticky_top: 0.0,
+        sticky_top: None,
+        sticky_bottom: None,
         shadow: None,
         frame: None,
     }
@@ -2584,8 +2677,8 @@ fn layout_table(
         z_index: style.z_index,
         shapes: Vec::new(),
         sticky: style.position == Position::Sticky,
-        sticky_top: resolve_length(style.insets[0], style.font_size, view.height, view)
-            .unwrap_or(0.0),
+        sticky_top: resolve_length(style.insets[0], style.font_size, view.height, view),
+        sticky_bottom: resolve_length(style.insets[2], style.font_size, view.height, view),
         shadow: style.shadow,
         frame: None,
     })
@@ -2936,6 +3029,43 @@ mod tests {
         assert!(
             stick.rect.y + 0.5 >= a.rect.bottom(),
             "sticky stays in flow"
+        );
+        assert!(stick.sticky_top.is_some());
+        assert!(stick.sticky_bottom.is_none());
+    }
+
+    #[test]
+    fn vector_header_areas_and_column_flow() {
+        let doc = parse_html(
+            r#"<header id="bar" style="display:grid;width:400px;grid-template:auto / 160px minmax(0,1fr);grid-template-areas:'headerStart headerEnd'">
+              <div id="start" style="grid-area:headerStart;height:20px">logo</div>
+              <div id="end" style="grid-area:headerEnd;height:20px">links</div>
+            </header>
+            <div id="flow" style="display:grid;width:400px;grid-template-rows:repeat(2, auto);grid-auto-flow:column;grid-auto-columns:100px">
+              <div id="c1" style="height:10px"></div>
+              <div id="c2" style="height:10px"></div>
+              <div id="c3" style="height:10px"></div>
+            </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let start = find(&tree.root, doc.get_element_by_id("start").unwrap()).unwrap();
+        let end = find(&tree.root, doc.get_element_by_id("end").unwrap()).unwrap();
+        assert!(
+            (start.rect.y - end.rect.y).abs() < 1.0,
+            "header row start {} end {}",
+            start.rect.y,
+            end.rect.y
+        );
+        assert!(
+            end.rect.x > start.rect.right() - 1.0,
+            "end sits to the right"
+        );
+        let first = find(&tree.root, doc.get_element_by_id("c1").unwrap()).unwrap();
+        let third = find(&tree.root, doc.get_element_by_id("c3").unwrap()).unwrap();
+        assert!(
+            third.rect.x > first.rect.x + 50.0,
+            "column flow wraps to the next column"
         );
     }
 

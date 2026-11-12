@@ -46,6 +46,21 @@ struct Host {
     history_index: Rc<Cell<usize>>,
     current_script: Rc<RefCell<Option<NodeId>>>,
     ready_state: Rc<RefCell<String>>,
+    geometry: Rc<RefCell<HashMap<usize, BoxMetrics>>>,
+    scroll: Rc<Cell<f32>>,
+}
+
+/// Border box of a laid-out element, in CSS pixels.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoxMetrics {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub border_top: f32,
+    pub border_right: f32,
+    pub border_bottom: f32,
+    pub border_left: f32,
 }
 
 struct Clock {
@@ -95,6 +110,8 @@ pub struct Session {
     prevented: Rc<Cell<bool>>,
     local: Rc<RefCell<HashMap<String, String>>>,
     session_store: Rc<RefCell<HashMap<String, String>>>,
+    geometry: Rc<RefCell<HashMap<usize, BoxMetrics>>>,
+    scroll: Rc<Cell<f32>>,
 }
 
 struct ScriptJob {
@@ -184,6 +201,8 @@ impl Session {
             history_index: Rc::new(Cell::new(0)),
             current_script: Rc::new(RefCell::new(None)),
             ready_state: Rc::new(RefCell::new("interactive".to_string())),
+            geometry: Rc::new(RefCell::new(HashMap::new())),
+            scroll: Rc::new(Cell::new(0.0)),
         });
         let mut jobs = Vec::new();
         if let Err(error) = install_host(&mut context) {
@@ -191,6 +210,14 @@ impl Session {
         } else {
             jobs = script_jobs(&context, &shared, &loader);
         }
+        let geometry = context
+            .get_data::<Host>()
+            .map(|host| Rc::clone(&host.geometry))
+            .unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
+        let scroll = context
+            .get_data::<Host>()
+            .map(|host| Rc::clone(&host.scroll))
+            .unwrap_or_else(|| Rc::new(Cell::new(0.0)));
         let (context, driver) = if jobs.is_empty() {
             signal_document_loaded(&mut context);
             (Some(context), None)
@@ -205,6 +232,8 @@ impl Session {
             prevented,
             local,
             session_store,
+            geometry,
+            scroll,
         };
         if finish {
             while session.pump(Duration::from_secs(60)) {}
@@ -265,6 +294,12 @@ impl Session {
 
     pub fn logs(&self) -> Vec<String> {
         self.log.borrow().clone()
+    }
+
+    /// Remember the latest layout so `getBoundingClientRect` and `offsetWidth` can read it.
+    pub fn set_geometry(&self, boxes: HashMap<usize, BoxMetrics>, scroll: f32) {
+        *self.geometry.borrow_mut() = boxes;
+        self.scroll.set(scroll);
     }
 
     pub fn take_navigation(&mut self) -> Option<String> {
@@ -633,8 +668,10 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     let console = console_object(context)?;
     let flags = ATTR;
     let timers = ObjectInitializer::new(context).build();
+    let nodes = ObjectInitializer::new(context).build();
     let window = context.global_object().clone();
     context.register_global_property(js_string!("__mithuListeners"), listeners, flags)?;
+    context.register_global_property(js_string!("__mithuNodes"), nodes, flags)?;
     context.register_global_property(js_string!("__mithuTimers"), timers, flags)?;
     context.register_global_property(js_string!("document"), document, flags)?;
     context.register_global_property(js_string!("console"), console, flags)?;
@@ -682,6 +719,11 @@ fn install_host(context: &mut Context) -> JsResult<()> {
         NativeFunction::from_fn_ptr(window_listener),
     )?;
     context.register_global_callable(
+        js_string!("removeEventListener"),
+        2,
+        NativeFunction::from_fn_ptr(window_remove_listener),
+    )?;
+    context.register_global_callable(
         js_string!("fetch"),
         1,
         NativeFunction::from_fn_ptr(fetch_resource),
@@ -720,6 +762,24 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("customElements"), custom, flags)?;
     if let Ok(script) = Script::parse(Source::from_bytes(DATASET_HELPER), None, context) {
         let _ = script.evaluate(context);
+    }
+    let _ = wire_document_prototype(context);
+    Ok(())
+}
+
+fn wire_document_prototype(context: &mut Context) -> JsResult<()> {
+    let document = context
+        .global_object()
+        .get(js_string!("document"), context)?;
+    let ctor = context
+        .global_object()
+        .get(js_string!("Document"), context)?;
+    let (Some(document), Some(ctor)) = (document.as_object(), ctor.as_object()) else {
+        return Ok(());
+    };
+    let proto = ctor.get(js_string!("prototype"), context)?;
+    if let Some(proto) = proto.as_object() {
+        document.set_prototype(Some(proto.clone()));
     }
     Ok(())
 }
@@ -885,6 +945,7 @@ fn navigator_object(context: &mut Context) -> JsResult<JsObject> {
     let languages = JsArray::from_iter([JsValue::from(js_string!("en"))], context);
     let mut object = ObjectInitializer::new(context);
     object.property(js_string!("userAgent"), js_string!("Mithu"), ATTR);
+    object.property(js_string!("platform"), js_string!("Linux x86_64"), ATTR);
     object.property(js_string!("language"), js_string!("en"), ATTR);
     object.property(js_string!("languages"), languages, ATTR);
     object.property(js_string!("doNotTrack"), JsValue::null(), ATTR);
@@ -1041,6 +1102,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let document_get = native(context, "get documentElement", 0, get_document_element);
     let head_get = native(context, "get head", 0, get_head);
     let script_get = native(context, "get currentScript", 0, get_current_script);
+    let sheets_get = native(context, "get styleSheets", 0, get_style_sheets);
     let ready_get = native(context, "get readyState", 0, get_ready_state);
     let base_get = native(context, "get baseURI", 0, get_location);
     let cookie_get = native(context, "get cookie", 0, get_cookie);
@@ -1088,6 +1150,11 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             js_string!("addEventListener"),
             2,
         )
+        .function(
+            NativeFunction::from_fn_ptr(document_remove_listener),
+            js_string!("removeEventListener"),
+            2,
+        )
         .accessor(js_string!("title"), Some(title_get), Some(title_set), ATTR)
         .accessor(js_string!("body"), Some(body_get), None, ATTR)
         .accessor(
@@ -1098,6 +1165,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
         )
         .accessor(js_string!("head"), Some(head_get), None, ATTR)
         .accessor(js_string!("currentScript"), Some(script_get), None, ATTR)
+        .accessor(js_string!("styleSheets"), Some(sheets_get), None, ATTR)
         .accessor(js_string!("readyState"), Some(ready_get), None, ATTR)
         .accessor(js_string!("baseURI"), Some(base_get), None, ATTR)
         .accessor(
@@ -1175,6 +1243,91 @@ fn data_set(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         Some(data_attribute(&key)),
     )?;
     Ok(JsValue::undefined())
+}
+
+fn get_style_sheets(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let ids = {
+        let host = host(context)?;
+        let doc = host.doc.borrow();
+        let mut found = Vec::new();
+        fn walk(doc: &Document, id: NodeId, found: &mut Vec<NodeId>) {
+            let style = doc.element_name(id) == Some("style");
+            let link = doc.element_name(id) == Some("link")
+                && doc
+                    .attr(id, "rel")
+                    .is_some_and(|rel| rel.eq_ignore_ascii_case("stylesheet"));
+            if style || link {
+                found.push(id);
+            }
+            for child in doc.node(id).children.clone() {
+                walk(doc, child, found);
+            }
+        }
+        walk(&doc, doc.root, &mut found);
+        found
+    };
+    let mut values = Vec::new();
+    for id in ids {
+        let element = element_value(id.0, context);
+        values.push(sheet_for(&element, id, context)?);
+    }
+    Ok(JsObject::from(JsArray::from_iter(values, context)).into())
+}
+
+fn get_sheet(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = node_of(this).ok_or_else(type_error)?;
+    sheet_for(this, id, context)
+}
+
+fn sheet_for(element: &JsValue, id: NodeId, context: &mut Context) -> JsResult<JsValue> {
+    if let Some(object) = element.as_object() {
+        let cached = object.get(js_string!("__sheet"), context)?;
+        if cached.is_object() {
+            return Ok(cached);
+        }
+        let rules = JsObject::from(JsArray::from_iter(Vec::<JsValue>::new(), context));
+        let mut sheet = ObjectInitializer::new(context);
+        sheet
+            .property(js_string!("ownerNode"), element.clone(), ATTR)
+            .property(js_string!("__node"), JsValue::from(id.0 as u32), ATTR)
+            .property(js_string!("cssRules"), rules, ATTR)
+            .function(
+                NativeFunction::from_fn_ptr(sheet_insert_rule),
+                js_string!("insertRule"),
+                2,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+                js_string!("deleteRule"),
+                1,
+            );
+        let sheet = JsValue::from(sheet.build());
+        object.set(js_string!("__sheet"), sheet.clone(), true, context)?;
+        return Ok(sheet);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn sheet_insert_rule(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = this
+        .as_object()
+        .and_then(|object| object.get(js_string!("__node"), context).ok())
+        .and_then(|value| value.as_number())
+        .unwrap_or(0.0) as usize;
+    let rule = arg_string(args, 0, context)?;
+    let mut doc = host.doc.borrow_mut();
+    let next = format!("{}{}", doc.text_content(NodeId(id)), rule);
+    doc.set_text_content(NodeId(id), &next);
+    let index = args
+        .get(1)
+        .and_then(|value| value.as_number())
+        .unwrap_or(0.0);
+    Ok(JsValue::from(index))
 }
 
 fn get_current_script(
@@ -1269,7 +1422,17 @@ fn console_log(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     let host = host(context)?;
     let mut parts = Vec::new();
     for arg in args {
-        parts.push(arg.to_string(context)?.to_std_string_lossy());
+        let mut text = arg.to_string(context)?.to_std_string_lossy();
+        if let Some(object) = arg.as_object()
+            && let Ok(stack) = object.get(js_string!("stack"), context)
+        {
+            let stack = stack.to_string(context)?.to_std_string_lossy();
+            if !stack.is_empty() && stack != "undefined" && !text.contains(&stack) {
+                text.push('\n');
+                text.push_str(&stack);
+            }
+        }
+        parts.push(text);
     }
     host.log.borrow_mut().push(parts.join(" "));
     Ok(JsValue::undefined())
@@ -1422,7 +1585,33 @@ fn create_element(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(element_value(id.0, context))
 }
 
+fn cached_node(id: usize, context: &mut Context) -> Option<JsValue> {
+    let bag = context
+        .global_object()
+        .get(js_string!("__mithuNodes"), context)
+        .ok()?;
+    let bag = bag.as_object()?;
+    let value = bag.get(id as u32, context).ok()?;
+    value.is_object().then_some(value)
+}
+
+fn remember_node(id: usize, value: &JsValue, context: &mut Context) {
+    let Ok(bag) = context
+        .global_object()
+        .get(js_string!("__mithuNodes"), context)
+    else {
+        return;
+    };
+    let Some(bag) = bag.as_object() else {
+        return;
+    };
+    let _ = bag.set(id as u32, value.clone(), true, context);
+}
+
 pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
+    if let Some(cached) = cached_node(id, context) {
+        return cached;
+    }
     let text_get = native(context, "get textContent", 0, get_text);
     let text_set = native(context, "set textContent", 1, set_text);
     let inner_get = native(context, "get innerText", 0, get_text);
@@ -1474,6 +1663,14 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let src_set = reflect_src.then(|| native(context, "set src", 1, set_src));
     let dataset_get = native(context, "get dataset", 0, get_dataset);
     let owner_get = native(context, "get ownerDocument", 0, get_owner_document);
+    let offset_width = native(context, "get offsetWidth", 0, get_offset_width);
+    let offset_height = native(context, "get offsetHeight", 0, get_offset_height);
+    let client_width = native(context, "get clientWidth", 0, get_client_width);
+    let client_height = native(context, "get clientHeight", 0, get_client_height);
+    let offset_left = native(context, "get offsetLeft", 0, get_offset_left);
+    let offset_top = native(context, "get offsetTop", 0, get_offset_top);
+    let scroll_width = native(context, "get scrollWidth", 0, get_offset_width);
+    let scroll_height = native(context, "get scrollHeight", 0, get_offset_height);
     let anchor = context.get_data::<Host>().is_some_and(|host| {
         matches!(
             host.doc.borrow().element_name(NodeId(id)).unwrap_or(""),
@@ -1486,6 +1683,13 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let anchor_protocol = native(context, "get anchor protocol", 0, get_anchor_protocol);
     let anchor_search = native(context, "get anchor search", 0, get_anchor_search);
     let anchor_hash = native(context, "get anchor hash", 0, get_anchor_hash);
+    let has_sheet = context.get_data::<Host>().is_some_and(|host| {
+        matches!(
+            host.doc.borrow().element_name(NodeId(id)).unwrap_or(""),
+            "style" | "link"
+        )
+    });
+    let sheet_get = has_sheet.then(|| native(context, "get sheet", 0, get_sheet));
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(
@@ -1660,7 +1864,15 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             NativeFunction::from_fn_ptr(get_bounding_rect),
             js_string!("getBoundingClientRect"),
             0,
-        );
+        )
+        .accessor(js_string!("offsetWidth"), Some(offset_width), None, ATTR)
+        .accessor(js_string!("offsetHeight"), Some(offset_height), None, ATTR)
+        .accessor(js_string!("clientWidth"), Some(client_width), None, ATTR)
+        .accessor(js_string!("clientHeight"), Some(client_height), None, ATTR)
+        .accessor(js_string!("offsetLeft"), Some(offset_left), None, ATTR)
+        .accessor(js_string!("offsetTop"), Some(offset_top), None, ATTR)
+        .accessor(js_string!("scrollWidth"), Some(scroll_width), None, ATTR)
+        .accessor(js_string!("scrollHeight"), Some(scroll_height), None, ATTR);
     object
         .accessor(js_string!("dataset"), Some(dataset_get), None, ATTR)
         .accessor(js_string!("ownerDocument"), Some(owner_get), None, ATTR);
@@ -1673,7 +1885,22 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             .accessor(js_string!("search"), Some(anchor_search), None, ATTR)
             .accessor(js_string!("hash"), Some(anchor_hash), None, ATTR);
     }
-    object.build().into()
+    if let Some(sheet_get) = sheet_get {
+        object.accessor(js_string!("sheet"), Some(sheet_get), None, ATTR);
+    }
+    let value = object.build();
+    if let Ok(ctor) = context
+        .global_object()
+        .get(js_string!("HTMLElement"), context)
+        && let Some(ctor) = ctor.as_object()
+        && let Ok(proto) = ctor.get(js_string!("prototype"), context)
+        && let Some(proto) = proto.as_object()
+    {
+        value.set_prototype(Some(proto.clone()));
+    }
+    let value = JsValue::from(value);
+    remember_node(id, &value, context);
+    value
 }
 
 fn get_dataset(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1698,18 +1925,71 @@ fn get_owner_document(
     context.global_object().get(js_string!("document"), context)
 }
 
+fn box_metrics(this: &JsValue, context: &mut Context) -> Option<BoxMetrics> {
+    let host = host(context).ok()?;
+    let id = node_of(this)?;
+    host.geometry.borrow().get(&id.0).copied()
+}
+
 fn get_bounding_rect(
-    _this: &JsValue,
+    this: &JsValue,
     _args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    let metrics = box_metrics(this, context).unwrap_or_default();
+    let scroll = host(context).map(|host| host.scroll.get()).unwrap_or(0.0);
+    let x = f64::from(metrics.x);
+    let y = f64::from(metrics.y - scroll);
+    let width = f64::from(metrics.width);
+    let height = f64::from(metrics.height);
     let mut object = ObjectInitializer::new(context);
-    for name in [
-        "x", "y", "width", "height", "top", "left", "right", "bottom",
-    ] {
-        object.property(js_string!(name), JsValue::from(0), ATTR);
-    }
+    object
+        .property(js_string!("x"), JsValue::from(x), ATTR)
+        .property(js_string!("y"), JsValue::from(y), ATTR)
+        .property(js_string!("width"), JsValue::from(width), ATTR)
+        .property(js_string!("height"), JsValue::from(height), ATTR)
+        .property(js_string!("left"), JsValue::from(x), ATTR)
+        .property(js_string!("top"), JsValue::from(y), ATTR)
+        .property(js_string!("right"), JsValue::from(x + width), ATTR)
+        .property(js_string!("bottom"), JsValue::from(y + height), ATTR);
     Ok(object.build().into())
+}
+
+fn metric_number(
+    this: &JsValue,
+    context: &mut Context,
+    pick: fn(BoxMetrics) -> f32,
+) -> JsResult<JsValue> {
+    let metrics = box_metrics(this, context).unwrap_or_default();
+    Ok(JsValue::from(f64::from(pick(metrics))))
+}
+
+fn get_offset_width(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    metric_number(this, context, |metrics| metrics.width)
+}
+
+fn get_offset_height(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    metric_number(this, context, |metrics| metrics.height)
+}
+
+fn get_client_width(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    metric_number(this, context, |metrics| {
+        (metrics.width - metrics.border_left - metrics.border_right).max(0.0)
+    })
+}
+
+fn get_client_height(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    metric_number(this, context, |metrics| {
+        (metrics.height - metrics.border_top - metrics.border_bottom).max(0.0)
+    })
+}
+
+fn get_offset_left(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    metric_number(this, context, |metrics| metrics.x)
+}
+
+fn get_offset_top(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    metric_number(this, context, |metrics| metrics.y)
 }
 
 fn anchor_url(this: &JsValue, context: &mut Context) -> Option<mithu_url::Url> {
@@ -3197,6 +3477,17 @@ fn window_listener(_this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     Ok(JsValue::undefined())
 }
 
+fn window_remove_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event = arg_string(args, 0, context)?;
+    let handler = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    drop_listener(context, &format!("win:{event}"), &handler)?;
+    Ok(JsValue::undefined())
+}
+
 fn document_listener(
     _this: &JsValue,
     args: &[JsValue],
@@ -3209,6 +3500,21 @@ fn document_listener(
     let event = arg_string(args, 0, context)?;
     let handler = args.get(1).cloned().unwrap_or(JsValue::undefined());
     push_listener(context, &format!("add:{}:{event}", html.0), &handler, false)?;
+    Ok(JsValue::undefined())
+}
+
+fn document_remove_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let Some(html) = find_tag(&host.doc.borrow(), "html") else {
+        return Ok(JsValue::undefined());
+    };
+    let event = arg_string(args, 0, context)?;
+    let handler = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    drop_listener(context, &format!("add:{}:{event}", html.0), &handler)?;
     Ok(JsValue::undefined())
 }
 
@@ -3264,6 +3570,9 @@ fn node_value(id: usize, context: &mut Context) -> JsValue {
 }
 
 fn text_node(id: usize, context: &mut Context) -> JsValue {
+    if let Some(cached) = cached_node(id, context) {
+        return cached;
+    }
     let type_get = native(context, "get nodeType", 0, get_node_type);
     let name_get = native(context, "get nodeName", 0, get_node_name);
     let text_get = native(context, "get textContent", 0, get_text);
@@ -3292,7 +3601,9 @@ fn text_node(id: usize, context: &mut Context) -> JsValue {
             None,
             ATTR,
         );
-    object.build().into()
+    let value = JsValue::from(object.build());
+    remember_node(id, &value, context);
+    value
 }
 
 fn get_node_type(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -3708,6 +4019,20 @@ fn map_specifier(imports: &HashMap<String, String>, spec: &str) -> Option<String
 }
 
 impl ModuleLoader for PageLoader {
+    fn init_import_meta(
+        self: Rc<Self>,
+        import_meta: &JsObject,
+        module: &Module,
+        context: &mut Context,
+    ) {
+        let url = module
+            .path()
+            .and_then(|path| path.to_str())
+            .unwrap_or("")
+            .to_string();
+        let _ = import_meta.set(js_string!("url"), js_string!(url), false, context);
+    }
+
     fn load_imported_module(
         self: Rc<Self>,
         referrer: Referrer,
@@ -4438,6 +4763,7 @@ mod tests {
             <script type="module">
               import { name } from "react-dom/client";
               document.documentElement.setAttribute("data-mod", name);
+              document.documentElement.setAttribute("data-meta", import.meta.url);
             </script>
             <script>
               var img = new Image();
@@ -4457,11 +4783,18 @@ mod tests {
               xhr.send();
               order += "d";
               requestIdleCallback(function (deadline) { document.getElementById("page").setAttribute("data-idle", String(deadline.timeRemaining())); });
+              setTimeout(function () {
+                var box = document.getElementById("page").getBoundingClientRect();
+                document.getElementById("page").setAttribute("data-box", String(box.width) + "x" + document.getElementById("page").clientWidth);
+              }, 1);
               var observer = new MutationObserver(function (records) {
                 document.getElementById("page").setAttribute("data-seen", records[0].type);
               });
               observer.observe(document.getElementById("page"), { attributes: true });
               document.getElementById("page").setAttribute("data-x", "1");
+              var style = document.createElement("style");
+              document.body.appendChild(style);
+              style.sheet.insertRule("a{}", 0);
               document.title = [
                 img.src,
                 img.alt,
@@ -4472,7 +4805,14 @@ mod tests {
                 document.documentElement.getAttribute("data-theme"),
                 order,
                 typeof fetch,
-                typeof HTMLElement
+                typeof HTMLElement,
+                typeof Document,
+                document instanceof Document,
+                navigator.platform,
+                typeof window.removeEventListener,
+                new Event("ping").type,
+                document.body === document.body,
+                document.styleSheets.length
               ].join("|");
             </script>"#,
         );
@@ -4484,7 +4824,7 @@ mod tests {
         let title = session.document().title.clone();
         assert_eq!(
             title,
-            "https://example.com/pixel.png|ported|36|cdn.example|?q=mithu||dark|sd|function|function"
+            "https://example.com/pixel.png|ported|36|cdn.example|?q=mithu||dark|sd|function|function|function|true|Linux x86_64|function|ping|true|1"
         );
         let html = session
             .document()
@@ -4497,12 +4837,31 @@ mod tests {
             })
             .unwrap();
         assert_eq!(session.document().attr(html, "data-mod"), Some("react"));
+        assert_eq!(
+            session.document().attr(html, "data-meta"),
+            Some("inline-module.js")
+        );
         let page = session.document().get_element_by_id("page").unwrap();
         assert_eq!(
             session.document().attr(page, "data-seen"),
             Some("attributes")
         );
+        let mut boxes = std::collections::HashMap::new();
+        boxes.insert(
+            page.0,
+            BoxMetrics {
+                x: 8.0,
+                y: 16.0,
+                width: 320.0,
+                height: 40.0,
+                border_left: 2.0,
+                border_right: 2.0,
+                ..BoxMetrics::default()
+            },
+        );
+        session.set_geometry(boxes, 0.0);
         assert!(session.advance(5));
         assert_eq!(session.document().attr(page, "data-idle"), Some("50"));
+        assert_eq!(session.document().attr(page, "data-box"), Some("320x316"));
     }
 }

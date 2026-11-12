@@ -300,7 +300,18 @@ fn paint_box(
     scroll: f32,
     origin_y: f32,
 ) {
-    paint_box_with_opacity(canvas, box_, fonts, clip, scroll, origin_y, 1.0, false, 0.0);
+    paint_box_with_opacity(
+        canvas,
+        box_,
+        fonts,
+        clip,
+        scroll,
+        origin_y,
+        1.0,
+        false,
+        0.0,
+        f32::INFINITY,
+    );
 }
 
 fn paint_box_with_opacity(
@@ -313,6 +324,7 @@ fn paint_box_with_opacity(
     opacity: f32,
     pinned: bool,
     shift: f32,
+    parent_bottom: f32,
 ) {
     if !box_.visible {
         return;
@@ -324,11 +336,22 @@ fn paint_box_with_opacity(
     } else {
         box_.rect.y - scroll + origin_y
     };
-    let stick = if box_.sticky && !pinned {
-        (origin_y + box_.sticky_top - natural_y).max(0.0)
-    } else {
-        0.0
-    };
+    let mut stick = 0.0;
+    if box_.sticky && !pinned {
+        if let Some(top) = box_.sticky_top {
+            stick = (origin_y + top - natural_y).max(0.0);
+        }
+        if let Some(bottom) = box_.sticky_bottom {
+            let overflow = natural_y + box_.rect.height - (clip.bottom() - bottom);
+            if overflow > 0.0 {
+                stick = stick.min(-overflow);
+            }
+        }
+        if parent_bottom.is_finite() {
+            let room = parent_bottom - (natural_y + box_.rect.height);
+            stick = stick.min(room.max(0.0));
+        }
+    }
     let shift = shift + stick;
     let screen_y = natural_y + shift;
     let screen = Rect::new(box_.rect.x, screen_y, box_.rect.width, box_.rect.height);
@@ -487,6 +510,7 @@ fn paint_box_with_opacity(
             opacity,
             pinned,
             shift,
+            screen.bottom(),
         );
     }
     if let Some(frame) = &box_.frame {
@@ -496,7 +520,16 @@ fn paint_box_with_opacity(
         shift_box(&mut nested, dx, dy);
         let frame_clip = intersect(child_clip, screen).unwrap_or(screen);
         paint_box_with_opacity(
-            canvas, &nested, fonts, frame_clip, 0.0, 0.0, opacity, true, 0.0,
+            canvas,
+            &nested,
+            fonts,
+            frame_clip,
+            0.0,
+            0.0,
+            opacity,
+            true,
+            0.0,
+            f32::INFINITY,
         );
     }
 }
