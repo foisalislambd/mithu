@@ -443,6 +443,8 @@ pub fn font_faces(css: &str) -> Vec<(String, String)> {
 pub fn style_with(doc: &Document, author_css: &str, state: StyleState) -> Vec<ComputedStyle> {
     let ua = parse_css(USER_AGENT_CSS);
     let author = parse_css(author_css);
+    let ua_index = index_sheet(&ua);
+    let author_index = index_sheet(&author);
     let mut styles = vec![ComputedStyle::initial(); doc.nodes.len()];
     let initial = ComputedStyle::initial();
     let vars = HashMap::new();
@@ -452,7 +454,9 @@ pub fn style_with(doc: &Document, author_css: &str, state: StyleState) -> Vec<Co
             child,
             &initial,
             &ua,
+            &ua_index,
             &author,
+            &author_index,
             state,
             &vars,
             &mut styles,
@@ -461,12 +465,120 @@ pub fn style_with(doc: &Document, author_css: &str, state: StyleState) -> Vec<Co
     styles
 }
 
+enum SubjectKey<'a> {
+    Class(&'a str),
+    Id(&'a str),
+    Tag(&'a str),
+}
+
+struct SheetIndex {
+    by_class: HashMap<String, Vec<usize>>,
+    by_id: HashMap<String, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
+    rest: Vec<usize>,
+}
+
+fn index_sheet(sheet: &Stylesheet) -> SheetIndex {
+    let mut index = SheetIndex {
+        by_class: HashMap::new(),
+        by_id: HashMap::new(),
+        by_tag: HashMap::new(),
+        rest: Vec::new(),
+    };
+    for (rule_index, rule) in sheet.rules.iter().enumerate() {
+        let mut keys = Vec::new();
+        let mut indexable = !rule.selectors.is_empty();
+        for selector in &rule.selectors {
+            match selector_keys(selector) {
+                Some(more) => keys.extend(more),
+                None => indexable = false,
+            }
+        }
+        if !indexable {
+            index.rest.push(rule_index);
+            continue;
+        }
+        for key in keys {
+            let bucket = match key {
+                SubjectKey::Class(name) => index.by_class.entry(name.to_string()).or_default(),
+                SubjectKey::Id(name) => index.by_id.entry(name.to_string()).or_default(),
+                SubjectKey::Tag(name) => index.by_tag.entry(name.to_string()).or_default(),
+            };
+            if bucket.last() != Some(&rule_index) {
+                bucket.push(rule_index);
+            }
+        }
+    }
+    index
+}
+
+fn selector_keys(selector: &Selector) -> Option<Vec<SubjectKey<'_>>> {
+    let subject = selector.compounds.last()?;
+    if let Some(class) = subject.classes.first() {
+        return Some(vec![SubjectKey::Class(class)]);
+    }
+    if let Some(id) = subject.id.as_deref() {
+        return Some(vec![SubjectKey::Id(id)]);
+    }
+    let grouped = subject
+        .pseudos
+        .iter()
+        .any(|pseudo| matches!(pseudo, Pseudo::Is(_) | Pseudo::Where(_) | Pseudo::Not(_)));
+    if let Some(tag) = subject.tag.as_deref()
+        && !grouped
+    {
+        return Some(vec![SubjectKey::Tag(tag)]);
+    }
+    if subject.classes.is_empty() && subject.id.is_none() && subject.tag.is_none() {
+        for pseudo in &subject.pseudos {
+            let list = match pseudo {
+                Pseudo::Is(list) | Pseudo::Where(list) => list,
+                _ => continue,
+            };
+            let mut keys = Vec::new();
+            for inner in list {
+                keys.extend(selector_keys(inner)?);
+            }
+            if !keys.is_empty() {
+                return Some(keys);
+            }
+        }
+    }
+    None
+}
+
+fn candidate_rules(doc: &Document, id: NodeId, index: &SheetIndex) -> Vec<usize> {
+    let mut hits = index.rest.clone();
+    if let Some(tag) = doc.element_name(id)
+        && let Some(list) = index.by_tag.get(tag)
+    {
+        hits.extend(list);
+    }
+    if let Some(value) = doc.attr(id, "id")
+        && let Some(list) = index.by_id.get(value)
+    {
+        hits.extend(list);
+    }
+    if let Some(value) = doc.attr(id, "class") {
+        for name in value.split_whitespace() {
+            if let Some(list) = index.by_class.get(name) {
+                hits.extend(list);
+            }
+        }
+    }
+    hits.sort_unstable();
+    hits.dedup();
+    hits
+}
+
 fn compute(
     doc: &Document,
     id: NodeId,
     parent: &ComputedStyle,
     ua: &Stylesheet,
+    ua_index: &SheetIndex,
     author: &Stylesheet,
+    author_index: &SheetIndex,
     state: StyleState,
     parent_vars: &HashMap<String, String>,
     styles: &mut [ComputedStyle],
@@ -474,13 +586,55 @@ fn compute(
     if doc.element_name(id).is_none() {
         return;
     }
-    let (specified, vars) = cascade(doc, id, ua, author, state, parent_vars);
+    let (specified, vars) = cascade(
+        doc,
+        id,
+        ua,
+        ua_index,
+        author,
+        author_index,
+        state,
+        parent_vars,
+    );
     let mut computed = concretize(doc, id, &specified, parent);
-    computed.before = build_generated(doc, id, ua, author, state, &vars, &computed, true);
-    computed.after = build_generated(doc, id, ua, author, state, &vars, &computed, false);
+    computed.before = build_generated(
+        doc,
+        id,
+        ua,
+        ua_index,
+        author,
+        author_index,
+        state,
+        &vars,
+        &computed,
+        true,
+    );
+    computed.after = build_generated(
+        doc,
+        id,
+        ua,
+        ua_index,
+        author,
+        author_index,
+        state,
+        &vars,
+        &computed,
+        false,
+    );
     styles[id.0] = computed.clone();
     for child in doc.node(id).children.clone() {
-        compute(doc, child, &computed, ua, author, state, &vars, styles);
+        compute(
+            doc,
+            child,
+            &computed,
+            ua,
+            ua_index,
+            author,
+            author_index,
+            state,
+            &vars,
+            styles,
+        );
     }
 }
 
@@ -488,13 +642,15 @@ fn cascade(
     doc: &Document,
     id: NodeId,
     ua: &Stylesheet,
+    ua_index: &SheetIndex,
     author: &Stylesheet,
+    author_index: &SheetIndex,
     state: StyleState,
     parent_vars: &HashMap<String, String>,
 ) -> (Specified, HashMap<String, String>) {
     let mut specified = Specified::default();
-    collect_custom(doc, id, ua, state, &mut specified);
-    collect_custom(doc, id, author, state, &mut specified);
+    collect_custom(doc, id, ua, ua_index, state, &mut specified);
+    collect_custom(doc, id, author, author_index, state, &mut specified);
     if let Some(inline) = doc.attr(id, "style") {
         for declaration in parse_declarations(inline) {
             if declaration.name.starts_with("--") {
@@ -509,8 +665,8 @@ fn cascade(
         }
     }
     let vars = resolve_custom(&specified.custom, parent_vars);
-    apply_sheet(doc, id, ua, state, &vars, &mut specified);
-    apply_sheet(doc, id, author, state, &vars, &mut specified);
+    apply_sheet(doc, id, ua, ua_index, state, &vars, &mut specified);
+    apply_sheet(doc, id, author, author_index, state, &vars, &mut specified);
     if let Some(inline) = doc.attr(id, "style") {
         for declaration in parse_declarations(inline) {
             let spec = 1_000 + if declaration.important { 100_000 } else { 0 };
@@ -524,10 +680,12 @@ fn collect_custom(
     doc: &Document,
     id: NodeId,
     sheet: &Stylesheet,
+    index: &SheetIndex,
     state: StyleState,
     specified: &mut Specified,
 ) {
-    for rule in &sheet.rules {
+    for rule_index in candidate_rules(doc, id, index) {
+        let rule = &sheet.rules[rule_index];
         if !media_applies(rule.media.as_ref(), state.viewport_width) {
             continue;
         }
@@ -647,11 +805,13 @@ fn apply_sheet(
     doc: &Document,
     id: NodeId,
     sheet: &Stylesheet,
+    index: &SheetIndex,
     state: StyleState,
     vars: &HashMap<String, String>,
     specified: &mut Specified,
 ) {
-    for rule in &sheet.rules {
+    for rule_index in candidate_rules(doc, id, index) {
+        let rule = &sheet.rules[rule_index];
         if !media_applies(rule.media.as_ref(), state.viewport_width) {
             continue;
         }
@@ -1602,7 +1762,9 @@ fn build_generated(
     doc: &Document,
     id: NodeId,
     ua: &Stylesheet,
+    ua_index: &SheetIndex,
     author: &Stylesheet,
+    author_index: &SheetIndex,
     state: StyleState,
     vars: &HashMap<String, String>,
     element: &ComputedStyle,
@@ -1616,8 +1778,9 @@ fn build_generated(
     let mut font_size = None;
     let mut width = None;
     let mut height = None;
-    for sheet in [ua, author] {
-        for rule in &sheet.rules {
+    for (sheet, index) in [(ua, ua_index), (author, author_index)] {
+        for rule_index in candidate_rules(doc, id, index) {
+            let rule = &sheet.rules[rule_index];
             if !media_applies(rule.media.as_ref(), state.viewport_width) {
                 continue;
             }
@@ -2909,6 +3072,28 @@ mod tests {
         let p = p.expect("p");
         assert_eq!(styles[p.0].color, Color::rgb(1, 2, 3));
         assert_eq!(styles[p.0].display, Display::Block);
+    }
+
+    #[test]
+    fn indexed_rules_still_match_classes_tags_and_is() {
+        let doc = parse_html(r#"<div class="a" id="box"><span class="b">t</span></div>"#);
+        let styles = style_document(
+            &doc,
+            ":is(.a, span) { color: red } .b { color: blue } #box { background-color: green } div { display: flex }",
+        );
+        let div = doc.get_element_by_id("box").unwrap();
+        let span = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                matches!(doc.element_name(NodeId(index)), Some("span")).then_some(NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(styles[div.0].color, Color::rgb(255, 0, 0));
+        assert_eq!(styles[div.0].display, Display::Flex);
+        assert_eq!(styles[div.0].background, Color::rgb(0, 128, 0));
+        assert_eq!(styles[span.0].color, Color::rgb(0, 0, 255));
     }
 
     #[test]
