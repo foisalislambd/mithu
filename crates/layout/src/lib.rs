@@ -222,12 +222,9 @@ fn layout_node(
             width.max(0.0)
         }
     });
-    let margin_top = resolve_length(style.margin[0], font, containing_width, view)
-        .unwrap_or(0.0)
-        .max(0.0);
-    let margin_bottom = resolve_length(style.margin[2], font, containing_width, view)
-        .unwrap_or(0.0)
-        .max(0.0);
+    let margin_top = resolve_length(style.margin[0], font, containing_width, view).unwrap_or(0.0);
+    let margin_bottom =
+        resolve_length(style.margin[2], font, containing_width, view).unwrap_or(0.0);
     let margin_left_opt = resolve_length(style.margin[3], font, containing_width, view);
     let margin_right_opt = resolve_length(style.margin[1], font, containing_width, view);
 
@@ -235,15 +232,15 @@ fn layout_node(
         let space = containing_width - width - padding.left - padding.right - border_w;
         let (left, right) = match (margin_left_opt, margin_right_opt) {
             (None, None) if space >= 0.0 => (space / 2.0, space / 2.0),
-            (None, Some(right)) => ((space - right).max(0.0), right.max(0.0)),
-            (Some(left), None) => (left.max(0.0), (space - left).max(0.0)),
-            (Some(left), Some(right)) => (left.max(0.0), right.max(0.0)),
+            (None, Some(right)) => ((space - right).max(0.0), right),
+            (Some(left), None) => (left, (space - left).max(0.0)),
+            (Some(left), Some(right)) => (left, right),
             _ => (0.0, 0.0),
         };
         (left, right, width.max(0.0))
     } else {
-        let left = margin_left_opt.unwrap_or(0.0).max(0.0);
-        let right = margin_right_opt.unwrap_or(0.0).max(0.0);
+        let left = margin_left_opt.unwrap_or(0.0);
+        let right = margin_right_opt.unwrap_or(0.0);
         let content =
             (containing_width - left - right - padding.left - padding.right - border_w).max(0.0);
         (left, right, content)
@@ -2641,15 +2638,10 @@ fn layout_table(
     let border_w = borders[1] + borders[3];
     let border_h = borders[0] + borders[2];
     let padding = resolve_edges(&style.padding, font, containing_width, view);
-    let margin_top = resolve_length(style.margin[0], font, containing_width, view)
-        .unwrap_or(0.0)
-        .max(0.0);
-    let margin_bottom = resolve_length(style.margin[2], font, containing_width, view)
-        .unwrap_or(0.0)
-        .max(0.0);
-    let margin_left = resolve_length(style.margin[3], font, containing_width, view)
-        .unwrap_or(0.0)
-        .max(0.0);
+    let margin_top = resolve_length(style.margin[0], font, containing_width, view).unwrap_or(0.0);
+    let margin_bottom =
+        resolve_length(style.margin[2], font, containing_width, view).unwrap_or(0.0);
+    let margin_left = resolve_length(style.margin[3], font, containing_width, view).unwrap_or(0.0);
     let available =
         (containing_width - margin_left - padding.left - padding.right - border_w).max(0.0);
     let specified = resolve_length(style.width, font, containing_width, view).map(|width| {
@@ -3741,6 +3733,34 @@ mod tests {
             a.rect.x
         );
         assert!(c.rect.y > a.rect.y, "c y {} a y {}", c.rect.y, a.rect.y);
+    }
+
+    #[test]
+    fn negative_margin_block_lines_up_the_nav_labels() {
+        let doc = parse_html(
+            r#"<header data-marketing-header="true"><ul class="list"><li><div class="box"><button id="products" class="btn">Products</button></div></li><li><a id="pricing" class="link">Pricing</a></li></ul></header>"#,
+        );
+        let styles = style_document(
+            &doc,
+            r#"
+            :root { --pad: 1.25rem; --h: 1.75rem; }
+            .list { display: flex; align-items: flex-start; }
+            [data-marketing-header=true] .box {
+              margin-block: calc(-1 * var(--pad));
+              padding-block: var(--pad);
+            }
+            .btn, .link { display: flex; height: var(--h); padding: 0 8px; }
+            "#,
+        );
+        let tree = layout_tree(&doc, &styles, 1280.0, 200.0, &NaiveMetrics, &HashMap::new());
+        let products = find(&tree.root, doc.get_element_by_id("products").unwrap()).unwrap();
+        let pricing = find(&tree.root, doc.get_element_by_id("pricing").unwrap()).unwrap();
+        assert!(
+            (products.rect.y - pricing.rect.y).abs() < 1.0,
+            "products y {} pricing y {}",
+            products.rect.y,
+            pricing.rect.y
+        );
     }
 
     #[test]

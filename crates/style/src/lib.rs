@@ -1502,7 +1502,7 @@ fn set_logical(
     spec: u32,
     padding: bool,
 ) {
-    let parts: Vec<Length> = value.split_whitespace().filter_map(parse_length).collect();
+    let parts = split_lengths(value);
     let (first, second) = match parts.as_slice() {
         [first] => (*first, *first),
         [first, second, ..] => (*first, *second),
@@ -2892,8 +2892,37 @@ fn parse_flex_wrap(value: &str) -> Option<(bool, bool)> {
     })
 }
 
+fn split_lengths(value: &str) -> Vec<Length> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ch if ch.is_whitespace() && depth == 0 => {
+                if let Some(length) = parse_length(current.trim()) {
+                    parts.push(length);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if let Some(length) = parse_length(current.trim()) {
+        parts.push(length);
+    }
+    parts
+}
+
 fn parse_sides(value: &str) -> Option<[Length; 4]> {
-    let sides: Vec<Length> = value.split_whitespace().filter_map(parse_length).collect();
+    let sides = split_lengths(value);
     match sides.as_slice() {
         [a] => Some([*a, *a, *a, *a]),
         [a, b] => Some([*a, *b, *a, *b]),
