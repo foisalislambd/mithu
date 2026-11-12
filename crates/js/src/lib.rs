@@ -833,6 +833,12 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     proto.set(js_string!("insertBefore"), insert, true, context)?;
     let remove = native(context, "removeChild", 1, remove_child);
     proto.set(js_string!("removeChild"), remove, true, context)?;
+    let equal = native(context, "isEqualNode", 1, is_equal_node);
+    proto.set(js_string!("isEqualNode"), equal, true, context)?;
+    let same = native(context, "isSameNode", 1, is_same_node);
+    proto.set(js_string!("isSameNode"), same, true, context)?;
+    let clone = native(context, "cloneNode", 1, clone_node);
+    proto.set(js_string!("cloneNode"), clone, true, context)?;
     Ok(())
 }
 
@@ -1571,7 +1577,7 @@ fn get_element_by_id(
     let host = host(context)?;
     let id = arg_string(args, 0, context)?;
     let found = host.doc.borrow().get_element_by_id(&id);
-    match found {
+    match found.filter(|node| host.doc.borrow().is_connected(*node)) {
         Some(node) => Ok(element_value(node.0, context)),
         None => Ok(JsValue::null()),
     }
@@ -1801,6 +1807,10 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let is_template = tag == "template";
     let sheet_get = has_sheet.then(|| native(context, "get sheet", 0, get_sheet));
     let content_get = is_template.then(|| native(context, "get content", 0, get_template_content));
+    let node_value_get = native(context, "get element nodeValue", 0, get_null);
+    let node_value_set = native(context, "set element nodeValue", 1, set_ignored);
+    let nonce_get = native(context, "get nonce", 0, get_nonce);
+    let nonce_set = native(context, "set nonce", 1, set_nonce);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(
@@ -1955,6 +1965,12 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         .accessor(js_string!("nodeType"), Some(type_get), None, ATTR)
         .accessor(js_string!("nodeName"), Some(name_get.clone()), None, ATTR)
         .accessor(js_string!("tagName"), Some(name_get), None, ATTR)
+        .accessor(
+            js_string!("nodeValue"),
+            Some(node_value_get),
+            Some(node_value_set),
+            ATTR,
+        )
         .accessor(js_string!("value"), Some(value_get), Some(value_set), ATTR)
         .accessor(
             js_string!("checked"),
@@ -1963,7 +1979,8 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             ATTR,
         )
         .accessor(js_string!("href"), Some(href_get), Some(href_set), ATTR)
-        .accessor(js_string!("lang"), Some(lang_get), Some(lang_set), ATTR);
+        .accessor(js_string!("lang"), Some(lang_get), Some(lang_set), ATTR)
+        .accessor(js_string!("nonce"), Some(nonce_get), Some(nonce_set), ATTR);
     if let (Some(src_get), Some(src_set)) = (src_get, src_set) {
         object.accessor(js_string!("src"), Some(src_get), Some(src_set), ATTR);
     }
@@ -2590,7 +2607,9 @@ fn set_text(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
 fn get_html(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
-    Ok(js_string!(serialize(&host.doc.borrow(), id)).into())
+    let doc = host.doc.borrow();
+    let target = doc.template_content(id).unwrap_or(id);
+    Ok(js_string!(serialize(&doc, target)).into())
 }
 
 fn set_html(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -2598,6 +2617,11 @@ fn set_html(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let id = node_of(this).ok_or_else(type_error)?;
     let html = arg_string(args, 0, context)?;
     let mut doc = host.doc.borrow_mut();
+    let id = if doc.element_name(id) == Some("template") {
+        ensure_template_content(&mut doc, id)
+    } else {
+        id
+    };
     doc.clear_children(id);
     if html.contains('<') {
         let parsed = parse_html(&format!("<div id=\"mithu-root\">{html}</div>"));
@@ -3485,6 +3509,15 @@ fn fonts_listen(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> J
     Ok(JsValue::undefined())
 }
 
+fn ensure_template_content(doc: &mut mithu_dom::Document, template: NodeId) -> NodeId {
+    if let Some(fragment) = doc.template_content(template) {
+        return fragment;
+    }
+    let fragment = doc.create_element_detached("mithu-fragment");
+    doc.template_contents.push((template, fragment));
+    fragment
+}
+
 fn get_template_content(
     this: &JsValue,
     _args: &[JsValue],
@@ -3497,7 +3530,12 @@ fn get_template_content(
         }
     }
     let id = node_of(this).ok_or_else(type_error)?;
-    let fragment = fragment_value(id.0, context)?;
+    let fragment_id = {
+        let host = host(context)?;
+        let mut doc = host.doc.borrow_mut();
+        ensure_template_content(&mut doc, id)
+    };
+    let fragment = fragment_value(fragment_id.0, context)?;
     if let Some(object) = this.as_object() {
         object.set(js_string!("__content"), fragment.clone(), true, context)?;
     }
@@ -4025,6 +4063,8 @@ fn text_node(id: usize, context: &mut Context) -> JsValue {
     let text_set = native(context, "set textContent", 1, set_text);
     let data_get = native(context, "get data", 0, get_text);
     let data_set = native(context, "set data", 1, set_text);
+    let value_get = native(context, "get nodeValue", 0, get_text);
+    let value_set = native(context, "set nodeValue", 1, set_text);
     let parent_get = native(context, "get parentNode", 0, get_parent_node);
     let next_get = native(context, "get nextSibling", 0, get_next_node);
     let previous_get = native(context, "get previousSibling", 0, get_previous_node);
@@ -4033,6 +4073,12 @@ fn text_node(id: usize, context: &mut Context) -> JsValue {
         .accessor(js_string!("nodeType"), Some(type_get), None, ATTR)
         .accessor(js_string!("nodeName"), Some(name_get), None, ATTR)
         .accessor(js_string!("data"), Some(data_get), Some(data_set), ATTR)
+        .accessor(
+            js_string!("nodeValue"),
+            Some(value_get),
+            Some(value_set),
+            ATTR,
+        )
         .accessor(
             js_string!("textContent"),
             Some(text_get),
@@ -4047,9 +4093,71 @@ fn text_node(id: usize, context: &mut Context) -> JsValue {
             None,
             ATTR,
         );
-    let value = JsValue::from(object.build());
+    let object = object.build();
+    attach_node_prototype(&object, context);
+    let value = JsValue::from(object);
     remember_node(id, &value, context);
     value
+}
+
+fn attach_node_prototype(object: &boa_engine::JsObject, context: &mut Context) {
+    let Ok(ctor) = context.global_object().get(js_string!("Node"), context) else {
+        return;
+    };
+    let Some(ctor) = ctor.as_object() else {
+        return;
+    };
+    let Ok(proto) = ctor.get(js_string!("prototype"), context) else {
+        return;
+    };
+    if let Some(proto) = proto.as_object() {
+        object.set_prototype(Some(proto.clone()));
+    }
+}
+
+fn is_equal_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::from(false));
+    };
+    let Some(other) = args.first().and_then(node_of) else {
+        return Ok(JsValue::from(false));
+    };
+    let host = host(context)?;
+    Ok(JsValue::from(host.doc.borrow().nodes_equal(id, other)))
+}
+
+fn is_same_node(this: &JsValue, args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let id = node_of(this);
+    let other = args.first().and_then(node_of);
+    Ok(JsValue::from(id.is_some() && id == other))
+}
+
+fn clone_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = node_of(this).ok_or_else(type_error)?;
+    let deep = args.first().is_some_and(|value| {
+        value.as_boolean() == Some(true) || value.to_boolean()
+    });
+    let cloned = {
+        let host = host(context)?;
+        host.doc.borrow_mut().clone_node(id, deep)
+    };
+    Ok(node_value(cloned.0, context))
+}
+
+fn get_nonce(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    attr_value(this, "nonce", context)
+}
+
+fn set_nonce(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    write_attr(this, "nonce", args, context)
+}
+
+fn get_null(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::null())
+}
+
+fn set_ignored(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
 }
 
 fn get_node_type(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -4698,19 +4806,52 @@ fn serialize(doc: &Document, id: NodeId) -> String {
 fn write_html(doc: &Document, id: NodeId, out: &mut String) {
     match &doc.node(id).data {
         NodeData::Text(text) => out.push_str(&escape(text)),
+        NodeData::Element(element) if element.name == "mithu-fragment" => {
+            for child in &doc.node(id).children {
+                write_html(doc, *child, out);
+            }
+        }
         NodeData::Element(element) => {
+            let void = matches!(
+                element.name.as_str(),
+                "area"
+                    | "base"
+                    | "br"
+                    | "col"
+                    | "embed"
+                    | "hr"
+                    | "img"
+                    | "input"
+                    | "link"
+                    | "meta"
+                    | "source"
+                    | "track"
+                    | "wbr"
+            );
             out.push('<');
             out.push_str(&element.name);
             for (name, value) in &element.attrs {
                 out.push(' ');
                 out.push_str(name);
-                out.push_str("=\"");
-                out.push_str(&escape(value));
-                out.push('"');
+                if !value.is_empty() {
+                    out.push_str("=\"");
+                    out.push_str(&escape(value));
+                    out.push('"');
+                }
             }
             out.push('>');
-            for child in &doc.node(id).children {
-                write_html(doc, *child, out);
+            if void {
+                return;
+            }
+            let children = if element.name == "template" {
+                doc.template_content(id)
+                    .map(|fragment| doc.node(fragment).children.clone())
+                    .unwrap_or_default()
+            } else {
+                doc.node(id).children.clone()
+            };
+            for child in children {
+                write_html(doc, child, out);
             }
             out.push_str("</");
             out.push_str(&element.name);
@@ -5362,5 +5503,60 @@ mod tests {
             Some("aborted")
         );
         assert!(session.document().get_element_by_id("inner").is_some());
+        let template = session.document().get_element_by_id("t").unwrap();
+        assert!(
+            session.document().node(template).children.is_empty(),
+            "template contents stay in the fragment"
+        );
+    }
+
+    #[test]
+    fn hydration_dom_matches_server_markup() {
+        let doc = parse_html(
+            r#"<div id="root">Hello <span id="name">world</span></div>
+            <p id="note"><!--$-->Hi<!--/$--></p>
+            <template id="view"><b id="secret">x</b></template>
+            <img id="pic" alt="a &amp; b" hidden>
+            <script>
+              var root = document.getElementById("root");
+              var text = root.childNodes[0];
+              var note = document.getElementById("note");
+              var mark = note.childNodes[0];
+              var view = document.getElementById("view");
+              var pic = document.getElementById("pic");
+              if (text.nodeType !== 3 || text.nodeValue !== "Hello ") throw new Error("text:" + text.nodeValue);
+              if (root.childNodes[1].id !== "name") throw new Error("span");
+              if (note.textContent !== "Hi") throw new Error("textContent:" + note.textContent);
+              if (!mark || mark.nodeType !== 8 || mark.nodeValue !== "$") throw new Error("comment:" + (mark && mark.nodeValue));
+              if (note.nodeValue !== null) throw new Error("element nodeValue");
+              if (view.childNodes.length !== 0) throw new Error("template children " + view.childNodes.length);
+              if (view.content.childNodes.length !== 1) throw new Error("fragment");
+              if (document.getElementById("secret")) throw new Error("template id leaked");
+              if (view.content.querySelector("b").id !== "secret") throw new Error("fragment query");
+              if (pic.getAttribute("alt") !== "a & b" || pic.getAttribute("hidden") !== "") throw new Error("attrs:" + pic.getAttribute("alt"));
+              if (pic.innerHTML !== "") throw new Error("img html");
+              var meta = document.createElement("meta");
+              meta.setAttribute("name", "viewport");
+              meta.setAttribute("content", "width=device-width");
+              var copy = document.createElement("meta");
+              copy.setAttribute("content", "width=device-width");
+              copy.setAttribute("name", "viewport");
+              if (typeof meta.isEqualNode !== "function" || !meta.isEqualNode(copy)) throw new Error("isEqualNode");
+              copy.setAttribute("content", "other");
+              if (meta.isEqualNode(copy)) throw new Error("isEqualNode differed");
+              var cloned = meta.cloneNode(true);
+              cloned.setAttribute("data-next-head", "");
+              if (meta.isEqualNode(cloned) || !meta.isSameNode(meta) || meta.isSameNode(cloned)) throw new Error("clone");
+              var nonce = document.createElement("meta");
+              nonce.setAttribute("nonce", "abc");
+              if (nonce.nonce !== "abc") throw new Error("nonce");
+              var hello = document.createTextNode("Hi");
+              if (!hello.isEqualNode(document.createTextNode("Hi"))) throw new Error("text equal");
+              document.title = "hydrated";
+            </script>"#,
+        );
+        let session = Session::open_at(doc, "https://react.dev/", |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "hydrated");
     }
 }

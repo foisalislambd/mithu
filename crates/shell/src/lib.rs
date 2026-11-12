@@ -1545,7 +1545,7 @@ impl Browser {
             author.push('\n');
         }
         let mut seen = Vec::new();
-        for href in document.stylesheet_links.iter().take(12) {
+        for href in document.stylesheet_links.iter().take(40) {
             if let Some(css) = fetch_text(&base, href)
                 && css.len() <= 1_500_000
             {
@@ -3497,7 +3497,7 @@ fn author_css(document: &Document, base: &Url) -> String {
         author.push('\n');
     }
     let mut seen = Vec::new();
-    for href in document.stylesheet_links.iter().take(12) {
+    for href in document.stylesheet_links.iter().take(40) {
         if let Some(css) = fetch_text(base, href)
             && css.len() <= 1_500_000
         {

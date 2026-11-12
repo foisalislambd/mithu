@@ -1023,12 +1023,19 @@ fn media_bound(part: &str) -> Option<MediaBound> {
     let mut rest = lower.as_str();
     while let Some(start) = rest.find('(') {
         let after = &rest[start + 1..];
-        let end = after.find(')')?;
+        let end = matching_media_paren(after)?;
         let feature = after[..end].trim();
         if let Some(value) = feature.strip_prefix("min-width:") {
             min_width = Some(media_px(value.trim())?);
         } else if let Some(value) = feature.strip_prefix("max-width:") {
             max_width = Some(media_px(value.trim())?);
+        } else if let Some((cmp, width)) = width_comparison(feature) {
+            match cmp {
+                WidthCmp::GreaterEqual => min_width = Some(min_width.unwrap_or(width).max(width)),
+                WidthCmp::Greater => min_width = Some(min_width.unwrap_or(width).max(width + 0.01)),
+                WidthCmp::LessEqual => max_width = Some(max_width.unwrap_or(width).min(width)),
+                WidthCmp::Less => max_width = Some(max_width.unwrap_or(width).min(width - 0.01)),
+            }
         } else {
             return None;
         }
@@ -1045,8 +1052,67 @@ fn media_bound(part: &str) -> Option<MediaBound> {
     })
 }
 
+#[derive(Clone, Copy)]
+enum WidthCmp {
+    GreaterEqual,
+    Greater,
+    LessEqual,
+    Less,
+}
+
+fn matching_media_paren(input: &str) -> Option<usize> {
+    let mut depth = 1i32;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn width_comparison(feature: &str) -> Option<(WidthCmp, f32)> {
+    let feature = feature.trim();
+    let ops = [
+        (">=", WidthCmp::GreaterEqual),
+        ("<=", WidthCmp::LessEqual),
+        (">", WidthCmp::Greater),
+        ("<", WidthCmp::Less),
+    ];
+    for (op, cmp) in ops {
+        let Some((left, right)) = feature.split_once(op) else {
+            continue;
+        };
+        let left = left.trim();
+        let right = right.trim();
+        if left == "width" {
+            return Some((cmp, media_px(right)?));
+        }
+        if right == "width" {
+            let flipped = match cmp {
+                WidthCmp::GreaterEqual => WidthCmp::LessEqual,
+                WidthCmp::Greater => WidthCmp::Less,
+                WidthCmp::LessEqual => WidthCmp::GreaterEqual,
+                WidthCmp::Less => WidthCmp::Greater,
+            };
+            return Some((flipped, media_px(left)?));
+        }
+    }
+    None
+}
+
 fn media_px(value: &str) -> Option<f32> {
     let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("calc(") && lower.ends_with(')') {
+        return eval_media_sum(value[5..value.len() - 1].trim());
+    }
     if let Some(number) = value.strip_suffix("px") {
         return number.trim().parse().ok();
     }
@@ -1055,6 +1121,87 @@ fn media_px(value: &str) -> Option<f32> {
         .or_else(|| value.strip_suffix("em"))
     {
         return number.trim().parse::<f32>().ok().map(|em| em * 16.0);
+    }
+    None
+}
+
+fn eval_media_sum(expr: &str) -> Option<f32> {
+    let mut total = 0.0;
+    let mut sign = 1.0;
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let flush = |sign: f32, current: &str, total: &mut f32| -> Option<()> {
+        let term = current.trim();
+        if term.is_empty() {
+            return Some(());
+        }
+        *total += sign * eval_media_product(term)?;
+        Some(())
+    };
+    for ch in expr.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            '+' if depth == 0 => {
+                flush(sign, &current, &mut total)?;
+                current.clear();
+                sign = 1.0;
+            }
+            '-' if depth == 0 && !current.trim().is_empty() => {
+                flush(sign, &current, &mut total)?;
+                current.clear();
+                sign = -1.0;
+            }
+            _ => current.push(ch),
+        }
+    }
+    flush(sign, &current, &mut total)?;
+    Some(total)
+}
+
+fn eval_media_product(expr: &str) -> Option<f32> {
+    let expr = expr.trim();
+    if let Some((left, right)) = split_media_op(expr, '*') {
+        return Some(eval_media_factor(left)? * eval_media_factor(right)?);
+    }
+    if let Some((left, right)) = split_media_op(expr, '/') {
+        let divisor = eval_media_factor(right)?;
+        if divisor == 0.0 {
+            return None;
+        }
+        return Some(eval_media_factor(left)? / divisor);
+    }
+    eval_media_factor(expr)
+}
+
+fn eval_media_factor(expr: &str) -> Option<f32> {
+    let expr = expr.trim();
+    if let Some(inner) = expr.strip_prefix('(').and_then(|rest| rest.strip_suffix(')')) {
+        return eval_media_sum(inner);
+    }
+    if let Ok(number) = expr.parse::<f32>() {
+        return Some(number);
+    }
+    media_px(expr)
+}
+
+fn split_media_op(expr: &str, op: char) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    for (index, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ if ch == op && depth == 0 => {
+                return Some((&expr[..index], &expr[index + ch.len_utf8()..]));
+            }
+            _ => {}
+        }
     }
     None
 }
@@ -1147,5 +1294,29 @@ mod tests {
                 .map(|media| { media.alternatives[0].min_width }),
             Some(Some(640.0))
         );
+    }
+
+    #[test]
+    fn width_range_queries_evaluate_calc() {
+        let sheet = parse_css(
+            "@media (width < calc(1rem * 2 + 15rem + 2rem + 31rem)) { .stack { display: block } }
+             @media (width >= calc(1rem * 2 + (15rem + 2rem) * 2 + 31rem)) { .wide { display: grid } }
+             @media (min-width: calc(640px - 1px)) { .mid { color: red } }",
+        );
+        let bound = |class: &str| {
+            sheet.rules.iter().find(|rule| {
+                rule.selectors.iter().any(|selector| {
+                    selector.compounds.iter().any(|compound| {
+                        compound.classes.iter().any(|item| item == class)
+                    })
+                })
+            })
+        };
+        let stack = bound("stack").and_then(|rule| rule.media.as_ref()).unwrap();
+        assert!(stack.alternatives[0].max_width.unwrap() < 800.0);
+        let wide = bound("wide").and_then(|rule| rule.media.as_ref()).unwrap();
+        assert!(wide.alternatives[0].min_width.unwrap() > 1000.0);
+        let mid = bound("mid").and_then(|rule| rule.media.as_ref()).unwrap();
+        assert!((mid.alternatives[0].min_width.unwrap() - 639.0).abs() < 0.1);
     }
 }

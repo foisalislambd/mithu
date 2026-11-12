@@ -21,6 +21,9 @@ pub struct Document {
     pub import_maps: Vec<String>,
     /// Child and attribute changes since the last observer delivery.
     pub mutations: Vec<DomMutation>,
+    /// `<template>` elements keep their contents in a detached fragment, the
+    /// way the HTML parser does, so the template itself has no child nodes.
+    pub template_contents: Vec<(NodeId, NodeId)>,
 }
 
 /// One DOM change a `MutationObserver` can report.
@@ -67,6 +70,15 @@ pub struct ElementData {
     pub classes: Vec<String>,
 }
 
+fn attributes_equal(left: &[(String, String)], right: &[(String, String)]) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(name, value)| {
+            right
+                .iter()
+                .any(|(other, other_value)| name == other && value == other_value)
+        })
+}
+
 impl Document {
     pub fn new() -> Self {
         Self {
@@ -83,7 +95,28 @@ impl Document {
             base_href: None,
             import_maps: Vec::new(),
             mutations: Vec::new(),
+            template_contents: Vec::new(),
         }
+    }
+
+    pub fn template_content(&self, template: NodeId) -> Option<NodeId> {
+        self.template_contents
+            .iter()
+            .find(|(id, _)| *id == template)
+            .map(|(_, fragment)| *fragment)
+    }
+
+    /// True when `id` is in the document tree. Template contents and other
+    /// detached nodes are not.
+    pub fn is_connected(&self, id: NodeId) -> bool {
+        let mut current = Some(id);
+        while let Some(node) = current {
+            if node == self.root {
+                return true;
+            }
+            current = self.nodes.get(node.0).and_then(|item| item.parent);
+        }
+        false
     }
 
     pub fn node(&self, id: NodeId) -> &Node {
@@ -144,6 +177,7 @@ impl Document {
             NodeData::Element(_) | NodeData::Document => self.nodes[id.0]
                 .children
                 .iter()
+                .filter(|child| !matches!(self.nodes[child.0].data, NodeData::Comment(_)))
                 .map(|child| self.text_content(*child))
                 .collect(),
             NodeData::Comment(text) => text.clone(),
@@ -298,6 +332,71 @@ impl Document {
         if let Some(node) = self.nodes.get_mut(id.0) {
             node.parent = None;
         }
+    }
+
+    /// Blink's `Node.isEqualNode`: same type, and for elements the same tag,
+    /// the same attributes regardless of order, and equal children in order.
+    pub fn nodes_equal(&self, left: NodeId, right: NodeId) -> bool {
+        if left == right {
+            return true;
+        }
+        let (Some(a), Some(b)) = (self.nodes.get(left.0), self.nodes.get(right.0)) else {
+            return false;
+        };
+        match (&a.data, &b.data) {
+            (NodeData::Text(left), NodeData::Text(right))
+            | (NodeData::Comment(left), NodeData::Comment(right)) => left == right,
+            (NodeData::Document, NodeData::Document) => self.children_equal(left, right),
+            (NodeData::Element(left_el), NodeData::Element(right_el)) => {
+                left_el.name == right_el.name
+                    && attributes_equal(&left_el.attrs, &right_el.attrs)
+                    && self.children_equal(left, right)
+            }
+            _ => false,
+        }
+    }
+
+    fn children_equal(&self, left: NodeId, right: NodeId) -> bool {
+        let left_children = &self.nodes[left.0].children;
+        let right_children = &self.nodes[right.0].children;
+        left_children.len() == right_children.len()
+            && left_children
+                .iter()
+                .zip(right_children)
+                .all(|(left, right)| self.nodes_equal(*left, *right))
+    }
+
+    /// A detached copy. `deep` copies descendants. Template contents are copied
+    /// with the template, since they are not child nodes.
+    pub fn clone_node(&mut self, id: NodeId, deep: bool) -> NodeId {
+        let Some(source) = self.nodes.get(id.0) else {
+            return id;
+        };
+        let data = source.data.clone();
+        let children = if deep {
+            source.children.clone()
+        } else {
+            Vec::new()
+        };
+        let fragment = self.template_content(id);
+        let copy = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            parent: None,
+            children: Vec::new(),
+            data,
+        });
+        if deep {
+            for child in children {
+                let cloned = self.clone_node(child, true);
+                self.nodes[cloned.0].parent = Some(copy);
+                self.nodes[copy.0].children.push(cloned);
+            }
+        }
+        if let Some(fragment) = fragment {
+            let cloned = self.clone_node(fragment, deep);
+            self.template_contents.push((copy, cloned));
+        }
+        copy
     }
 
     pub fn contains_node(&self, ancestor: NodeId, node: NodeId) -> bool {

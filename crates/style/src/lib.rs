@@ -54,6 +54,9 @@ pub enum Display {
     /// `inline-flex`: a flex container that shrinks to its contents.
     InlineFlex,
     Grid,
+    /// `display: contents`. The element generates no box; its children belong
+    /// to its parent for layout.
+    Contents,
     None,
 }
 
@@ -1865,6 +1868,7 @@ fn parse_display(value: &str) -> Option<Display> {
         "flex" => Display::Flex,
         "inline-flex" => Display::InlineFlex,
         "grid" | "inline-grid" => Display::Grid,
+        "contents" => Display::Contents,
         "none" => Display::None,
         _ => return None,
     })
@@ -2107,24 +2111,14 @@ fn parse_grid_tracks(value: &str) -> Option<Vec<GridTrack>> {
     }
     let mut tokens = tokenize_tracks(value);
     let mut tracks = Vec::new();
-    let mut line_name = 0i32;
     while !tokens.is_empty() {
         if tokens[0].starts_with('[') {
-            if tokens[0].ends_with(']') && tokens[0].len() > 1 {
-                tokens.remove(0);
-                continue;
+            while !tokens.is_empty() {
+                let token = tokens.remove(0);
+                if token.ends_with(']') {
+                    break;
+                }
             }
-            line_name += 1;
-            tokens.remove(0);
-            continue;
-        }
-        if tokens[0] == "]" {
-            line_name = (line_name - 1).max(0);
-            tokens.remove(0);
-            continue;
-        }
-        if line_name > 0 {
-            tokens.remove(0);
             continue;
         }
         if tokens[0].eq_ignore_ascii_case("repeat") {

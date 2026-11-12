@@ -91,6 +91,12 @@ impl Parser {
             }
             self.dispatch(token);
         }
+        let open: Vec<NodeId> = self.stack.clone();
+        for id in open {
+            if self.doc.element_name(id) == Some("template") {
+                self.seal_template(id);
+            }
+        }
     }
 
     fn pull(&mut self) -> Token {
@@ -1297,7 +1303,33 @@ impl Parser {
         self.mode = Mode::Text;
     }
 
+    fn inside_template(&self, id: NodeId) -> bool {
+        let mut current = self.doc.node(id).parent;
+        while let Some(parent) = current {
+            if self.doc.element_name(parent) == Some("template") {
+                return true;
+            }
+            current = self.doc.node(parent).parent;
+        }
+        false
+    }
+
+    fn seal_template(&mut self, id: NodeId) {
+        if self.doc.template_content(id).is_some() {
+            return;
+        }
+        let fragment = self.doc.create_element_detached("mithu-fragment");
+        let children = std::mem::take(&mut self.doc.nodes[id.0].children);
+        for child in children {
+            self.doc.append_child(fragment, child);
+        }
+        self.doc.template_contents.push((id, fragment));
+    }
+
     fn capture_raw_element(&mut self, id: NodeId, name: &str) {
+        if self.inside_template(id) {
+            return;
+        }
         let text = self.doc.text_content(id);
         match name {
             "title" => {
@@ -1427,6 +1459,9 @@ impl Parser {
         while let Some(id) = self.stack.pop() {
             let name = self.doc.element_name(id).unwrap_or("");
             if name == tag {
+                if name == "template" {
+                    self.seal_template(id);
+                }
                 break;
             }
             if name == "html" || name == "body" {

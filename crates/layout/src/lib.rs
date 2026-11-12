@@ -179,7 +179,7 @@ fn layout_node(
         }
     }
     let display = effective_display(doc, styles, id);
-    if display == Display::None {
+    if display == Display::None || display == Display::Contents {
         return None;
     }
     let href = own_href(doc, id).or(inherited_href);
@@ -389,7 +389,9 @@ fn layout_node(
     {
         specified_height = Some((height - padding.top - padding.bottom - border_h).max(0.0));
     }
-    let mut content_h = flowed.max(specified_height.unwrap_or(0.0));
+    // A specified height is the border box's content size. Content that does
+    // not fit overflows; it does not stretch the box the way `height: auto` does.
+    let mut content_h = specified_height.unwrap_or(flowed);
     if let Some(max) = resolve_height(style.max_height, font, view) {
         content_h = content_h.min(max);
     }
@@ -575,7 +577,7 @@ fn layout_blocks(
         *y += height;
     };
     let mut floats = Vec::new();
-    for child in doc.node(id).children.clone() {
+    for child in box_children(doc, styles, id) {
         let floated = style_of(styles, child).float;
         if matches!(floated, FloatSide::Left | FloatSide::Right) && !is_skipped(doc, styles, child)
         {
@@ -751,7 +753,7 @@ fn layout_grid(
     let mut cursor_col = 0usize;
     let mut cursor_row = 0usize;
     let mut max_column = style.grid_columns.len().max(1);
-    for child in doc.node(id).children.clone() {
+    for child in box_children(doc, styles, id) {
         if is_skipped(doc, styles, child) {
             continue;
         }
@@ -845,7 +847,7 @@ fn layout_grid(
             span,
             max_column.max(column + span),
         );
-        cells.push((child, column, span, row));
+        cells.push((child, column, span, row, row_span));
     }
     let tracks = if !style.grid_columns.is_empty() {
         let mut tracks = style.grid_columns.clone();
@@ -869,13 +871,12 @@ fn layout_grid(
     let widths = resolve_tracks(&tracks, content_w, gap);
     let row_count = cells
         .iter()
-        .map(|(_, _, _, row)| *row)
+        .map(|(_, _, _, row, row_span)| *row + *row_span)
         .max()
-        .map(|row| row + 1)
         .unwrap_or(0);
     let mut row_heights = vec![0.0_f32; row_count];
     let mut laid = Vec::new();
-    for (child, column, span, row) in cells {
+    for (child, column, span, row, row_span) in cells {
         let column = column.min(widths.len().saturating_sub(1));
         let span = span.min(widths.len() - column).max(1);
         let x = content_x + widths[..column].iter().sum::<f32>() + gap * column as f32;
@@ -897,10 +898,24 @@ fn layout_grid(
             let dx = x - layout.rect.x + layout.margin.left;
             translate(&mut layout, dx, 0.0);
             let outer = layout.margin.top + layout.rect.height + layout.margin.bottom;
-            if row < row_heights.len() {
-                row_heights[row] = row_heights[row].max(outer);
-            }
-            laid.push((row, layout));
+            laid.push((row, row_span, outer, layout));
+        }
+    }
+    for (row, row_span, outer, _) in &laid {
+        if *row_span <= 1 && *row < row_heights.len() {
+            row_heights[*row] = row_heights[*row].max(*outer);
+        }
+    }
+    for (row, row_span, outer, _) in &laid {
+        if *row_span <= 1 || row_count == 0 {
+            continue;
+        }
+        let end = (*row + *row_span).min(row_count).max(*row + 1);
+        let gaps = gap * (end - *row).saturating_sub(1) as f32;
+        let have = row_heights[*row..end].iter().sum::<f32>() + gaps;
+        if *outer > have {
+            let last = end - 1;
+            row_heights[last] += *outer - have;
         }
     }
     let mut y = content_y;
@@ -913,7 +928,7 @@ fn layout_grid(
         }
     }
     let mut placed = Vec::new();
-    for (row, mut layout) in laid {
+    for (row, _, _, mut layout) in laid {
         let dy = row_y[row] + layout.margin.top - layout.rect.y;
         translate(&mut layout, 0.0, dy);
         placed.push(layout);
@@ -1041,7 +1056,7 @@ fn collect_children(
     view: View,
 ) -> Vec<Item> {
     let mut items = Vec::new();
-    for child in doc.node(id).children.clone() {
+    for child in box_children(doc, styles, id) {
         items.extend(collect_node(
             doc,
             styles,
@@ -1542,18 +1557,18 @@ fn effective_display(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> Di
 }
 
 fn contains_block(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool {
-    for child in &doc.node(id).children {
-        if doc.element_name(*child).is_none() {
+    for child in box_children(doc, styles, id) {
+        if doc.element_name(child).is_none() {
             continue;
         }
-        let display = style_of(styles, *child).display;
+        let display = style_of(styles, child).display;
         if display == Display::None {
             continue;
         }
         if matches!(
             display,
             Display::Block | Display::ListItem | Display::Flex | Display::Grid
-        ) || contains_block(doc, styles, *child)
+        ) || contains_block(doc, styles, child)
         {
             return true;
         }
@@ -1562,10 +1577,34 @@ fn contains_block(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool 
 }
 
 fn has_block_child(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool {
-    doc.node(id)
-        .children
+    box_children(doc, styles, id)
         .iter()
         .any(|child| is_block_child(doc, styles, *child))
+}
+
+/// Children that generate boxes. `display: contents` elements are replaced by
+/// their own children, matching the element they would have been laid out in.
+fn box_children(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    append_box_children(doc, styles, id, &mut out);
+    out
+}
+
+fn append_box_children(
+    doc: &Document,
+    styles: &[ComputedStyle],
+    id: NodeId,
+    out: &mut Vec<NodeId>,
+) {
+    for child in doc.node(id).children.clone() {
+        if doc.element_name(child).is_some()
+            && style_of(styles, child).display == Display::Contents
+        {
+            append_box_children(doc, styles, child, out);
+        } else {
+            out.push(child);
+        }
+    }
 }
 
 fn is_block_child(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool {
@@ -1786,7 +1825,7 @@ fn layout_flex(
     ) {
         items.push((before, 0.0, 0.0));
     }
-    for child in doc.node(id).children.clone() {
+    for child in box_children(doc, styles, id) {
         if let NodeData::Text(text) = &doc.node(child).data {
             if text.trim().is_empty() {
                 continue;
@@ -2113,7 +2152,7 @@ fn layout_absolute_children(
     view: View,
 ) -> Vec<LayoutBox> {
     let mut placed = Vec::new();
-    for child in doc.node(id).children.clone() {
+    for child in box_children(doc, styles, id) {
         if !is_absolute(doc, styles, child) {
             continue;
         }
@@ -3087,6 +3126,140 @@ mod tests {
             main.rect.width
         );
         assert!(side.rect.x > main.rect.x + 200.0, "side x {}", side.rect.x);
+    }
+
+    #[test]
+    fn vector_toolbar_sits_above_a_wide_lead() {
+        let doc = parse_html(
+            r#"<div class="mw-page-container-inner">
+              <div class="vector-column-start" id="toc">Contents</div>
+              <div class="mw-content-container">
+                <main class="mw-body">
+                  <header class="vector-page-titlebar" id="title">
+                    <h1>Rust</h1>
+                    <div class="mw-portlet-lang vector-dropdown">
+                      <span>60 languages</span>
+                      <div class="vector-dropdown-content">English French German Spanish Italian Portuguese Dutch Swedish Norwegian Danish Finnish</div>
+                    </div>
+                  </header>
+                  <div class="vector-page-toolbar" id="bar">Read Edit View history</div>
+                  <div class="vector-column-end" id="end">Appearance</div>
+                  <div id="bodyContent">
+                    <div id="siteSub">From Wikipedia, the free encyclopedia</div>
+                    <p id="lead">Rust is a general-purpose programming language.</p>
+                  </div>
+                </main>
+              </div>
+            </div>"#,
+        );
+        let styles = style_document(
+            &doc,
+            r#"
+            .mw-page-container-inner { display:grid; column-gap:24px;
+              grid-template: min-content 1fr min-content / 12.25rem minmax(0, 1fr);
+              grid-template-areas: "siteNotice siteNotice" "columnStart pageContent" "footer footer"; }
+            .vector-column-start { grid-area: columnStart; }
+            .mw-content-container { grid-area: pageContent; }
+            @media screen and (min-width: 1120px) {
+              .mw-body { display:grid;
+                grid-template: min-content min-content min-content 1fr / minmax(0, 59.25rem) min-content;
+                grid-template-areas: "titlebar-cx ." "titlebar columnEnd" "toolbar columnEnd" "content columnEnd"; }
+              .mw-body .vector-page-titlebar { grid-area: titlebar; }
+              .mw-body .vector-page-toolbar { grid-area: toolbar; }
+              .mw-body #bodyContent { grid-area: content; }
+              .mw-body .vector-column-end { grid-area: columnEnd; }
+            }
+            .vector-dropdown .vector-dropdown-content { position:absolute; top:100%; height:0; overflow:hidden; }
+            .mw-body .mw-portlet-lang { float:right; }
+            #siteSub { display:none; }
+            "#,
+        );
+        let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+        let bar = find(&tree.root, doc.get_element_by_id("bar").unwrap()).unwrap();
+        let lead = find(&tree.root, doc.get_element_by_id("lead").unwrap()).unwrap();
+        let toc = find(&tree.root, doc.get_element_by_id("toc").unwrap()).unwrap();
+        assert!(
+            lead.rect.width > 400.0,
+            "lead squeezed to {}",
+            lead.rect.width
+        );
+        assert!(
+            lead.rect.y + 1.0 >= bar.rect.bottom(),
+            "lead {} overlaps toolbar bottom {}",
+            lead.rect.y,
+            bar.rect.bottom()
+        );
+        assert!(
+            lead.rect.x > toc.rect.right() - 2.0,
+            "lead x {} toc right {}",
+            lead.rect.x,
+            toc.rect.right()
+        );
+    }
+
+    #[test]
+    fn a_spanning_grid_item_does_not_stretch_the_first_row() {
+        let doc = parse_html(
+            r#"<div id="page" style="display:grid;width:400px;grid-template-columns:1fr 40px;grid-template-areas:'title side' 'tools side' 'body side'">
+              <div id="title" style="grid-area:title;height:20px"></div>
+              <div id="tools" style="grid-area:tools;height:16px"></div>
+              <div id="side" style="grid-area:side;height:120px"></div>
+              <div id="body" style="grid-area:body;height:30px"></div>
+            </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let title = find(&tree.root, doc.get_element_by_id("title").unwrap()).unwrap();
+        let tools = find(&tree.root, doc.get_element_by_id("tools").unwrap()).unwrap();
+        let body = find(&tree.root, doc.get_element_by_id("body").unwrap()).unwrap();
+        assert!(
+            (tools.rect.y - (title.rect.bottom())).abs() < 2.0,
+            "toolbar y {} title bottom {}",
+            tools.rect.y,
+            title.rect.bottom()
+        );
+        assert!(
+            body.rect.y > tools.rect.bottom() - 2.0 && body.rect.y < tools.rect.bottom() + 8.0,
+            "article y {} toolbar bottom {}",
+            body.rect.y,
+            tools.rect.bottom()
+        );
+    }
+
+    #[test]
+    fn display_contents_keeps_the_article_beside_the_sidebar() {
+        let doc = parse_html(
+            r#"<div id="grid" style="display:grid;width:400px;grid-template-columns:120px 1fr;grid-template-areas:'side title' 'side body'">
+              <div id="side" style="grid-area:side;height:200px"></div>
+              <div style="display:contents">
+                <h1 id="title" style="grid-area:title;height:24px">Window</h1>
+                <div id="body" style="grid-area:body;height:40px">Article</div>
+              </div>
+            </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let title = find(&tree.root, doc.get_element_by_id("title").unwrap()).unwrap();
+        let body = find(&tree.root, doc.get_element_by_id("body").unwrap()).unwrap();
+        let side = find(&tree.root, doc.get_element_by_id("side").unwrap()).unwrap();
+        assert!(title.rect.x > side.rect.right() - 2.0, "title x {}", title.rect.x);
+        assert!(
+            body.rect.y < title.rect.bottom() + 40.0 && body.rect.y < side.rect.height,
+            "article dropped below the sidebar: title {} body {}",
+            title.rect.bottom(),
+            body.rect.y
+        );
+    }
+
+    #[test]
+    fn specified_height_does_not_grow_with_overflow() {
+        let doc = parse_html(
+            r#"<div id="host"><div id="menu" style="height:0;overflow:hidden"><div style="height:200px"></div></div><div id="next" style="height:10px"></div></div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
+        let next = find(&tree.root, doc.get_element_by_id("next").unwrap()).unwrap();
+        assert!(next.rect.y < 20.0, "next y {}", next.rect.y);
     }
 
     #[test]
