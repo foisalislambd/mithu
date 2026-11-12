@@ -406,6 +406,16 @@ fn layout_node(
     // A specified height is the border box's content size. Content that does
     // not fit overflows; it does not stretch the box the way `height: auto` does.
     let mut content_h = specified_height.unwrap_or(flowed);
+    // An empty box with `aspect-ratio` takes its height from the used width.
+    // GitHub's hero video is `width: 100%; height: auto; aspect-ratio: 1600/1078`.
+    if specified_height.is_none()
+        && flowed == 0.0
+        && let Some((ratio_w, ratio_h)) = style.aspect_ratio
+        && ratio_w > 0.0
+        && content_w > 0.0
+    {
+        content_h = content_w * ratio_h / ratio_w;
+    }
     if let Some(max) = resolve_height(style.max_height, font, view) {
         content_h = content_h.min(max);
     }
@@ -982,7 +992,10 @@ fn find_grid_area(areas: &[Vec<String>], name: &str) -> Option<(usize, usize, us
             }
         }
     }
-    found.then_some((
+    if !found {
+        return None;
+    }
+    Some((
         min_col,
         min_row,
         max_col - min_col + 1,
@@ -1121,7 +1134,9 @@ fn collect_node(
             // would drop it, so the line beside an infobox paints through it.
             let replaced = matches!(
                 doc.element_name(id),
-                Some("img" | "video" | "canvas" | "iframe" | "svg" | "input" | "textarea" | "select")
+                Some(
+                    "img" | "video" | "canvas" | "iframe" | "svg" | "input" | "textarea" | "select"
+                )
             );
             if matches!(
                 display,
@@ -1577,6 +1592,20 @@ fn effective_display(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> Di
     let display = style_of(styles, id).display;
     if display == Display::None {
         return Display::None;
+    }
+    // Flex and grid items are blockified, so a list item in a navigation bar
+    // does not keep an outside marker or a separate line box.
+    if let Some(parent) = doc.parent_element(id) {
+        let parent_display = style_of(styles, parent).display;
+        if matches!(
+            parent_display,
+            Display::Flex | Display::InlineFlex | Display::Grid
+        ) && matches!(
+            display,
+            Display::Inline | Display::InlineBlock | Display::ListItem
+        ) {
+            return Display::Block;
+        }
     }
     if display == Display::Inline && contains_block(doc, styles, id) {
         return Display::Block;
@@ -3394,8 +3423,16 @@ mod tests {
         let tree = layout_tree(&doc, &styles, 800.0, 600.0, &NaiveMetrics, &HashMap::new());
         let flag = find(&tree.root, doc.get_element_by_id("flag").unwrap()).unwrap();
         let tag = find(&tree.root, doc.get_element_by_id("tag").unwrap()).unwrap();
-        assert!(flag.rect.width < 80.0, "float stretched to {}", flag.rect.width);
-        assert!(tag.rect.width > 400.0, "tagline squeezed to {}", tag.rect.width);
+        assert!(
+            flag.rect.width < 80.0,
+            "float stretched to {}",
+            flag.rect.width
+        );
+        assert!(
+            tag.rect.width > 400.0,
+            "tagline squeezed to {}",
+            tag.rect.width
+        );
     }
 
     #[test]
@@ -3624,9 +3661,8 @@ mod tests {
 
     #[test]
     fn an_inline_image_lifts_the_line() {
-        let doc = parse_html(
-            r#"<p id="p">Hi <img id="pic" width="40" height="80" alt=""> tail</p>"#,
-        );
+        let doc =
+            parse_html(r#"<p id="p">Hi <img id="pic" width="40" height="80" alt=""> tail</p>"#);
         let styles = style_document(&doc, "");
         let tree = layout_tree(&doc, &styles, 400.0, 200.0, &NaiveMetrics, &HashMap::new());
         let pic = find(&tree.root, doc.get_element_by_id("pic").unwrap()).unwrap();
@@ -3708,6 +3744,91 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_grid_area_does_not_overflow() {
+        let doc = parse_html(
+            r#"<div id="g" style="display:grid;width:200px;grid-template-areas:'a'">
+                <div id="b" style="grid-area:missing;height:12px">x</div>
+              </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 400.0, 300.0, &NaiveMetrics, &HashMap::new());
+        assert!(find(&tree.root, doc.get_element_by_id("b").unwrap()).is_some());
+    }
+
+    #[test]
+    fn aspect_ratio_gives_an_empty_video_a_height() {
+        let doc = parse_html(r#"<div id="hero"><video id="clip"></video></div>"#);
+        let styles = style_document(
+            &doc,
+            "#hero { width: 800px } video { width: 100%; height: auto; aspect-ratio: 1600/1078; display: block }",
+        );
+        let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+        let clip = find(&tree.root, doc.get_element_by_id("clip").unwrap()).unwrap();
+        let expected = 800.0 * 1078.0 / 1600.0;
+        assert!(
+            (clip.rect.height - expected).abs() < 4.0,
+            "video height {} expected {expected}",
+            clip.rect.height
+        );
+    }
+
+    #[test]
+    fn github_nav_labels_share_the_bar_with_search() {
+        // Reduced from the live marketing-header sheet: the desktop bar is a
+        // row, the menu list is a row, and Pricing is a link beside the buttons.
+        let css = r#"
+            .link { display: flex; align-items: center; height: 68px; padding: 24px; }
+            .bar { display: flex; flex-direction: column; width: 100%; }
+            .menu { display: flex; flex-direction: column; width: 100%; padding-top: 68px; }
+            .wrap { display: flex; flex-direction: column; width: 100%; }
+            .cta { display: flex; width: 100%; }
+            .search { width: 100%; height: 36px; }
+            @media (width >= 1012px) {
+                .link { height: 28px; padding: 0 8px; }
+                .list { display: flex; margin: 0; padding: 0; }
+                .bar { flex-direction: row; align-items: center; min-height: 68px; }
+                .menu { width: auto; padding-top: 0; }
+                .wrap { flex-direction: row; align-items: center; }
+                .cta { width: auto; margin-left: 16px; flex-direction: row; }
+                .search { width: 200px; }
+            }
+        "#;
+        let doc = parse_html(
+            r#"<header>
+                <div id="bar" class="bar">
+                  <div id="logo">logo</div>
+                  <div id="menu" class="menu">
+                    <div id="wrap" class="wrap">
+                      <ul id="list" class="list">
+                        <li><button id="products" class="link">Products</button></li>
+                        <li><button id="dev" class="link">Developers</button></li>
+                        <li><a id="pricing" class="link">Pricing</a></li>
+                      </ul>
+                      <div id="cta" class="cta"><div id="search" class="search">Search</div></div>
+                    </div>
+                  </div>
+                </div>
+              </header>"#,
+        );
+        let styles = style_document(&doc, css);
+        let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+        let products = find(&tree.root, doc.get_element_by_id("products").unwrap()).unwrap();
+        let pricing = find(&tree.root, doc.get_element_by_id("pricing").unwrap()).unwrap();
+        let search = find(&tree.root, doc.get_element_by_id("search").unwrap()).unwrap();
+        assert!(
+            (products.rect.y - pricing.rect.y).abs() < 8.0,
+            "labels should share a baseline: products {:?} pricing {:?}",
+            products.rect,
+            pricing.rect
+        );
+        assert!(
+            search.rect.x + 1.0 >= pricing.rect.right(),
+            "search {:?} should start after pricing {:?}",
+            search.rect,
+            pricing.rect
+        );
+    }
+
     #[test]
     fn github_header_hides_the_menu_button_at_desktop() {
         // Reduced from github.githubassets.com marketing-header.module.css.
@@ -3752,6 +3873,7 @@ mod tests {
         assert!(row.rect.width > 600.0, "row width {}", row.rect.width);
     }
 
+    #[test]
     fn wpt_css_subset_reports_a_pass_rate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/css");
         let mut files: Vec<_> = std::fs::read_dir(&root)
@@ -3779,7 +3901,8 @@ mod tests {
                 }
                 "two-sidebars" => {
                     let left = find(&tree.root, doc.get_element_by_id("left").unwrap()).unwrap();
-                    let article = find(&tree.root, doc.get_element_by_id("article").unwrap()).unwrap();
+                    let article =
+                        find(&tree.root, doc.get_element_by_id("article").unwrap()).unwrap();
                     let right = find(&tree.root, doc.get_element_by_id("right").unwrap()).unwrap();
                     article.rect.x + 1.0 >= left.rect.right()
                         && right.rect.x + 1.0 >= article.rect.right()

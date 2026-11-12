@@ -223,6 +223,8 @@ pub struct ComputedStyle {
     pub max_width: Length,
     pub min_height: Length,
     pub max_height: Length,
+    /// `aspect-ratio` as width/height, when the used height is automatic.
+    pub aspect_ratio: Option<(f32, f32)>,
     pub opacity: f32,
     pub flex_direction: FlexDirection,
     pub flex_reverse: bool,
@@ -298,6 +300,7 @@ impl ComputedStyle {
             max_width: Length::Auto,
             min_height: Length::Auto,
             max_height: Length::Auto,
+            aspect_ratio: None,
             opacity: 1.0,
             flex_direction: FlexDirection::Row,
             flex_reverse: false,
@@ -340,6 +343,10 @@ impl ComputedStyle {
 pub struct StyleState {
     pub hover: Option<NodeId>,
     pub viewport_width: f32,
+    /// Classes, ids, and tags of ancestors. A selector whose ancestor
+    /// compounds need a token that is missing here cannot match.
+    pub ancestor_bloom: u64,
+    pub filter_ancestors: bool,
 }
 
 impl Default for StyleState {
@@ -347,8 +354,48 @@ impl Default for StyleState {
         Self {
             hover: None,
             viewport_width: 1280.0,
+            ancestor_bloom: 0,
+            filter_ancestors: false,
         }
     }
+}
+
+fn token_bloom(kind: u8, name: &str) -> u64 {
+    let mut hash = 0x811c9dc5u64 ^ kind as u64;
+    for byte in name.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    (1u64 << (hash & 63)) | (1u64 << ((hash >> 8) & 63))
+}
+
+fn ancestor_token_mask(selector: &Selector) -> u64 {
+    let Some(last) = selector.compounds.len().checked_sub(1) else {
+        return 0;
+    };
+    let mut mask = 0u64;
+    for (index, compound) in selector.compounds.iter().take(last).enumerate() {
+        // A compound before `+` or `~` is a sibling, not an ancestor.
+        if matches!(
+            selector.combinators.get(index),
+            Some(Combinator::NextSibling | Combinator::SubsequentSibling)
+        ) {
+            continue;
+        }
+        for class in &compound.classes {
+            mask |= token_bloom(1, class);
+        }
+        if let Some(id) = &compound.id {
+            mask |= token_bloom(2, id);
+        }
+        if let Some(tag) = &compound.tag {
+            mask |= token_bloom(3, tag);
+        }
+        for attr in &compound.attrs {
+            mask |= token_bloom(4, &attr.name);
+        }
+    }
+    mask
 }
 
 #[derive(Clone, Debug)]
@@ -385,6 +432,7 @@ struct Specified {
     max_width: Option<Ranked<Length>>,
     min_height: Option<Ranked<Length>>,
     max_height: Option<Ranked<Length>>,
+    aspect_ratio: Option<Ranked<(f32, f32)>>,
     opacity: Option<Ranked<f32>>,
     flex_direction: Option<Ranked<(FlexDirection, bool)>>,
     gap: Option<Ranked<f32>>,
@@ -469,12 +517,14 @@ enum SubjectKey<'a> {
     Class(&'a str),
     Id(&'a str),
     Tag(&'a str),
+    Attr(&'a str),
 }
 
 struct SheetIndex {
     by_class: HashMap<String, Vec<usize>>,
     by_id: HashMap<String, Vec<usize>>,
     by_tag: HashMap<String, Vec<usize>>,
+    by_attr: HashMap<String, Vec<usize>>,
     rest: Vec<usize>,
 }
 
@@ -483,6 +533,7 @@ fn index_sheet(sheet: &Stylesheet) -> SheetIndex {
         by_class: HashMap::new(),
         by_id: HashMap::new(),
         by_tag: HashMap::new(),
+        by_attr: HashMap::new(),
         rest: Vec::new(),
     };
     for (rule_index, rule) in sheet.rules.iter().enumerate() {
@@ -503,6 +554,7 @@ fn index_sheet(sheet: &Stylesheet) -> SheetIndex {
                 SubjectKey::Class(name) => index.by_class.entry(name.to_string()).or_default(),
                 SubjectKey::Id(name) => index.by_id.entry(name.to_string()).or_default(),
                 SubjectKey::Tag(name) => index.by_tag.entry(name.to_string()).or_default(),
+                SubjectKey::Attr(name) => index.by_attr.entry(name.to_string()).or_default(),
             };
             if bucket.last() != Some(&rule_index) {
                 bucket.push(rule_index);
@@ -519,6 +571,9 @@ fn selector_keys(selector: &Selector) -> Option<Vec<SubjectKey<'_>>> {
     }
     if let Some(id) = subject.id.as_deref() {
         return Some(vec![SubjectKey::Id(id)]);
+    }
+    if let Some(attr) = subject.attrs.first() {
+        return Some(vec![SubjectKey::Attr(&attr.name)]);
     }
     let grouped = subject
         .pseudos
@@ -566,6 +621,16 @@ fn candidate_rules(doc: &Document, id: NodeId, index: &SheetIndex) -> Vec<usize>
             }
         }
     }
+    if let Some(element) = doc.element(id) {
+        for (name, _) in &element.attrs {
+            if name == "id" || name == "class" {
+                continue;
+            }
+            if let Some(list) = index.by_attr.get(name.as_str()) {
+                hits.extend(list);
+            }
+        }
+    }
     hits.sort_unstable();
     hits.dedup();
     hits
@@ -586,6 +651,8 @@ fn compute(
     if doc.element_name(id).is_none() {
         return;
     }
+    let mut state = state;
+    state.filter_ancestors = true;
     let (specified, vars) = cascade(
         doc,
         id,
@@ -622,6 +689,21 @@ fn compute(
         false,
     );
     styles[id.0] = computed.clone();
+    let mut child_state = state;
+    if let Some(element) = doc.element(id) {
+        child_state.ancestor_bloom |= token_bloom(3, &element.name);
+        for (name, value) in &element.attrs {
+            if name == "id" {
+                child_state.ancestor_bloom |= token_bloom(2, value);
+            } else if name == "class" {
+                for class in value.split_whitespace() {
+                    child_state.ancestor_bloom |= token_bloom(1, class);
+                }
+            } else {
+                child_state.ancestor_bloom |= token_bloom(4, name);
+            }
+        }
+    }
     for child in doc.node(id).children.clone() {
         compute(
             doc,
@@ -631,7 +713,7 @@ fn compute(
             ua_index,
             author,
             author_index,
-            state,
+            child_state,
             &vars,
             styles,
         );
@@ -836,6 +918,12 @@ fn matches_selector(
     let Some(last) = selector.compounds.last() else {
         return false;
     };
+    if state.filter_ancestors {
+        let mask = ancestor_token_mask(selector);
+        if mask != 0 && state.ancestor_bloom & mask != mask {
+            return false;
+        }
+    }
     if !matches_compound(doc, id, last, state) {
         return false;
     }
@@ -1102,12 +1190,12 @@ fn apply_declaration(
                 rank(&mut specified.white_space, space, spec);
             }
         }
-        "width" => {
+        "width" | "inline-size" => {
             if let Some(length) = parse_length(value) {
                 rank(&mut specified.width, length, spec);
             }
         }
-        "height" => {
+        "height" | "block-size" => {
             if let Some(length) = parse_length(value) {
                 rank(&mut specified.height, length, spec);
             }
@@ -1190,10 +1278,23 @@ fn apply_declaration(
         }
         "inset-inline" => set_logical(&mut specified.insets, 3, 1, value, spec, false),
         "inset-block" => set_logical(&mut specified.insets, 0, 2, value, spec, false),
-        "min-width" => set_optional_length(&mut specified.min_width, value, spec),
-        "max-width" => set_optional_length(&mut specified.max_width, value, spec),
-        "min-height" => set_optional_length(&mut specified.min_height, value, spec),
-        "max-height" => set_optional_length(&mut specified.max_height, value, spec),
+        "min-width" | "min-inline-size" => {
+            set_optional_length(&mut specified.min_width, value, spec);
+        }
+        "max-width" | "max-inline-size" => {
+            set_optional_length(&mut specified.max_width, value, spec);
+        }
+        "min-height" | "min-block-size" => {
+            set_optional_length(&mut specified.min_height, value, spec);
+        }
+        "max-height" | "max-block-size" => {
+            set_optional_length(&mut specified.max_height, value, spec);
+        }
+        "aspect-ratio" => {
+            if let Some(ratio) = parse_aspect_ratio(value) {
+                rank(&mut specified.aspect_ratio, ratio, spec);
+            }
+        }
         "opacity" => {
             if let Some(opacity) = parse_opacity(value) {
                 rank(&mut specified.opacity, opacity, spec);
@@ -1552,6 +1653,7 @@ fn concretize(
             .as_ref()
             .map(|item| item.value)
             .unwrap_or(Length::Auto),
+        aspect_ratio: specified.aspect_ratio.as_ref().map(|item| item.value),
         max_height: specified
             .max_height
             .as_ref()
@@ -2004,7 +2106,15 @@ fn apply_presentational_hints(doc: &Document, id: NodeId, style: &mut ComputedSt
         }
         "iframe" | "video" | "canvas" | "svg" => {
             style.width = fill(style.width, width_attr, 300.0);
-            style.height = fill(style.height, height_attr, 150.0);
+            // `aspect-ratio` replaces the 300×150 default. A width of 100% then
+            // produces the height in layout.
+            if style.aspect_ratio.is_none() {
+                style.height = fill(style.height, height_attr, 150.0);
+            } else if matches!(style.height, Length::Auto)
+                && let Some(height) = height_attr
+            {
+                style.height = height;
+            }
         }
         "audio" => {
             style.width = fill(style.width, width_attr, 300.0);
@@ -2526,6 +2636,25 @@ fn parse_line_height(value: &str) -> Option<LineHeight> {
         });
     }
     value.parse::<f32>().ok().map(LineHeight::Number)
+}
+
+fn parse_aspect_ratio(value: &str) -> Option<(f32, f32)> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("auto")
+        .map(str::trim)
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(value);
+    if let Some((width, height)) = value.split_once('/') {
+        let width: f32 = width.trim().parse().ok()?;
+        let height: f32 = height.trim().parse().ok()?;
+        if width > 0.0 && height > 0.0 {
+            return Some((width, height));
+        }
+        return None;
+    }
+    let ratio: f32 = value.parse().ok()?;
+    (ratio > 0.0).then_some((ratio, 1.0))
 }
 
 pub fn parse_length(value: &str) -> Option<Length> {
@@ -3075,6 +3204,19 @@ mod tests {
     }
 
     #[test]
+    fn logical_size_and_aspect_ratio_are_recorded() {
+        let doc = parse_html(r#"<div id="box"></div>"#);
+        let styles = style_document(
+            &doc,
+            "#box { inline-size: 50%; min-block-size: 4rem; aspect-ratio: 16/9 }",
+        );
+        let style = &styles[doc.get_element_by_id("box").unwrap().0];
+        assert_eq!(style.width, Length::Percent(50.0));
+        assert_eq!(style.min_height, Length::Rem(4.0));
+        assert_eq!(style.aspect_ratio, Some((16.0, 9.0)));
+    }
+
+    #[test]
     fn indexed_rules_still_match_classes_tags_and_is() {
         let doc = parse_html(r#"<div class="a" id="box"><span class="b">t</span></div>"#);
         let styles = style_document(
@@ -3094,6 +3236,23 @@ mod tests {
         assert_eq!(styles[div.0].display, Display::Flex);
         assert_eq!(styles[div.0].background, Color::rgb(0, 128, 0));
         assert_eq!(styles[span.0].color, Color::rgb(0, 0, 255));
+        let marked = parse_html(
+            r#"<section class="on"><b data-mark="1">x</b></section><b data-mark="1">y</b>"#,
+        );
+        let marked_styles = style_document(
+            &marked,
+            "[data-mark] { color: navy } .on [data-mark] { color: teal }",
+        );
+        let colors: Vec<_> = marked
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _)| {
+                (marked.element_name(NodeId(index)) == Some("b"))
+                    .then_some(marked_styles[index].color)
+            })
+            .collect();
+        assert_eq!(colors, vec![Color::rgb(0, 128, 128), Color::rgb(0, 0, 128)]);
     }
 
     #[test]

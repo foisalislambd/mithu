@@ -1502,6 +1502,7 @@ impl Browser {
                 StyleState {
                     hover: None,
                     viewport_width: layout_width,
+                    ..StyleState::default()
                 },
             );
             let images = load_images(&document, &base);
@@ -1561,6 +1562,7 @@ impl Browser {
             StyleState {
                 hover: None,
                 viewport_width: layout_width,
+                ..StyleState::default()
             },
         );
         let images = load_images(&document, &base);
@@ -1785,6 +1787,7 @@ impl Browser {
                 StyleState {
                     hover: None,
                     viewport_width: width,
+                    ..StyleState::default()
                 },
             );
             let images = load_images(&doc, &nested_base);
@@ -1833,6 +1836,7 @@ impl Browser {
                 StyleState {
                     hover,
                     viewport_width,
+                    ..StyleState::default()
                 },
             )
         };
@@ -1912,6 +1916,7 @@ impl Browser {
             StyleState {
                 hover,
                 viewport_width,
+                ..StyleState::default()
             },
         );
         let images = load_images(&document, &base);
