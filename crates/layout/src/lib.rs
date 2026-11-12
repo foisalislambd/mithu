@@ -3070,6 +3070,26 @@ mod tests {
     }
 
     #[test]
+    fn rem_grid_track_keeps_a_content_column() {
+        let doc = parse_html(
+            r#"<div id="page" style="display:grid;width:1200px;grid-template-columns:minmax(0, 59.25rem) min-content">
+              <div id="main" style="height:20px">article</div>
+              <div id="side" style="width:40px;height:20px">end</div>
+            </div>"#,
+        );
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 1200.0, 800.0, &NaiveMetrics, &HashMap::new());
+        let main = find(&tree.root, doc.get_element_by_id("main").unwrap()).unwrap();
+        let side = find(&tree.root, doc.get_element_by_id("side").unwrap()).unwrap();
+        assert!(
+            main.rect.width > 400.0,
+            "rem column collapsed to {}",
+            main.rect.width
+        );
+        assert!(side.rect.x > main.rect.x + 200.0, "side x {}", side.rect.x);
+    }
+
+    #[test]
     fn nowrap_label_grows_the_border_box() {
         let doc = parse_html(
             r#"<a id="go" style="display:inline-block;white-space:nowrap;border:1px solid #00f">View services</a>"#,

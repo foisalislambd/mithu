@@ -33,7 +33,7 @@ pub const CONTENT_TOP: f32 = TAB_H + TOOLBAR_H + BOOKMARK_BAR_H;
 pub const FIND_H: f32 = 36.0;
 pub const STATUS_H: f32 = 26.0;
 /// Gap between the page and the status line so the last text line is not covered.
-const PAGE_GAP: f32 = 16.0;
+const PAGE_GAP: f32 = 52.0;
 /// `kToolbarButtonHeight`.
 const BTN: f32 = 34.0;
 const CAPTION_W: f32 = 46.0;

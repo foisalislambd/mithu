@@ -186,6 +186,12 @@ impl Session {
             .module_loader(Rc::clone(&loader))
             .build()
             .unwrap_or_else(|_| Context::default());
+        // Boa's default stack is 10,240 slots. A page script that builds a
+        // large expression (Google's interstitial) hits that before it finishes.
+        let mut limits = boa_engine::vm::RuntimeLimits::default();
+        limits.set_stack_size_limit(1024 * 1024);
+        limits.set_recursion_limit(4_096);
+        context.set_runtime_limits(limits);
         context.insert_data(Host {
             doc: Rc::clone(&shared),
             log: Rc::clone(&log),
@@ -728,6 +734,11 @@ fn install_host(context: &mut Context) -> JsResult<()> {
         1,
         NativeFunction::from_fn_ptr(fetch_resource),
     )?;
+    context.register_global_callable(
+        js_string!("dispatchEvent"),
+        1,
+        NativeFunction::from_fn_ptr(window_dispatch),
+    )?;
     let local_storage = storage_object(context, false)?;
     let session_storage = storage_object(context, true)?;
     context.register_global_property(js_string!("localStorage"), local_storage, flags)?;
@@ -764,6 +775,7 @@ fn install_host(context: &mut Context) -> JsResult<()> {
         let _ = script.evaluate(context);
     }
     let _ = wire_document_prototype(context);
+    let _ = wire_prototype_chain(context);
     Ok(())
 }
 
@@ -780,6 +792,66 @@ fn wire_document_prototype(context: &mut Context) -> JsResult<()> {
     let proto = ctor.get(js_string!("prototype"), context)?;
     if let Some(proto) = proto.as_object() {
         document.set_prototype(Some(proto.clone()));
+    }
+    Ok(())
+}
+
+fn wire_prototype_chain(context: &mut Context) -> JsResult<()> {
+    // Blink's chain: EventTarget <- Node <- Element <- HTMLElement <- HTMLTemplateElement.
+    // Document is also a Node. `instanceof` walks this chain.
+    for (child, parent) in [
+        ("HTMLTemplateElement", "HTMLElement"),
+        ("HTMLImageElement", "HTMLElement"),
+        ("HTMLElement", "Element"),
+        ("Element", "Node"),
+        ("Document", "Node"),
+        ("DocumentFragment", "Node"),
+        ("Node", "EventTarget"),
+        ("ShadowRoot", "DocumentFragment"),
+    ] {
+        link_prototype(context, child, parent)?;
+    }
+    for name in crate::web::HTML_ELEMENT_CLASSES {
+        link_prototype(context, name, "HTMLElement")?;
+    }
+    install_node_methods(context)?;
+    Ok(())
+}
+
+fn install_node_methods(context: &mut Context) -> JsResult<()> {
+    let node = context.global_object().get(js_string!("Node"), context)?;
+    let Some(node) = node.as_object() else {
+        return Ok(());
+    };
+    let proto = node.get(js_string!("prototype"), context)?;
+    let Some(proto) = proto.as_object() else {
+        return Ok(());
+    };
+    let append = native(context, "appendChild", 1, append_child);
+    proto.set(js_string!("appendChild"), append, true, context)?;
+    let insert = native(context, "insertBefore", 2, insert_before_child);
+    proto.set(js_string!("insertBefore"), insert, true, context)?;
+    let remove = native(context, "removeChild", 1, remove_child);
+    proto.set(js_string!("removeChild"), remove, true, context)?;
+    Ok(())
+}
+
+fn link_prototype(context: &mut Context, child: &str, parent: &str) -> JsResult<()> {
+    let child = context
+        .global_object()
+        .get(js_string!(child.to_string()), context)?;
+    let parent = context
+        .global_object()
+        .get(js_string!(parent.to_string()), context)?;
+    let (Some(child), Some(parent)) = (child.as_object(), parent.as_object()) else {
+        return Ok(());
+    };
+    let child_proto = child.get(js_string!("prototype"), context)?;
+    let parent_proto = parent.get(js_string!("prototype"), context)?;
+    if let (Some(child_proto), Some(parent_proto)) =
+        (child_proto.as_object(), parent_proto.as_object())
+    {
+        child_proto.set_prototype(Some(parent_proto.clone()));
     }
     Ok(())
 }
@@ -933,11 +1005,32 @@ fn console_object(context: &mut Context) -> JsResult<JsObject> {
         js_string!("warn"),
         1,
     );
-    object.function(
-        NativeFunction::from_fn_ptr(console_log),
-        js_string!("error"),
-        1,
-    );
+    object
+        .function(
+            NativeFunction::from_fn_ptr(console_log),
+            js_string!("error"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_log),
+            js_string!("info"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_log),
+            js_string!("debug"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_log),
+            js_string!("trace"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_log),
+            js_string!("dir"),
+            1,
+        );
     Ok(object.build())
 }
 
@@ -1107,6 +1200,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let base_get = native(context, "get baseURI", 0, get_location);
     let cookie_get = native(context, "get cookie", 0, get_cookie);
     let cookie_set = native(context, "set cookie", 1, set_cookie);
+    let fonts = font_set(context)?;
     let window = context.global_object().clone();
     let mut object = ObjectInitializer::new(context);
     object
@@ -1151,6 +1245,11 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             2,
         )
         .function(
+            NativeFunction::from_fn_ptr(document_dispatch),
+            js_string!("dispatchEvent"),
+            1,
+        )
+        .function(
             NativeFunction::from_fn_ptr(document_remove_listener),
             js_string!("removeEventListener"),
             2,
@@ -1174,6 +1273,7 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             Some(cookie_set),
             ATTR,
         )
+        .property(js_string!("fonts"), fonts, ATTR)
         .property(js_string!("referrer"), js_string!(""), ATTR)
         .property(js_string!("visibilityState"), js_string!("visible"), ATTR)
         .property(js_string!("hidden"), JsValue::from(false), ATTR)
@@ -1689,7 +1789,18 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             "style" | "link"
         )
     });
+    let tag = context
+        .get_data::<Host>()
+        .and_then(|host| {
+            host.doc
+                .borrow()
+                .element_name(NodeId(id))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let is_template = tag == "template";
     let sheet_get = has_sheet.then(|| native(context, "get sheet", 0, get_sheet));
+    let content_get = is_template.then(|| native(context, "get content", 0, get_template_content));
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(
@@ -1888,10 +1999,12 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     if let Some(sheet_get) = sheet_get {
         object.accessor(js_string!("sheet"), Some(sheet_get), None, ATTR);
     }
+    if let Some(content_get) = content_get {
+        object.accessor(js_string!("content"), Some(content_get), None, ATTR);
+    }
     let value = object.build();
-    if let Ok(ctor) = context
-        .global_object()
-        .get(js_string!("HTMLElement"), context)
+    let ctor_name = JsString::from(element_interface(&tag));
+    if let Ok(ctor) = context.global_object().get(ctor_name, context)
         && let Some(ctor) = ctor.as_object()
         && let Ok(proto) = ctor.get(js_string!("prototype"), context)
         && let Some(proto) = proto.as_object()
@@ -1901,6 +2014,48 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let value = JsValue::from(value);
     remember_node(id, &value, context);
     value
+}
+
+fn element_interface(tag: &str) -> &'static str {
+    match tag {
+        "a" | "area" => "HTMLAnchorElement",
+        "audio" => "HTMLAudioElement",
+        "body" => "HTMLBodyElement",
+        "button" => "HTMLButtonElement",
+        "canvas" => "HTMLCanvasElement",
+        "div" => "HTMLDivElement",
+        "form" => "HTMLFormElement",
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "HTMLHeadingElement",
+        "head" => "HTMLHeadElement",
+        "html" => "HTMLHtmlElement",
+        "iframe" => "HTMLIFrameElement",
+        "img" => "HTMLImageElement",
+        "input" => "HTMLInputElement",
+        "label" => "HTMLLabelElement",
+        "li" => "HTMLLIElement",
+        "link" => "HTMLLinkElement",
+        "meta" => "HTMLMetaElement",
+        "ol" => "HTMLOListElement",
+        "option" => "HTMLOptionElement",
+        "p" => "HTMLParagraphElement",
+        "picture" => "HTMLPictureElement",
+        "script" => "HTMLScriptElement",
+        "select" => "HTMLSelectElement",
+        "slot" => "HTMLSlotElement",
+        "source" => "HTMLSourceElement",
+        "span" => "HTMLSpanElement",
+        "style" => "HTMLStyleElement",
+        "table" => "HTMLTableElement",
+        "tbody" | "thead" | "tfoot" => "HTMLTableSectionElement",
+        "td" | "th" => "HTMLTableCellElement",
+        "template" => "HTMLTemplateElement",
+        "textarea" => "HTMLTextAreaElement",
+        "title" => "HTMLTitleElement",
+        "tr" => "HTMLTableRowElement",
+        "ul" => "HTMLUListElement",
+        "video" => "HTMLVideoElement",
+        _ => "HTMLElement",
+    }
 }
 
 fn get_dataset(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -2792,6 +2947,13 @@ fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     let host = host(context)?;
     let parent = node_of(this).ok_or_else(type_error)?;
     let child_value = args.first().cloned().unwrap_or(JsValue::undefined());
+    if let Some(holder) = fragment_host_id(&child_value, context)? {
+        let children = host.doc.borrow().node(NodeId(holder)).children.clone();
+        for child in children {
+            host.doc.borrow_mut().append_child(parent, child);
+        }
+        return Ok(child_value);
+    }
     let child = node_of(&child_value).ok_or_else(type_error)?;
     host.doc.borrow_mut().append_child(parent, child);
     Ok(child_value)
@@ -2950,7 +3112,36 @@ fn run_module(context: &mut Context, code: &str, name: &str) -> JsResult<()> {
     }
 }
 
+fn settle_fonts(context: &mut Context) {
+    let Ok(resolver) = context
+        .global_object()
+        .get(js_string!("__mithuFontsReady"), context)
+    else {
+        return;
+    };
+    if !resolver.is_callable() {
+        return;
+    }
+    let _ = context.global_object().set(
+        js_string!("__mithuFontsReady"),
+        JsValue::undefined(),
+        true,
+        context,
+    );
+    if let Some(function) = resolver.as_object() {
+        let _ = function.call(&JsValue::undefined(), &[JsValue::undefined()], context);
+    }
+    if let Ok(document) = context.global_object().get(js_string!("document"), context)
+        && let Some(document) = document.as_object()
+        && let Ok(fonts) = document.get(js_string!("fonts"), context)
+        && let Some(fonts) = fonts.as_object()
+    {
+        let _ = fonts.set(js_string!("status"), js_string!("loaded"), true, context);
+    }
+}
+
 fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
+    settle_fonts(context);
     let host = host(context)?;
     {
         let mut clock = host.clock.borrow_mut();
@@ -3133,6 +3324,9 @@ fn schedule_timer(context: &mut Context, args: &[JsValue], repeat: bool) -> JsRe
 }
 
 fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if signal_aborted(args, context)? {
+        return reject_promise(context, "The operation was aborted.");
+    }
     let spec = fetch_spec(args, context)?;
     if spec.is_empty() {
         return reject_promise(context, "fetch requires a url");
@@ -3212,6 +3406,236 @@ fn reject_promise(context: &mut Context, message: &str) -> JsResult<JsValue> {
         context,
     )?;
     Ok(promise.into())
+}
+
+fn signal_aborted(args: &[JsValue], context: &mut Context) -> JsResult<bool> {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let signal = object.get(js_string!("signal"), context)?;
+        let Some(signal) = signal.as_object() else {
+            continue;
+        };
+        return Ok(signal
+            .get(js_string!("aborted"), context)?
+            .as_boolean()
+            .unwrap_or(false));
+    }
+    Ok(false)
+}
+
+fn font_set(context: &mut Context) -> JsResult<JsObject> {
+    // Stay pending until the page clock moves. Resolving during the current
+    // task lets a font callback change the document before React hydrates it.
+    let (ready, resolvers) = JsPromise::new_pending(context);
+    context.register_global_property(
+        js_string!("__mithuFontsReady"),
+        resolvers.resolve,
+        Attribute::all(),
+    )?;
+    let mut fonts = ObjectInitializer::new(context);
+    fonts
+        .property(js_string!("status"), js_string!("loading"), ATTR)
+        .property(js_string!("ready"), ready, ATTR)
+        .property(js_string!("size"), JsValue::from(0), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(fonts_check),
+            js_string!("check"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fonts_load),
+            js_string!("load"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fonts_listen),
+            js_string!("add"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fonts_listen),
+            js_string!("addEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fonts_listen),
+            js_string!("forEach"),
+            1,
+        );
+    Ok(fonts.build())
+}
+
+fn fonts_check(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let loaded = this
+        .as_object()
+        .and_then(|object| object.get(js_string!("status"), context).ok())
+        .and_then(|value| value.as_string())
+        .is_some_and(|text| text.to_std_string_lossy() == "loaded");
+    Ok(JsValue::from(loaded))
+}
+
+fn fonts_load(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let faces = JsArray::from_iter([], context);
+    Ok(JsPromise::resolve(faces, context)?.into())
+}
+
+fn fonts_listen(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn get_template_content(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if let Some(object) = this.as_object() {
+        let cached = object.get(js_string!("__content"), context)?;
+        if cached.is_object() {
+            return Ok(cached);
+        }
+    }
+    let id = node_of(this).ok_or_else(type_error)?;
+    let fragment = fragment_value(id.0, context)?;
+    if let Some(object) = this.as_object() {
+        object.set(js_string!("__content"), fragment.clone(), true, context)?;
+    }
+    Ok(fragment)
+}
+
+fn fragment_value(host_id: usize, context: &mut Context) -> JsResult<JsValue> {
+    let nodes_get = native(context, "get fragment childNodes", 0, fragment_child_nodes);
+    let children_get = native(context, "get fragment children", 0, fragment_children);
+    let first_get = native(context, "get fragment firstChild", 0, fragment_first_child);
+    let html_get = native(context, "get fragment innerHTML", 0, fragment_html_get);
+    let html_set = native(context, "set fragment innerHTML", 1, fragment_html_set);
+    let mut object = ObjectInitializer::new(context);
+    object
+        .property(js_string!("__host"), JsValue::from(host_id as u32), ATTR)
+        .property(js_string!("nodeType"), JsValue::from(11), ATTR)
+        .property(
+            js_string!("nodeName"),
+            js_string!("#document-fragment"),
+            ATTR,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fragment_append),
+            js_string!("appendChild"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fragment_query),
+            js_string!("querySelector"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fragment_query_all),
+            js_string!("querySelectorAll"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(fragment_clone),
+            js_string!("cloneNode"),
+            1,
+        )
+        .accessor(js_string!("childNodes"), Some(nodes_get), None, ATTR)
+        .accessor(js_string!("children"), Some(children_get), None, ATTR)
+        .accessor(js_string!("firstChild"), Some(first_get), None, ATTR)
+        .accessor(
+            js_string!("innerHTML"),
+            Some(html_get),
+            Some(html_set),
+            ATTR,
+        );
+    Ok(object.build().into())
+}
+
+fn fragment_element(this: &JsValue, context: &mut Context) -> JsResult<JsValue> {
+    let id = fragment_host_id(this, context)?.unwrap_or(0);
+    Ok(element_value(id, context))
+}
+
+fn fragment_host_id(value: &JsValue, context: &mut Context) -> JsResult<Option<usize>> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let kind = object.get(js_string!("nodeType"), context)?;
+    if kind.as_number() != Some(11.0) {
+        return Ok(None);
+    }
+    let id = object
+        .get(js_string!("__host"), context)?
+        .as_number()
+        .unwrap_or(0.0) as usize;
+    Ok(Some(id))
+}
+
+fn fragment_child_nodes(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    get_child_nodes(&element, args, context)
+}
+
+fn fragment_children(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    get_children(&element, args, context)
+}
+
+fn fragment_first_child(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    get_first_child(&element, args, context)
+}
+
+fn fragment_html_get(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    get_html(&element, args, context)
+}
+
+fn fragment_html_set(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    set_html(&element, args, context)
+}
+
+fn fragment_append(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    append_child(&element, args, context)
+}
+
+fn fragment_query(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    query_selector(&element, args, context)
+}
+
+fn fragment_query_all(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let element = fragment_element(this, context)?;
+    query_selector_all(&element, args, context)
+}
+
+fn fragment_clone(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = fragment_host_id(this, context)?.unwrap_or(0);
+    let html = {
+        let host = host(context)?;
+        serialize(&host.doc.borrow(), NodeId(id))
+    };
+    let holder = {
+        let host = host(context)?;
+        host.doc.borrow_mut().create_element_detached("div")
+    };
+    let element = element_value(holder.0, context);
+    set_html(&element, &[js_string!(html).into()], context)?;
+    fragment_value(holder.0, context)
 }
 
 fn fetch_spec(args: &[JsValue], context: &mut Context) -> JsResult<String> {
@@ -3486,6 +3910,28 @@ fn window_remove_listener(
     let handler = args.get(1).cloned().unwrap_or(JsValue::undefined());
     drop_listener(context, &format!("win:{event}"), &handler)?;
     Ok(JsValue::undefined())
+}
+
+fn document_dispatch(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let Some(html) = find_tag(&host.doc.borrow(), "html") else {
+        return Ok(JsValue::from(true));
+    };
+    let element = element_value(html.0, context);
+    dispatch_event(&element, args, context)
+}
+
+fn window_dispatch(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let event_name = event_type(args.first(), context)?;
+    let host = host(context)?;
+    if let Some(html) = find_tag(&host.doc.borrow(), "html") {
+        fire_window_listeners(context, html, &event_name);
+    }
+    Ok(JsValue::from(true))
 }
 
 fn document_listener(
@@ -4863,5 +5309,58 @@ mod tests {
         assert!(session.advance(5));
         assert_eq!(session.document().attr(page, "data-idle"), Some("50"));
         assert_eq!(session.document().attr(page, "data-box"), Some("320x316"));
+    }
+
+    #[test]
+    fn abort_template_and_fonts() {
+        let doc = parse_html(
+            r#"<template id="t"><p id="inner">Hi</p></template>
+            <script>
+              var c = new AbortController();
+              var seen = "";
+              c.signal.addEventListener("abort", function () { seen = "aborted"; });
+              c.abort("stop");
+              var live = new AbortController();
+              live.signal.throwIfAborted();
+              var template = document.getElementById("t");
+              var copy = template.content.cloneNode(true);
+              document.body.appendChild(copy);
+              var face = new FontFace("Test", "url(x)").load();
+              fetch("/nope", { signal: AbortSignal.abort("stop") }).then(function () {
+                template.setAttribute("data-fetch", "ok");
+              }, function () {
+                template.setAttribute("data-fetch", "aborted");
+              });
+              document.title = [
+                c.signal.aborted,
+                c.signal.reason,
+                seen,
+                template instanceof HTMLTemplateElement,
+                template instanceof HTMLElement,
+                template.content.nodeType,
+                template.content.childNodes.length,
+                template.content.querySelector("p").id,
+                document.fonts.status,
+                typeof document.fonts.ready.then,
+                typeof face.then,
+                document.createElement("button") instanceof HTMLButtonElement,
+                document.createElement("button") instanceof HTMLElement,
+                document.createElement("button") instanceof Element,
+                typeof console.info
+              ].join("|");
+            </script>"#,
+        );
+        let session = Session::open_at(doc, "https://example.com/", |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(
+            session.document().title,
+            "true|stop|aborted|true|true|11|1|inner|loading|function|function|true|true|true|function"
+        );
+        let template = session.document().get_element_by_id("t").unwrap();
+        assert_eq!(
+            session.document().attr(template, "data-fetch"),
+            Some("aborted")
+        );
+        assert!(session.document().get_element_by_id("inner").is_some());
     }
 }

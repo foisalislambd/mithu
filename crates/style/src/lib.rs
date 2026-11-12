@@ -2224,7 +2224,14 @@ fn parse_track(token: &str) -> Option<GridTrack> {
     }
     match parse_length(&token)? {
         Length::Px(px) => Some(GridTrack::Px(px.max(0.0))),
-        _ => None,
+        // Grid tracks are resolved against the root font (16px), the same
+        // default Chromium uses before a page sets a root size.
+        Length::Rem(value) | Length::Em(value) => Some(GridTrack::Px((value * 16.0).max(0.0))),
+        Length::Vw(value) => Some(GridTrack::Px((value * 12.8).max(0.0))),
+        Length::Vh(value) => Some(GridTrack::Px((value * 8.0).max(0.0))),
+        Length::Percent(value) => Some(GridTrack::Px(value.max(0.0))),
+        Length::Calc { px, rem, em, .. } => Some(GridTrack::Px((px + (rem + em) * 16.0).max(0.0))),
+        Length::Auto => Some(GridTrack::Auto),
     }
 }
 

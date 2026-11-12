@@ -24,12 +24,24 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     context.register_global_class::<Xhr>()?;
     context.register_global_class::<MutationObserverHost>()?;
     context.register_global_class::<HtmlImage>()?;
+    context.register_global_class::<EventTargetHost>()?;
+    context.register_global_class::<NodeHost>()?;
+    context.register_global_class::<ElementHost>()?;
+    context.register_global_class::<ShadowRootHost>()?;
+    context.register_global_class::<DocumentFragmentHost>()?;
     context.register_global_class::<HtmlElementHost>()?;
     context.register_global_class::<DocumentHost>()?;
     context.register_global_class::<DomEvent>()?;
     context.register_global_class::<CustomEventHost>()?;
     context.register_global_class::<MessageChannelHost>()?;
     context.register_global_class::<MessagePortHost>()?;
+    context.register_global_class::<AbortSignalHost>()?;
+    context.register_global_class::<AbortControllerHost>()?;
+    context.register_global_class::<HtmlTemplateHost>()?;
+    context.register_global_class::<FontFaceHost>()?;
+    context.register_global_class::<IntersectionObserverHost>()?;
+    context.register_global_class::<ResizeObserverHost>()?;
+    register_html_elements(context)?;
     let image = context.global_object().get(js_string!("Image"), context)?;
     context.register_global_property(js_string!("HTMLImageElement"), image, Attribute::all())?;
     let crypto = crypto_object(context)?;
@@ -274,6 +286,16 @@ impl Class for SearchParams {
             1,
             NativeFunction::from_fn_ptr(params_delete),
         );
+        class.method(
+            js_string!("forEach"),
+            1,
+            NativeFunction::from_fn_ptr(params_for_each),
+        );
+        class.method(
+            js_string!("keys"),
+            0,
+            NativeFunction::from_fn_ptr(params_keys),
+        );
         Ok(())
     }
 
@@ -367,6 +389,38 @@ fn params_append(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     params.query.push('=');
     params.query.push_str(&form_escape(&value));
     Ok(JsValue::undefined())
+}
+
+fn params_for_each(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let query = params_of(this)?;
+    let Some(callback) = args.first().and_then(JsValue::as_object) else {
+        return Ok(JsValue::undefined());
+    };
+    if !callback.is_callable() {
+        return Ok(JsValue::undefined());
+    }
+    let this_arg = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    for (name, value) in query_pairs(&query) {
+        callback.call(
+            &this_arg,
+            &[
+                js_string!(value).into(),
+                js_string!(name).into(),
+                this.clone(),
+            ],
+            context,
+        )?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn params_keys(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let query = params_of(this)?;
+    let keys = query_pairs(&query)
+        .into_iter()
+        .map(|(name, _)| JsValue::from(js_string!(name)))
+        .collect::<Vec<_>>();
+    Ok(JsArray::from_iter(keys, context).into())
 }
 
 fn params_delete(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1072,12 +1126,43 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn observed_node(value: &JsValue, context: &mut Context) -> Option<usize> {
+    if let Some(id) = crate::node_of(value) {
+        return Some(id.0);
+    }
+    let object = value.as_object()?;
+    let kind = object
+        .get(js_string!("nodeType"), context)
+        .ok()?
+        .as_number()?;
+    if kind == 9.0 {
+        let host = crate::host(context).ok()?;
+        let doc = host.doc.borrow();
+        return (0..doc.nodes.len())
+            .find(|index| doc.element_name(mithu_dom::NodeId(*index)) == Some("html"));
+    }
+    if kind == 11.0 {
+        return object
+            .get(js_string!("__host"), context)
+            .ok()?
+            .as_number()
+            .map(|id| id as usize);
+    }
+    None
+}
+
 fn observer_observe(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let Some(id) = args.first().and_then(crate::node_of) else {
+    let Some(id) = args.first().and_then(|value| observed_node(value, context)) else {
         return Err(JsNativeError::typ()
             .with_message("MutationObserver.observe expects a node")
             .into());
     };
+    let subtree = args
+        .get(1)
+        .and_then(JsValue::as_object)
+        .and_then(|options| options.get(js_string!("subtree"), context).ok())
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false);
     let Some(object) = this.as_object() else {
         return Err(JsNativeError::typ()
             .with_message("MutationObserver method called on the wrong object")
@@ -1085,7 +1170,13 @@ fn observer_observe(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     };
     object.set(
         js_string!("__target"),
-        JsValue::from(id.0 as u32),
+        JsValue::from(id as u32),
+        true,
+        context,
+    )?;
+    object.set(
+        js_string!("__subtree"),
+        JsValue::from(subtree),
         true,
         context,
     )?;
@@ -1167,11 +1258,23 @@ pub(crate) fn deliver_mutations(context: &mut Context) -> JsResult<()> {
         if target < 0.0 {
             continue;
         }
-        let mine: Vec<_> = records
-            .iter()
-            .filter(|record| record.target.0 == target as usize)
-            .cloned()
-            .collect();
+        let subtree = object
+            .get(js_string!("__subtree"), context)?
+            .as_boolean()
+            .unwrap_or(false);
+        let mine: Vec<_> = {
+            let host = host(context)?;
+            let doc = host.doc.borrow();
+            let observed = mithu_dom::NodeId(target as usize);
+            records
+                .iter()
+                .filter(|record| {
+                    record.target == observed
+                        || (subtree && doc.contains_node(observed, record.target))
+                })
+                .cloned()
+                .collect()
+        };
         if mine.is_empty() {
             continue;
         }
@@ -1534,6 +1637,663 @@ impl Class for MessageChannelHost {
         object.set(js_string!("port2"), second, true, context)?;
         Ok(())
     }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct AbortSignalHost;
+
+impl Class for AbortSignalHost {
+    const NAME: &'static str = "AbortSignal";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("addEventListener"),
+            2,
+            NativeFunction::from_fn_ptr(signal_listen),
+        );
+        class.method(
+            js_string!("removeEventListener"),
+            2,
+            NativeFunction::from_fn_ptr(signal_ignore),
+        );
+        class.method(
+            js_string!("throwIfAborted"),
+            0,
+            NativeFunction::from_fn_ptr(signal_throw_if_aborted),
+        );
+        class.static_method(
+            js_string!("abort"),
+            0,
+            NativeFunction::from_fn_ptr(signal_abort_static),
+        );
+        class.static_method(
+            js_string!("timeout"),
+            1,
+            NativeFunction::from_fn_ptr(signal_timeout),
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+
+    fn object_constructor(
+        instance: &JsObject<Self>,
+        _args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let object = instance.clone().upcast();
+        object.set(js_string!("aborted"), JsValue::from(false), true, context)?;
+        object.set(js_string!("reason"), JsValue::undefined(), true, context)?;
+        object.set(js_string!("__n"), JsValue::from(0), true, context)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct AbortControllerHost;
+
+impl Class for AbortControllerHost {
+    const NAME: &'static str = "AbortController";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("abort"),
+            0,
+            NativeFunction::from_fn_ptr(controller_abort),
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+
+    fn object_constructor(
+        instance: &JsObject<Self>,
+        _args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let constructor = context
+            .global_object()
+            .get(js_string!("AbortSignal"), context)?;
+        let Some(constructor) = constructor.as_object() else {
+            return Ok(());
+        };
+        let signal = constructor.construct(&[], Some(&constructor), context)?;
+        let object = instance.clone().upcast();
+        object.set(js_string!("signal"), signal, true, context)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct HtmlTemplateHost;
+
+impl Class for HtmlTemplateHost {
+    const NAME: &'static str = "HTMLTemplateElement";
+
+    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct EventTargetHost;
+
+impl Class for EventTargetHost {
+    const NAME: &'static str = "EventTarget";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("addEventListener"),
+            2,
+            NativeFunction::from_fn_ptr(signal_ignore),
+        );
+        class.method(
+            js_string!("removeEventListener"),
+            2,
+            NativeFunction::from_fn_ptr(signal_ignore),
+        );
+        class.method(
+            js_string!("dispatchEvent"),
+            1,
+            NativeFunction::from_fn_ptr(signal_ignore),
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct NodeHost;
+
+impl Class for NodeHost {
+    const NAME: &'static str = "Node";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.static_property(js_string!("ELEMENT_NODE"), JsValue::from(1), ATTR);
+        class.static_property(js_string!("TEXT_NODE"), JsValue::from(3), ATTR);
+        class.static_property(js_string!("COMMENT_NODE"), JsValue::from(8), ATTR);
+        class.static_property(js_string!("DOCUMENT_NODE"), JsValue::from(9), ATTR);
+        class.static_property(
+            js_string!("DOCUMENT_FRAGMENT_NODE"),
+            JsValue::from(11),
+            ATTR,
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct ElementHost;
+
+impl Class for ElementHost {
+    const NAME: &'static str = "Element";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("getRootNode"),
+            0,
+            NativeFunction::from_fn_ptr(element_root),
+        );
+        class.method(
+            js_string!("animate"),
+            1,
+            NativeFunction::from_fn_ptr(element_animate),
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct DocumentFragmentHost;
+
+impl Class for DocumentFragmentHost {
+    const NAME: &'static str = "DocumentFragment";
+
+    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct ShadowRootHost;
+
+impl Class for ShadowRootHost {
+    const NAME: &'static str = "ShadowRoot";
+
+    fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+}
+
+fn element_root(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    context.global_object().get(js_string!("document"), context)
+}
+
+fn element_animate(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let finished = JsPromise::resolve(JsValue::undefined(), context)?;
+    let mut animation = ObjectInitializer::new(context);
+    animation
+        .property(js_string!("finished"), finished, ATTR)
+        .property(js_string!("playState"), js_string!("finished"), ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(signal_ignore),
+            js_string!("play"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(signal_ignore),
+            js_string!("pause"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(signal_ignore),
+            js_string!("cancel"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(signal_ignore),
+            js_string!("finish"),
+            0,
+        );
+    Ok(animation.build().into())
+}
+
+macro_rules! html_class {
+    ($($struct:ident => $name:literal),+ $(,)?) => {
+        $(
+            #[derive(Debug, Trace, Finalize, JsData)]
+            struct $struct;
+
+            impl Class for $struct {
+                const NAME: &'static str = $name;
+
+                fn init(_class: &mut ClassBuilder<'_>) -> JsResult<()> {
+                    Ok(())
+                }
+
+                fn data_constructor(
+                    _new_target: &JsValue,
+                    _args: &[JsValue],
+                    _context: &mut Context,
+                ) -> JsResult<Self> {
+                    Ok(Self)
+                }
+            }
+        )+
+
+        fn register_html_elements(context: &mut Context) -> JsResult<()> {
+            $(context.register_global_class::<$struct>()?;)+
+            Ok(())
+        }
+
+        pub(crate) const HTML_ELEMENT_CLASSES: &[&str] = &[$($name),+];
+    };
+}
+
+html_class! {
+    HtmlAnchorElement => "HTMLAnchorElement",
+    HtmlBodyElement => "HTMLBodyElement",
+    HtmlButtonElement => "HTMLButtonElement",
+    HtmlCanvasElement => "HTMLCanvasElement",
+    HtmlDivElement => "HTMLDivElement",
+    HtmlFormElement => "HTMLFormElement",
+    HtmlHeadElement => "HTMLHeadElement",
+    HtmlHeadingElement => "HTMLHeadingElement",
+    HtmlHtmlElement => "HTMLHtmlElement",
+    HtmlIFrameElement => "HTMLIFrameElement",
+    HtmlInputElement => "HTMLInputElement",
+    HtmlLabelElement => "HTMLLabelElement",
+    HtmlLiElement => "HTMLLIElement",
+    HtmlLinkElement => "HTMLLinkElement",
+    HtmlMetaElement => "HTMLMetaElement",
+    HtmlOListElement => "HTMLOListElement",
+    HtmlOptionElement => "HTMLOptionElement",
+    HtmlParagraphElement => "HTMLParagraphElement",
+    HtmlPictureElement => "HTMLPictureElement",
+    HtmlScriptElement => "HTMLScriptElement",
+    HtmlSelectElement => "HTMLSelectElement",
+    HtmlSlotElement => "HTMLSlotElement",
+    HtmlSourceElement => "HTMLSourceElement",
+    HtmlSpanElement => "HTMLSpanElement",
+    HtmlStyleElement => "HTMLStyleElement",
+    HtmlTableCellElement => "HTMLTableCellElement",
+    HtmlTableElement => "HTMLTableElement",
+    HtmlTableRowElement => "HTMLTableRowElement",
+    HtmlTableSectionElement => "HTMLTableSectionElement",
+    HtmlTextAreaElement => "HTMLTextAreaElement",
+    HtmlTitleElement => "HTMLTitleElement",
+    HtmlUListElement => "HTMLUListElement",
+    HtmlVideoElement => "HTMLVideoElement",
+    HtmlAudioElement => "HTMLAudioElement",
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct IntersectionObserverHost;
+
+impl Class for IntersectionObserverHost {
+    const NAME: &'static str = "IntersectionObserver";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("observe"),
+            1,
+            NativeFunction::from_fn_ptr(intersection_observe),
+        );
+        class.method(
+            js_string!("unobserve"),
+            1,
+            NativeFunction::from_fn_ptr(signal_ignore),
+        );
+        class.method(
+            js_string!("disconnect"),
+            0,
+            NativeFunction::from_fn_ptr(signal_ignore),
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+
+    fn object_constructor(
+        instance: &JsObject<Self>,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let callback = args.first().cloned().unwrap_or(JsValue::undefined());
+        let object = instance.clone().upcast();
+        object.set(js_string!("callback"), callback, true, context)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct ResizeObserverHost;
+
+impl Class for ResizeObserverHost {
+    const NAME: &'static str = "ResizeObserver";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("observe"),
+            1,
+            NativeFunction::from_fn_ptr(resize_observe),
+        );
+        class.method(
+            js_string!("unobserve"),
+            1,
+            NativeFunction::from_fn_ptr(signal_ignore),
+        );
+        class.method(
+            js_string!("disconnect"),
+            0,
+            NativeFunction::from_fn_ptr(signal_ignore),
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+
+    fn object_constructor(
+        instance: &JsObject<Self>,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let callback = args.first().cloned().unwrap_or(JsValue::undefined());
+        let object = instance.clone().upcast();
+        object.set(js_string!("callback"), callback, true, context)?;
+        Ok(())
+    }
+}
+
+fn resize_observe(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let callback = object.get(js_string!("callback"), context)?;
+    let target = args.first().cloned().unwrap_or(JsValue::undefined());
+    let rect = ObjectInitializer::new(context)
+        .property(js_string!("x"), JsValue::from(0), ATTR)
+        .property(js_string!("y"), JsValue::from(0), ATTR)
+        .property(js_string!("top"), JsValue::from(0), ATTR)
+        .property(js_string!("left"), JsValue::from(0), ATTR)
+        .property(js_string!("width"), JsValue::from(800), ATTR)
+        .property(js_string!("height"), JsValue::from(600), ATTR)
+        .property(js_string!("right"), JsValue::from(800), ATTR)
+        .property(js_string!("bottom"), JsValue::from(600), ATTR)
+        .build();
+    let entry = ObjectInitializer::new(context)
+        .property(js_string!("target"), target, ATTR)
+        .property(js_string!("contentRect"), rect, ATTR)
+        .build();
+    let records = JsArray::from_iter([JsValue::from(entry)], context);
+    if let Some(function) = callback
+        .as_object()
+        .filter(|function| function.is_callable())
+    {
+        let _ = function.call(this, &[JsValue::from(records), this.clone()], context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn intersection_observe(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let callback = object.get(js_string!("callback"), context)?;
+    let target = args.first().cloned().unwrap_or(JsValue::undefined());
+    let entry = ObjectInitializer::new(context)
+        .property(js_string!("isIntersecting"), JsValue::from(true), ATTR)
+        .property(js_string!("intersectionRatio"), JsValue::from(1), ATTR)
+        .property(js_string!("target"), target, ATTR)
+        .build();
+    let records = JsArray::from_iter([JsValue::from(entry)], context);
+    if let Some(function) = callback
+        .as_object()
+        .filter(|function| function.is_callable())
+    {
+        let _ = function.call(this, &[JsValue::from(records), this.clone()], context);
+    }
+    Ok(JsValue::undefined())
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct FontFaceHost;
+
+impl Class for FontFaceHost {
+    const NAME: &'static str = "FontFace";
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        class.method(
+            js_string!("load"),
+            0,
+            NativeFunction::from_fn_ptr(font_face_load),
+        );
+        Ok(())
+    }
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        _args: &[JsValue],
+        _context: &mut Context,
+    ) -> JsResult<Self> {
+        Ok(Self)
+    }
+
+    fn object_constructor(
+        instance: &JsObject<Self>,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let family = args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| js_string!("").into());
+        let object = instance.clone().upcast();
+        object.set(js_string!("family"), family, true, context)?;
+        object.set(js_string!("status"), js_string!("loaded"), true, context)?;
+        Ok(())
+    }
+}
+
+fn font_face_load(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsPromise::resolve(this.clone(), context)?.into())
+}
+
+fn signal_ignore(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn signal_listen(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let event = arg_string(args, 0, context)?;
+    if event != "abort" {
+        return Ok(JsValue::undefined());
+    }
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let handler = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    let count = object
+        .get(js_string!("__n"), context)?
+        .as_number()
+        .unwrap_or(0.0) as u32;
+    object.set(js_string!(format!("__l{count}")), handler, true, context)?;
+    object.set(js_string!("__n"), JsValue::from(count + 1), true, context)?;
+    Ok(JsValue::undefined())
+}
+
+fn signal_throw_if_aborted(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    if object
+        .get(js_string!("aborted"), context)?
+        .as_boolean()
+        .unwrap_or(false)
+    {
+        let reason = object.get(js_string!("reason"), context)?;
+        let message = reason.to_string(context)?.to_std_string_lossy();
+        return Err(JsNativeError::typ().with_message(message).into());
+    }
+    Ok(JsValue::undefined())
+}
+
+fn signal_abort_static(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let constructor = context
+        .global_object()
+        .get(js_string!("AbortSignal"), context)?;
+    let Some(constructor) = constructor.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let signal = constructor.construct(&[], Some(&constructor), context)?;
+    let value = JsValue::from(signal.clone());
+    abort_signal(&value, args.first().cloned(), context)?;
+    Ok(value)
+}
+
+fn signal_timeout(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    // The timer is not wired to the host clock. Returning a live signal lets
+    // the caller keep going; aborting immediately would cancel the fetch.
+    let constructor = context
+        .global_object()
+        .get(js_string!("AbortSignal"), context)?;
+    let Some(constructor) = constructor.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    Ok(constructor
+        .construct(&[], Some(&constructor), context)?
+        .into())
+}
+
+fn controller_abort(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(controller) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let signal = controller.get(js_string!("signal"), context)?;
+    abort_signal(&signal, args.first().cloned(), context)?;
+    Ok(JsValue::undefined())
+}
+
+fn abort_signal(signal: &JsValue, reason: Option<JsValue>, context: &mut Context) -> JsResult<()> {
+    let Some(object) = signal.as_object() else {
+        return Ok(());
+    };
+    if object
+        .get(js_string!("aborted"), context)?
+        .as_boolean()
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let reason = reason.unwrap_or_else(|| js_string!("AbortError").into());
+    object.set(js_string!("aborted"), JsValue::from(true), true, context)?;
+    object.set(js_string!("reason"), reason, true, context)?;
+    let count = object
+        .get(js_string!("__n"), context)?
+        .as_number()
+        .unwrap_or(0.0) as u32;
+    let mut handlers = Vec::new();
+    for index in 0..count {
+        handlers.push(object.get(js_string!(format!("__l{index}")), context)?);
+    }
+    let onabort = object.get(js_string!("onabort"), context)?;
+    if !onabort.is_undefined() && !onabort.is_null() {
+        handlers.push(onabort);
+    }
+    let event = ObjectInitializer::new(context)
+        .property(js_string!("type"), js_string!("abort"), ATTR)
+        .property(js_string!("target"), signal.clone(), ATTR)
+        .build();
+    for handler in handlers {
+        if handler.is_callable()
+            && let Some(function) = handler.as_object()
+        {
+            let _ = function.call(signal, &[JsValue::from(event.clone())], context);
+        }
+    }
+    Ok(())
 }
 
 fn remember_port(context: &mut Context, id: u32, value: JsValue) -> JsResult<()> {
