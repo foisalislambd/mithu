@@ -1371,9 +1371,7 @@ const LANGUAGE_EXTRAS: &str = r#"
       if (rest === 2) m |= bytes[i + 1] << 8;
       out += table[(m >> 18) & 63] + table[(m >> 12) & 63];
       if (rest === 2) out += table[(m >> 6) & 63];
-      else if (!omitPadding) out += "=";
-      if (!omitPadding) out += "=";
-      if (rest === 2 && !omitPadding) out = out.slice(0, -1);
+      if (!omitPadding) out += rest === 1 ? "==" : "=";
     }
     return out;
   }

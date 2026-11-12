@@ -3708,6 +3708,50 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn github_header_hides_the_menu_button_at_desktop() {
+        // Reduced from github.githubassets.com marketing-header.module.css.
+        let css = r#"
+            .visuallyHidden__TIbnmb { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; }
+            .toggle__kPg75- { display: inline-block; }
+            @media (width>=1012px) { .toggle__kPg75- { display: none; } .toggleSlot__-ODxSX { display: none; } }
+            .bar__cF4m1O { display: flex; flex-direction: column; }
+            @media (width>=1012px) { .bar__cF4m1O { flex-direction: row; width: 100%; } }
+            .topRow__-dqkhM { display: flex; width: 100%; }
+            .LogoSlot__mHAmXE, .menu__2EHTkB { display: flex; }
+        "#;
+        let doc = parse_html(
+            r#"<header class="root__q6pgdo">
+                <h2 id="label" class="visuallyHidden__TIbnmb">Navigation Menu</h2>
+                <div id="bar" class="bar__cF4m1O">
+                  <div id="row" class="topRow__-dqkhM">
+                    <div id="logo" class="LogoSlot__mHAmXE">logo</div>
+                    <div id="menu" class="menu__2EHTkB">Products</div>
+                    <div id="toggle" class="toggleSlot__-ODxSX"><button class="toggle__kPg75-">menu</button></div>
+                  </div>
+                </div>
+              </header>"#,
+        );
+        let styles = style_document(&doc, css);
+        let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+        assert!(
+            find(&tree.root, doc.get_element_by_id("toggle").unwrap()).is_none(),
+            "the desktop media query should drop the hamburger"
+        );
+        let label = find(&tree.root, doc.get_element_by_id("label").unwrap()).unwrap();
+        assert!(label.rect.width < 8.0, "heading width {}", label.rect.width);
+        let row = find(&tree.root, doc.get_element_by_id("row").unwrap()).unwrap();
+        let logo = find(&tree.root, doc.get_element_by_id("logo").unwrap()).unwrap();
+        let menu = find(&tree.root, doc.get_element_by_id("menu").unwrap()).unwrap();
+        assert!(
+            menu.rect.x + 1.0 >= logo.rect.x && (logo.rect.y - menu.rect.y).abs() < 4.0,
+            "logo and menu should share a row: logo {:?} menu {:?}",
+            logo.rect,
+            menu.rect
+        );
+        assert!(row.rect.width > 600.0, "row width {}", row.rect.width);
+    }
+
     fn wpt_css_subset_reports_a_pass_rate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/wpt/css");
         let mut files: Vec<_> = std::fs::read_dir(&root)
