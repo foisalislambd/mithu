@@ -1012,6 +1012,10 @@ class ReadableStream {
       }
     };
   }
+  cancel() {
+    this._controller.close();
+    return Promise.resolve();
+  }
   tee() {
     var reader = this.getReader();
     var first, second;
@@ -7298,6 +7302,9 @@ mod tests {
                   controller.close();
                 }
               });
+              var ignored = new ReadableStream();
+              if (typeof ignored.cancel !== "function") throw new Error("stream cancel");
+              ignored.cancel();
               var branches = stream.tee();
               var reader = branches[0].getReader();
               reader.read().then(function (first) {
