@@ -1,7 +1,17 @@
 //! In-process JavaScript virtual machine.
 //!
-//! Boa runs ECMAScript in this process, including modules. Host objects are the
-//! window, document, and node tree. Timers and `location` report back to the browser.
+//! SpiderMonkey runs ECMAScript in this process, including modules. Host objects
+//! are the window, document, and node tree. Timers and `location` report back to
+//! the browser. Script tasks yield between files so the UI thread can paint.
+
+mod engine;
+
+#[macro_export]
+macro_rules! js_string {
+    ($value:expr) => {
+        $crate::engine::JsString::from($value)
+    };
+}
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -12,14 +22,14 @@ use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use boa_engine::module::{Module, ModuleLoader, ModuleRequest, Referrer};
-use boa_engine::object::builtins::{JsArray, JsPromise};
-use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
-use boa_engine::property::Attribute;
-use boa_engine::script::Script;
-use boa_engine::{
-    Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue,
-    NativeFunction, Source, Trace, js_string,
+use engine::module::{Module, ModuleLoader, ModuleRequest, Referrer};
+use engine::object::builtins::{JsArray, JsFunction, JsPromise};
+use engine::object::{FunctionObjectBuilder, ObjectInitializer};
+use engine::property::Attribute;
+use engine::script::Script;
+use engine::{
+    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
+    Source,
 };
 use mithu_css::{Declaration, parse_css, parse_declarations};
 use mithu_dom::{Document, NodeData, NodeId};
@@ -91,22 +101,19 @@ struct PageLoader {
     imports: HashMap<String, String>,
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct NodeKey {
-    #[unsafe_ignore_trace]
     id: usize,
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct ResponseKey {
-    #[unsafe_ignore_trace]
     body: String,
-    #[unsafe_ignore_trace]
     headers: String,
 }
 
 pub fn engine_name() -> &'static str {
-    "boa"
+    "spidermonkey"
 }
 
 pub struct Session {
@@ -192,13 +199,13 @@ impl Session {
         let local = Rc::new(RefCell::new(local));
         let session_store = Rc::new(RefCell::new(session_store));
         let mut context = Context::builder()
-            .module_loader(Rc::clone(&loader))
-            .host_hooks(Rc::new(RejectionHooks))
+            .module_loader(Rc::clone(&loader) as Rc<dyn ModuleLoader>)
+            .host_hooks(Rc::new(RejectionHooks) as Rc<dyn engine::HostHooks>)
             .build()
             .unwrap_or_else(|_| Context::default());
         // Boa's default stack is 10,240 slots. A page script that builds a
         // large expression (Google's interstitial) hits that before it finishes.
-        let mut limits = boa_engine::vm::RuntimeLimits::default();
+        let mut limits = engine::vm::RuntimeLimits::default();
         limits.set_stack_size_limit(1024 * 1024);
         // Each Boa frame is several kilobytes of native stack. 4,096 frames
         // overflow the UI thread before Boa can throw. 1,536 still covers a
@@ -334,6 +341,7 @@ impl Session {
 
     /// Moves the page clock forward and runs timers whose delay has elapsed.
     pub fn advance(&mut self, ms: u64) -> bool {
+        let _bound = self.context.as_mut().map(|context| context.bind());
         let Some(context) = self.context.as_mut() else {
             return false;
         };
@@ -361,6 +369,7 @@ impl Session {
     /// Runs listeners from the target up through its ancestors.
     /// Returns true when the browser should still perform the default action.
     pub fn dispatch(&mut self, id: NodeId, event: &str) -> bool {
+        let _bound = self.context.as_mut().map(|context| context.bind());
         self.prevented.set(false);
         let chain = {
             let doc = self.doc.borrow();
@@ -618,18 +627,18 @@ fn script_jobs(
 
 struct RejectionHooks;
 
-impl boa_engine::context::HostHooks for RejectionHooks {
+impl engine::HostHooks for RejectionHooks {
     fn promise_rejection_tracker(
         &self,
-        promise: &JsObject<boa_engine::builtins::promise::Promise>,
-        operation: boa_engine::builtins::promise::OperationType,
+        promise: &JsPromise,
+        operation: engine::OperationType,
         context: &mut Context,
     ) {
         let promise = JsValue::from(promise.clone());
         let Some(object) = promise.as_object() else {
             return;
         };
-        let unhandled = operation == boa_engine::builtins::promise::OperationType::Reject;
+        let unhandled = operation == engine::OperationType::Reject;
         let _ = object.set(
             js_string!("__mithuUnhandled"),
             JsValue::from(unhandled),
@@ -804,6 +813,7 @@ pub fn run_scripts(
 }
 
 fn install_host(context: &mut Context) -> JsResult<()> {
+    let _bound = context.bind();
     let listeners = ObjectInitializer::new(context).build();
     let document = document_object(context)?;
     let console = console_object(context)?;
@@ -1194,7 +1204,7 @@ fn install_group(context: &mut Context) -> JsResult<()> {
         let proto = array.get(js_string!("prototype"), context)?;
         if let Some(proto) = proto.as_object() {
             let group = native(context, "group", 1, group_array);
-            let property = boa_engine::property::PropertyDescriptor::builder()
+            let property = engine::property::PropertyDescriptor::builder()
                 .value(group)
                 .writable(true)
                 .enumerable(false)
@@ -1421,7 +1431,7 @@ fn define_hidden(
     name: &str,
     value: JsValue,
 ) -> JsResult<()> {
-    let property = boa_engine::property::PropertyDescriptor::builder()
+    let property = engine::property::PropertyDescriptor::builder()
         .value(value)
         .writable(true)
         .enumerable(false)
@@ -1435,10 +1445,10 @@ pub(crate) fn define_accessor(
     proto: &JsObject,
     context: &mut Context,
     name: &str,
-    getter: boa_engine::object::builtins::JsFunction,
-    setter: Option<boa_engine::object::builtins::JsFunction>,
+    getter: JsFunction,
+    setter: Option<JsFunction>,
 ) -> JsResult<()> {
-    let property = boa_engine::property::PropertyDescriptor::builder()
+    let property = engine::property::PropertyDescriptor::builder()
         .get(JsValue::from(getter))
         .maybe_set(setter.map(JsValue::from))
         .enumerable(true)
@@ -1448,10 +1458,10 @@ pub(crate) fn define_accessor(
         .map(|_| ())
 }
 
-fn link_prototype(context: &mut Context, child: &str, parent: &str) -> JsResult<()> {
+fn link_prototype(context: &mut Context, child_name: &str, parent: &str) -> JsResult<()> {
     let child = context
         .global_object()
-        .get(js_string!(child.to_string()), context)?;
+        .get(js_string!(child_name.to_string()), context)?;
     let parent = context
         .global_object()
         .get(js_string!(parent.to_string()), context)?;
@@ -1650,6 +1660,7 @@ function __mithuDataset(id) {
 "#;
 
 fn deliver_mutations(context: &mut Context) -> JsResult<()> {
+    let _bound = context.bind();
     crate::web::deliver_mutations(context)
 }
 
@@ -2524,7 +2535,7 @@ fn style_replace_sync(this: &JsValue, args: &[JsValue], context: &mut Context) -
 
 fn style_replace(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     style_replace_sync(this, args, context)?;
-    Ok(boa_engine::object::builtins::JsPromise::resolve(
+    Ok(JsPromise::resolve(
         JsValue::undefined(),
         context,
     )?
@@ -2771,6 +2782,7 @@ fn get_ready_state(_this: &JsValue, _args: &[JsValue], context: &mut Context) ->
 }
 
 fn signal_document_loaded(context: &mut Context) {
+    let _bound = context.bind();
     let Some(html) = (|| {
         let host = context.get_data::<Host>().cloned()?;
         *host.ready_state.borrow_mut() = "interactive".to_string();
@@ -2825,7 +2837,7 @@ pub(crate) fn native(
     name: &str,
     length: usize,
     body: fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>,
-) -> boa_engine::object::builtins::JsFunction {
+) -> JsFunction {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(body))
         .name(JsString::from(name))
         .length(length)
@@ -5396,6 +5408,7 @@ fn push_listener(context: &mut Context, key: &str, value: &JsValue, replace: boo
 }
 
 fn run_module(context: &mut Context, code: &str, name: &str) -> JsResult<()> {
+    let _bound = context.bind();
     let path = PathBuf::from(name);
     let module = Module::parse(Source::from_bytes(code).with_path(&path), None, context)?;
     // Link only after the loader promise finishes. Linking earlier panics inside Boa
@@ -5403,11 +5416,11 @@ fn run_module(context: &mut Context, code: &str, name: &str) -> JsResult<()> {
     let promise = module.load_link_evaluate(context);
     context.run_jobs()?;
     match promise.state() {
-        boa_engine::builtins::promise::PromiseState::Fulfilled(_) => Ok(()),
-        boa_engine::builtins::promise::PromiseState::Rejected(error) => {
+        engine::builtins::promise::PromiseState::Fulfilled(_) => Ok(()),
+        engine::builtins::promise::PromiseState::Rejected(error) => {
             Err(JsError::from_opaque(error))
         }
-        boa_engine::builtins::promise::PromiseState::Pending => Err(JsNativeError::typ()
+        engine::builtins::promise::PromiseState::Pending => Err(JsNativeError::typ()
             .with_message("the module did not finish loading")
             .into()),
     }
@@ -5442,6 +5455,7 @@ fn settle_fonts(context: &mut Context) {
 }
 
 fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
+    let _bound = context.bind();
     settle_fonts(context);
     let host = host(context)?;
     {
@@ -6749,7 +6763,7 @@ fn text_node(id: usize, context: &mut Context) -> JsValue {
     value
 }
 
-fn attach_node_prototype(object: &boa_engine::JsObject, context: &mut Context) {
+fn attach_node_prototype(object: &JsObject, context: &mut Context) {
     let Ok(ctor) = context.global_object().get(js_string!("Node"), context) else {
         return;
     };
@@ -7294,7 +7308,7 @@ fn map_specifier(imports: &HashMap<String, String>, spec: &str) -> Option<String
 
 impl ModuleLoader for PageLoader {
     fn init_import_meta(
-        self: Rc<Self>,
+        &self,
         import_meta: &JsObject,
         module: &Module,
         context: &mut Context,
@@ -7308,11 +7322,11 @@ impl ModuleLoader for PageLoader {
     }
 
     fn load_imported_module(
-        self: Rc<Self>,
+        &self,
         referrer: Referrer,
         request: ModuleRequest,
-        context: &RefCell<&mut Context>,
-    ) -> impl std::future::Future<Output = JsResult<Module>> {
+        context: &mut Context,
+    ) -> JsResult<Module> {
         let requested = request.specifier().to_std_string_lossy();
         let mapped = map_specifier(&self.imports, &requested);
         let specifier = if let Some(mapped) = mapped {
@@ -7335,18 +7349,15 @@ impl ModuleLoader for PageLoader {
                 )
             })?;
             let path = PathBuf::from(&specifier);
-            let module = {
-                let mut context = context.borrow_mut();
-                Module::parse(
-                    Source::from_bytes(code.as_str()).with_path(&path),
-                    None,
-                    &mut context,
-                )?
-            };
+            let module = Module::parse(
+                Source::from_bytes(code.as_str()).with_path(&path),
+                None,
+                context,
+            )?;
             self.cache.borrow_mut().insert(specifier, module.clone());
             Ok(module)
         })();
-        std::future::ready(result)
+        result
     }
 }
 

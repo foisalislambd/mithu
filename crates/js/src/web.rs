@@ -1,14 +1,12 @@
 //! Host classes a page script expects to exist: `URL`, `TextEncoder`,
 //! `XMLHttpRequest`, `MutationObserver`, and `history`.
 
-use boa_engine::class::{Class, ClassBuilder};
-use boa_engine::object::builtins::{JsArray, JsPromise};
-use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
-use boa_engine::property::Attribute;
-use boa_engine::{
-    Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue,
-    NativeFunction, Trace, js_string,
-};
+use crate::engine::class::{Class, ClassBuilder};
+use crate::engine::object::builtins::{JsArray, JsPromise};
+use crate::engine::object::{FunctionObjectBuilder, ObjectInitializer};
+use crate::engine::property::Attribute;
+use crate::engine::{Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction};
+use crate::js_string;
 
 use crate::{arg_string, cors_allows, cross_origin, host, native, resolve_request};
 
@@ -157,9 +155,8 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     Ok(())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct PageUrl {
-    #[unsafe_ignore_trace]
     url: mithu_url::Url,
 }
 
@@ -341,9 +338,8 @@ fn hash_of(url: &mithu_url::Url) -> String {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct SearchParams {
-    #[unsafe_ignore_trace]
     query: String,
 }
 
@@ -605,9 +601,8 @@ fn form_escape(input: &str) -> String {
     out
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct TextEncoderHost {
-    #[unsafe_ignore_trace]
     _private: u8,
 }
 
@@ -655,9 +650,8 @@ fn text_encode(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     uint8_array(text.as_bytes(), context)
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct TextDecoderHost {
-    #[unsafe_ignore_trace]
     _private: u8,
 }
 
@@ -750,19 +744,13 @@ fn uint8_array(bytes: &[u8], context: &mut Context) -> JsResult<JsValue> {
     Ok(array.into())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct Xhr {
-    #[unsafe_ignore_trace]
     method: String,
-    #[unsafe_ignore_trace]
     url: String,
-    #[unsafe_ignore_trace]
     asynchronous: bool,
-    #[unsafe_ignore_trace]
     status: u16,
-    #[unsafe_ignore_trace]
     body: String,
-    #[unsafe_ignore_trace]
     headers: Vec<(String, String)>,
 }
 
@@ -1036,9 +1024,8 @@ fn xhr_roundtrip(
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct MutationObserverHost {
-    #[unsafe_ignore_trace]
     _private: u8,
 }
 
@@ -1543,9 +1530,8 @@ fn record_array(records: &[mithu_dom::DomMutation], context: &mut Context) -> Js
     Ok(JsArray::from_iter(values, context).into())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct HtmlImage {
-    #[unsafe_ignore_trace]
     src: String,
 }
 
@@ -1618,7 +1604,7 @@ fn image_set_src(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     Ok(JsValue::undefined())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct DomEvent;
 
 impl Class for DomEvent {
@@ -1670,7 +1656,7 @@ impl Class for DomEvent {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct CustomEventHost;
 
 impl Class for CustomEventHost {
@@ -1714,7 +1700,7 @@ impl Class for CustomEventHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct DocumentHost;
 
 impl Class for DocumentHost {
@@ -1758,7 +1744,7 @@ impl Class for DocumentHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct HtmlElementHost;
 
 thread_local! {
@@ -1819,17 +1805,14 @@ impl Class for HtmlElementHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct MessagePortHost {
-    #[unsafe_ignore_trace]
     id: u32,
-    #[unsafe_ignore_trace]
     peer: u32,
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct MessageChannelHost {
-    #[unsafe_ignore_trace]
     _private: u8,
 }
 
@@ -1946,7 +1929,7 @@ impl Class for MessageChannelHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct AbortSignalHost;
 
 impl Class for AbortSignalHost {
@@ -2002,7 +1985,7 @@ impl Class for AbortSignalHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct AbortControllerHost;
 
 impl Class for AbortControllerHost {
@@ -2043,7 +2026,7 @@ impl Class for AbortControllerHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct HtmlTemplateHost;
 
 impl Class for HtmlTemplateHost {
@@ -2062,7 +2045,7 @@ impl Class for HtmlTemplateHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct EventTargetHost;
 
 impl Class for EventTargetHost {
@@ -2096,7 +2079,7 @@ impl Class for EventTargetHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct NodeHost;
 
 impl Class for NodeHost {
@@ -2124,7 +2107,7 @@ impl Class for NodeHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct ElementHost;
 
 impl Class for ElementHost {
@@ -2262,7 +2245,7 @@ impl Class for ElementHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct DocumentFragmentHost;
 
 impl Class for DocumentFragmentHost {
@@ -2301,7 +2284,7 @@ impl Class for DocumentFragmentHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct ShadowRootHost;
 
 impl Class for ShadowRootHost {
@@ -2356,7 +2339,7 @@ fn element_animate(_this: &JsValue, _args: &[JsValue], context: &mut Context) ->
 macro_rules! html_class {
     ($($struct:ident => $name:literal),+ $(,)?) => {
         $(
-            #[derive(Debug, Trace, Finalize, JsData)]
+            #[derive(Debug)]
             struct $struct;
 
             impl Class for $struct {
@@ -2455,7 +2438,7 @@ html_class! {
     HtmlTrackElement => "HTMLTrackElement",
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct IntersectionObserverHost;
 
 impl Class for IntersectionObserverHost {
@@ -2500,7 +2483,7 @@ impl Class for IntersectionObserverHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct ResizeObserverHost;
 
 impl Class for ResizeObserverHost {
@@ -2677,7 +2660,7 @@ pub(crate) fn deliver_layout_observer(value: &JsValue, context: &mut Context) ->
     Ok(())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct RangeHost;
 
 impl Class for RangeHost {
@@ -2773,7 +2756,7 @@ fn range_clone(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsR
     constructor.construct(&[], None, context).map(JsValue::from)
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct FontFaceHost;
 
 impl Class for FontFaceHost {
