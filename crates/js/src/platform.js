@@ -428,4 +428,71 @@
       yield: function () { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
     };
   }
+  if (typeof PerformanceObserver !== "function") {
+    function PerformanceObserver(callback) { this._callback = callback; }
+    PerformanceObserver.prototype.observe = function () {};
+    PerformanceObserver.prototype.disconnect = function () {};
+    PerformanceObserver.prototype.takeRecords = function () { return []; };
+    PerformanceObserver.supportedEntryTypes = [
+      "element", "event", "first-input", "largest-contentful-paint",
+      "layout-shift", "longtask", "mark", "measure", "navigation", "paint", "resource"
+    ];
+    globalThis.PerformanceObserver = PerformanceObserver;
+  }
+  if (typeof NodeFilter !== "object" || NodeFilter === null) {
+    globalThis.NodeFilter = {
+      FILTER_ACCEPT: 1,
+      FILTER_REJECT: 2,
+      FILTER_SKIP: 3,
+      SHOW_ALL: 0xffffffff,
+      SHOW_ELEMENT: 1,
+      SHOW_TEXT: 4,
+      SHOW_COMMENT: 128,
+      SHOW_DOCUMENT: 256,
+      SHOW_DOCUMENT_FRAGMENT: 1024
+    };
+  }
+  function nodeBit(node) {
+    if (!node) return 0;
+    if (node.nodeType === 1) return 1;
+    if (node.nodeType === 3) return 4;
+    if (node.nodeType === 8) return 128;
+    if (node.nodeType === 9) return 256;
+    if (node.nodeType === 11) return 1024;
+    return 0;
+  }
+  function TreeWalker(root, whatToShow) {
+    this.root = root;
+    this.currentNode = root;
+    this.whatToShow = whatToShow == null ? 0xffffffff : whatToShow;
+  }
+  TreeWalker.prototype.nextNode = function () {
+    var node = this.currentNode;
+    for (;;) {
+      if (node && node.firstChild) node = node.firstChild;
+      else {
+        while (node && node !== this.root && !node.nextSibling) node = node.parentNode;
+        if (!node || node === this.root) return null;
+        node = node.nextSibling;
+      }
+      if ((this.whatToShow & nodeBit(node)) !== 0) {
+        this.currentNode = node;
+        return node;
+      }
+    }
+  };
+  document.importNode = function (node, deep) {
+    if (node && typeof node.cloneNode === "function") return node.cloneNode(!!deep);
+    return node;
+  };
+  document.adoptNode = function (node) { return node; };
+  document.createTreeWalker = function (root, whatToShow) {
+    return new TreeWalker(root, whatToShow);
+  };
+  if (!document.firstElementChild) {
+    Object.defineProperty(document, "firstElementChild", {
+      configurable: true,
+      get: function () { return document.documentElement; }
+    });
+  }
 })();

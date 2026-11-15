@@ -3066,6 +3066,8 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let nonce_get = native(context, "get nonce", 0, get_nonce);
     let connected_get = native(context, "get isConnected", 0, get_is_connected);
     let nonce_set = native(context, "set nonce", 1, set_nonce);
+    let first_element_get = native(context, "get firstElementChild", 0, get_first_element_child);
+    let attributes_get = native(context, "get attributes", 0, get_attributes);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(
@@ -3204,6 +3206,13 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         )
         .accessor(js_string!("parentElement"), Some(parent_get), None, ATTR)
         .accessor(js_string!("nextElementSibling"), Some(next_get), None, ATTR)
+        .accessor(
+            js_string!("firstElementChild"),
+            Some(first_element_get),
+            None,
+            ATTR,
+        )
+        .accessor(js_string!("attributes"), Some(attributes_get), None, ATTR)
         .accessor(
             js_string!("previousElementSibling"),
             Some(previous_get),
@@ -6639,6 +6648,63 @@ fn clone_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
     Ok(node_value(cloned.0, context))
 }
 
+fn get_first_element_child(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::null());
+    };
+    let child = {
+        let host = host(context)?;
+        let doc = host.doc.borrow();
+        doc.node(id)
+            .children
+            .iter()
+            .copied()
+            .find(|child| doc.element_name(*child).is_some())
+    };
+    Ok(match child {
+        Some(child) => element_value(child.0, context),
+        None => JsValue::null(),
+    })
+}
+
+fn get_attributes(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsArray::from_iter([], context).into());
+    };
+    let pairs = {
+        let host = host(context)?;
+        let doc = host.doc.borrow();
+        match &doc.node(id).data {
+            NodeData::Element(element) => element.attrs.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let mut values = Vec::new();
+    for (name, value) in &pairs {
+        let attr = ObjectInitializer::new(context)
+            .property(js_string!("name"), js_string!(name.clone()), ATTR)
+            .property(js_string!("value"), js_string!(value.clone()), ATTR)
+            .property(js_string!("nodeName"), js_string!(name.clone()), ATTR)
+            .build();
+        values.push(JsValue::from(attr));
+    }
+    let list = JsValue::from(JsArray::from_iter(values, context));
+    if let Some(object) = list.as_object() {
+        for (name, value) in &pairs {
+            let attr = ObjectInitializer::new(context)
+                .property(js_string!("name"), js_string!(name.clone()), ATTR)
+                .property(js_string!("value"), js_string!(value.clone()), ATTR)
+                .build();
+            object.set(js_string!(name.clone()), attr, true, context)?;
+        }
+    }
+    Ok(list)
+}
+
 fn get_nonce(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     attr_value(this, "nonce", context)
 }
@@ -8191,6 +8257,17 @@ mod tests {
               if (box.getBoundingClientRect() !== rect) throw new Error("rect");
               if (document.elementFromPoint(10, 10) !== null) throw new Error("hit");
               if (document.elementsFromPoint(10, 10).length !== 0) throw new Error("hits");
+              if (typeof PerformanceObserver !== "function") throw new Error("po");
+              if (PerformanceObserver.supportedEntryTypes.indexOf("layout-shift") < 0) throw new Error("shift");
+              var imported = document.importNode(mark, true);
+              if (imported.nodeType !== 8 || imported.data !== "$?") throw new Error("import");
+              var walker = document.createTreeWalker(fragment, NodeFilter.SHOW_COMMENT);
+              var stepped = walker.nextNode();
+              if (!stepped || stepped.data !== "$?") throw new Error("walker");
+              var named = document.createElement("div");
+              named.setAttribute("id", "z");
+              if ([...named.attributes][0].name !== "id") throw new Error("attrs");
+              if (!document.firstElementChild) throw new Error("first");
               document.title = "stable";
             </script>"#,
         );
