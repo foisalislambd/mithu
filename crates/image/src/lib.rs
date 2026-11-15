@@ -90,6 +90,13 @@ fn unpremultiply(r: u8, g: u8, b: u8, a: u8) -> u32 {
 }
 
 pub fn decode_data_url(url: &str) -> Option<Bitmap> {
+    let unescaped;
+    let url = if url.contains('\\') {
+        unescaped = unescape_css(url);
+        unescaped.as_str()
+    } else {
+        url
+    };
     let rest = url.trim().strip_prefix("data:")?;
     let (meta, data) = rest.split_once(',')?;
     let bytes = if meta.to_ascii_lowercase().contains(";base64") {
@@ -100,6 +107,44 @@ pub fn decode_data_url(url: &str) -> Option<Bitmap> {
         percent_decode_bytes(data)
     };
     decode(&bytes).or_else(|| decode_svg(&bytes))
+}
+
+/// Stylo serializes a quote inside a url as `\22` or `\"`. The SVG bytes
+/// need the real character before resvg will parse them.
+fn unescape_css(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+            let next = bytes[index + 1];
+            if next.is_ascii_hexdigit() {
+                let mut end = index + 2;
+                let limit = (index + 7).min(bytes.len());
+                while end < limit && bytes[end].is_ascii_hexdigit() {
+                    end += 1;
+                }
+                if let Ok(code) = u32::from_str_radix(
+                    std::str::from_utf8(&bytes[index + 1..end]).unwrap_or(""),
+                    16,
+                ) && let Some(ch) = char::from_u32(code)
+                {
+                    out.push(ch);
+                    if end < bytes.len() && bytes[end] == b' ' {
+                        end += 1;
+                    }
+                    index = end;
+                    continue;
+                }
+            }
+            out.push(next as char);
+            index += 2;
+            continue;
+        }
+        out.push(bytes[index] as char);
+        index += 1;
+    }
+    out
 }
 
 fn from_dynamic(image: DynamicImage) -> Option<Bitmap> {

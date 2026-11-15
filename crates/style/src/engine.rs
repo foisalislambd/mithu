@@ -967,19 +967,52 @@ fn css_of_prop(values: &ComputedValues, name: &str) -> String {
 fn css_image_url(value: &str) -> Option<String> {
     let start = value.find("url(")? + 4;
     let rest = value[start..].trim_start();
-    let body = if let Some(rest) = rest.strip_prefix('"') {
-        rest.split('"').next()?
-    } else if let Some(rest) = rest.strip_prefix('\'') {
-        rest.split('\'').next()?
+    let quote = rest.chars().next()?;
+    let url = if quote == '"' || quote == '\'' {
+        unescape_css_string(&rest[1..], quote)
     } else {
-        rest.split(')').next()?.trim()
+        rest.split(')').next()?.trim().to_string()
     };
-    let url = body.trim();
-    if url.is_empty() {
-        None
-    } else {
-        Some(url.to_string())
+    if url.is_empty() { None } else { Some(url) }
+}
+
+/// A CSS string stops at an unescaped quote. `\22` and `\"` are both a quote.
+fn unescape_css_string(value: &str, quote: char) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let Some(next) = chars.next() else {
+                break;
+            };
+            if next.is_ascii_hexdigit() {
+                let mut hex = String::from(next);
+                while hex.len() < 6
+                    && chars
+                        .peek()
+                        .is_some_and(|item| item.is_ascii_hexdigit())
+                {
+                    hex.push(chars.next().unwrap_or_default());
+                }
+                if chars.peek() == Some(&' ') {
+                    chars.next();
+                }
+                if let Ok(code) = u32::from_str_radix(&hex, 16)
+                    && let Some(decoded) = char::from_u32(code)
+                {
+                    out.push(decoded);
+                    continue;
+                }
+            }
+            out.push(next);
+            continue;
+        }
+        if ch == quote {
+            break;
+        }
+        out.push(ch);
     }
+    out
 }
 
 fn css_of(value: &impl ToCss) -> String {

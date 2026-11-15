@@ -1345,6 +1345,11 @@ mod tests {
             mask.contains("data:image/svg+xml"),
             "data svg mask should stay on the element, got {mask}"
         );
+        assert!(
+            mithu_image::decode_data_url(mask).is_some(),
+            "the computed mask should rasterize, got {:?}",
+            &mask[..mask.len().min(220)]
+        );
     }
 
     #[test]

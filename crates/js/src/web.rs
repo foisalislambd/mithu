@@ -16,6 +16,16 @@ const ATTR: Attribute = Attribute::WRITABLE
     .union(Attribute::ENUMERABLE)
     .union(Attribute::CONFIGURABLE);
 
+fn illegal_constructor(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Err(JsNativeError::typ()
+        .with_message("Illegal constructor")
+        .into())
+}
+
 pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     context.register_global_class::<PageUrl>()?;
     context.register_global_class::<SearchParams>()?;
@@ -97,9 +107,26 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
         "TreeWalker",
     ] {
         let prototype = ObjectInitializer::new(context).build();
-        let constructor = ObjectInitializer::new(context)
-            .property(js_string!("prototype"), prototype, ATTR)
-            .build();
+        let constructor = FunctionObjectBuilder::new(
+            context.realm(),
+            NativeFunction::from_fn_ptr(illegal_constructor),
+        )
+        .name(JsString::from(name))
+        .length(0)
+        .constructor(true)
+        .build();
+        constructor.set(
+            js_string!("prototype"),
+            JsValue::from(prototype.clone()),
+            false,
+            context,
+        )?;
+        prototype.set(
+            js_string!("constructor"),
+            JsValue::from(constructor.clone()),
+            false,
+            context,
+        )?;
         if name == "NodeFilter" {
             constructor.set(js_string!("SHOW_ALL"), JsValue::from(-1), false, context)?;
             constructor.set(js_string!("SHOW_ELEMENT"), JsValue::from(1), false, context)?;
