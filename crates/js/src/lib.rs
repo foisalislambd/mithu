@@ -3110,6 +3110,8 @@ fn note_mutation(
             target,
             kind: kind.to_string(),
             attribute,
+            added: Vec::new(),
+            removed: Vec::new(),
         });
     Ok(())
 }
@@ -6837,6 +6839,26 @@ mod tests {
               });
               observer.observe(node, { characterData: true });
               node.data = "b";
+            </script></body>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "ok");
+    }
+
+    #[test]
+    fn a_child_list_record_lists_added_nodes() {
+        let doc = parse_html(
+            r#"<body><div id="host"></div><script>
+              var host = document.getElementById("host");
+              var observer = new MutationObserver(function (records) {
+                var added = records[0] && records[0].addedNodes;
+                document.title = added && added.length === 1 && added[0].id === "item" ? "ok" : "bad";
+              });
+              observer.observe(host, { childList: true });
+              var item = document.createElement("span");
+              item.id = "item";
+              host.appendChild(item);
             </script></body>"#,
         );
         let session = Session::open(doc, |_| None);

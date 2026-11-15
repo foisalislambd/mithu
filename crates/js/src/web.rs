@@ -1371,6 +1371,14 @@ fn deliver_one_batch(records: &[mithu_dom::DomMutation], context: &mut Context) 
     Ok(())
 }
 
+fn node_list(ids: &[mithu_dom::NodeId], context: &mut Context) -> JsResult<JsValue> {
+    let nodes = ids
+        .iter()
+        .map(|id| crate::element_value(id.0, context))
+        .collect::<Vec<_>>();
+    Ok(JsArray::from_iter(nodes, context).into())
+}
+
 fn record_array(records: &[mithu_dom::DomMutation], context: &mut Context) -> JsResult<JsValue> {
     let mut values = Vec::new();
     for record in records {
@@ -1379,10 +1387,14 @@ fn record_array(records: &[mithu_dom::DomMutation], context: &mut Context) -> Js
             None => JsValue::null(),
         };
         let target = crate::element_value(record.target.0, context);
+        let added = node_list(&record.added, context)?;
+        let removed = node_list(&record.removed, context)?;
         let mut item = ObjectInitializer::new(context);
         item.property(js_string!("type"), js_string!(record.kind.clone()), ATTR)
             .property(js_string!("attributeName"), attribute, ATTR)
-            .property(js_string!("target"), target, ATTR);
+            .property(js_string!("target"), target, ATTR)
+            .property(js_string!("addedNodes"), added, ATTR)
+            .property(js_string!("removedNodes"), removed, ATTR);
         values.push(JsValue::from(item.build()));
     }
     Ok(JsArray::from_iter(values, context).into())

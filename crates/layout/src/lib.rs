@@ -1030,6 +1030,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn inline_svg_builds_a_path() {
         let doc = parse_html(
             r##"<svg id="icon" viewBox="0 0 10 10" width="20" height="20"><path d="M0 0 L10 0 L10 10 Z" fill="#ff0000"/></svg>"##,
@@ -1273,4 +1274,68 @@ mod tests {
         eprintln!("{report}");
         assert_eq!(passed, files.len(), "{notes:?}");
     }
+
+    #[test]
+    fn a_text_and_class_edit_updates_the_live_blitz_document() {
+        let mut doc = parse_html(r#"<p id="line" class="plain">alpha</p>"#);
+        let css = "p{font-size:16px}.plain{color:#111}.hot{color:#c00}";
+        let styles = style_document(&doc, css);
+        let tree = layout_tree(&doc, &styles, 400.0, 200.0, &NaiveMetrics, &HashMap::new());
+        let paragraph = doc.get_element_by_id("line").unwrap();
+        let first = find(&tree.root, paragraph).unwrap();
+        let text = line_text(first);
+        assert!(text.contains("alpha"), "{text}");
+
+        let text_id = doc.nodes[paragraph.0].children[0];
+        doc.set_text_content(text_id, "beta");
+        let styles = style_document(&doc, css);
+        let tree = layout_tree(&doc, &styles, 400.0, 200.0, &NaiveMetrics, &HashMap::new());
+        let text = line_text(find(&tree.root, paragraph).unwrap());
+        assert!(text.contains("beta"), "{text}");
+        assert!(!text.contains("alpha"), "{text}");
+
+        doc.set_attr(paragraph, "class", "hot");
+        let styles = style_document(&doc, css);
+        let color = styles[paragraph.0].color;
+        assert!(color.r > color.g && color.r > 100, "{color:?}");
+    }
+
+    fn line_text(box_: &LayoutBox) -> String {
+        let mut text = String::new();
+        text.push_str(&box_
+            .lines
+            .iter()
+            .flat_map(|line| line.fragments.iter())
+            .map(|fragment| fragment.text.as_str())
+            .collect::<String>());
+        for child in &box_.children {
+            text.push_str(&line_text(child));
+        }
+        text
+    }
+
+    #[test]
+    fn mdn_featured_row_lays_out_the_article_title() {
+        let doc = parse_html(
+            r#"<section><h2>Featured articles</h2><ul class="featured-articles"><li><article class="featured-articles__article"><a class="featured-articles__tag" href="/blog">Blog</a><h3 class="featured-articles__title"><a href="/x">Celebrating 20 years of MDN</a></h3><p class="featured-articles__summary">MDN turns 20 and the summary is long enough to wrap onto more than one line.</p></article></li></ul></section>"#,
+        );
+        let css = ":root{--color-black:#000;--color-white:#fff;--color-gray-60:#5b5b66;--font-line-normal:1.5;--font-size-normal:1rem;--font-size-small:0.8rem;--font-size-large:1.5rem;--color-text-primary:light-dark(var(--color-black),var(--color-white));--color-border-primary:light-dark(var(--color-gray-60),#999)}html{color:var(--color-text-primary);font-size:var(--font-size-normal);color-scheme:light dark}.homepage-body h2,.section h2,h2{font-size:var(--font-size-large)}.featured-articles{--base-line-height:1.2;display:grid;gap:1rem;grid-template-columns:repeat(2,1fr)}.featured-articles>li{display:contents}.featured-articles a:link{color:var(--color-text-primary)}.featured-articles__article{border:1px solid var(--color-border-primary);display:flex;flex-direction:column;padding:1rem}.featured-articles__tag{font-size:var(--font-size-small)}.featured-articles__title{display:flex;font-size:var(--font-size-normal);line-height:var(--font-line-normal);margin:0 0 1em}.featured-articles__summary{font-size:var(--font-size-small);line-height:var(--base-line-height);min-height:calc(3em * var(--base-line-height));overflow:hidden}";
+        let styles = style_document(&doc, css);
+        let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+        let title = styles.iter().enumerate().find(|(index, _)| {
+            doc.element_name(NodeId(*index)) == Some("a")
+                && doc.attr(NodeId(*index), "href") == Some("/x")
+        });
+        let (index, style) = title.expect("title link");
+        let text = line_text(&tree.root);
+        let box_ = find(&tree.root, NodeId(index)).expect("title box");
+        assert!(
+            text.contains("Celebrating") && box_.rect.height > 8.0 && style.color.r < 40,
+            "text {text:?} height {} color {:?} font {}",
+            box_.rect.height,
+            style.color,
+            style.font_size
+        );
+    }
+
 }

@@ -32,6 +32,24 @@ static RESOLVE_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
     static FRAME_CACHE: RefCell<Option<(u64, Frame)>> = const { RefCell::new(None) };
+    /// The last Blitz document. A later resolve with the same element tree
+    /// writes text and attribute changes through `DocumentMutator` and resolves
+    /// again, instead of building a second document.
+    static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
+}
+
+struct Live {
+    structure: u64,
+    width_bits: u32,
+    height_bits: u32,
+    fonts: u64,
+    images: u64,
+    hover: Option<usize>,
+    css: String,
+    style_text: Option<blitz_dom::NodeId>,
+    mirror: Vec<Option<blitz_dom::NodeId>>,
+    snapshot: Vec<Vec<(String, String)>>,
+    blitz: BaseDocument,
 }
 
 thread_local! {
@@ -109,6 +127,10 @@ pub fn resolve(
 
     let width = state.viewport_width.max(1.0);
     let height = viewport_height.max(1.0);
+    if let Some(frame) = reuse_live(doc, author_css, state, width, height, images, fonts) {
+        FRAME_CACHE.with(|slot| *slot.borrow_mut() = Some((key, frame.clone())));
+        return frame;
+    }
     let mut blitz = BaseDocument::new(DocumentConfig {
         viewport: Some(Viewport {
             color_scheme: ColorScheme::Light,
@@ -127,6 +149,7 @@ pub fn resolve(
     });
 
     let mut mirror = vec![None; doc.nodes.len()];
+    let mut style_text = None;
     let root = blitz.root_node().id;
     {
         let mut editor = Editor { doc: &mut blitz };
@@ -139,6 +162,7 @@ pub fn resolve(
             let text_id = mutator.create_text_node(author_css);
             mutator.append_children(style_id, &[text_id]);
             mutator.append_children(parent, &[style_id]);
+            style_text = Some(text_id);
         }
     }
 
@@ -176,7 +200,126 @@ pub fn resolve(
     }
 
     blitz.resolve(0.0);
+    blitz.set_incremental_layout(true);
+    let frame = read_frame(&blitz, &mirror, doc);
+    LIVE.with(|slot| {
+        *slot.borrow_mut() = Some(Live {
+            structure: structure_key(doc),
+            width_bits: width.to_bits(),
+            height_bits: height.to_bits(),
+            fonts: resource_key(fonts),
+            images: image_key(images),
+            hover: state.hover.map(|id| id.0),
+            css: author_css.to_string(),
+            style_text,
+            mirror,
+            snapshot: attr_snapshot(doc),
+            blitz,
+        });
+    });
+    FRAME_CACHE.with(|slot| *slot.borrow_mut() = Some((key, frame.clone())));
+    frame
+}
 
+fn reuse_live(
+    doc: &Document,
+    author_css: &str,
+    state: crate::StyleState,
+    width: f32,
+    height: f32,
+    images: &[(NodeId, u32, u32)],
+    fonts: &[(String, Vec<u8>)],
+) -> Option<Frame> {
+    LIVE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let live = slot.as_mut()?;
+        if live.structure != structure_key(doc)
+            || live.width_bits != width.to_bits()
+            || live.height_bits != height.to_bits()
+            || live.fonts != resource_key(fonts)
+            || live.images != image_key(images)
+            || live.hover != state.hover.map(|id| id.0)
+        {
+            return None;
+        }
+        if author_css != live.css && live.style_text.is_none() {
+            return None;
+        }
+        apply_live_edits(live, doc, author_css);
+        live.blitz.resolve(0.0);
+        Some(read_frame(&live.blitz, &live.mirror, doc))
+    })
+}
+
+fn apply_live_edits(live: &mut Live, doc: &Document, css: &str) {
+    let mirror = live.mirror.clone();
+    let previous = live.snapshot.clone();
+    let mut text_updates = Vec::new();
+    let mut attr_sets = Vec::new();
+    let mut attr_clears = Vec::new();
+    let mut next_snapshot = previous.clone();
+    for (index, node) in doc.nodes.iter().enumerate() {
+        let Some(blitz_id) = mirror.get(index).copied().flatten() else {
+            continue;
+        };
+        match &node.data {
+            NodeData::Text(text) => {
+                let current = live
+                    .blitz
+                    .get_node(blitz_id)
+                    .map(|node| node.text_content())
+                    .unwrap_or_default();
+                if current != *text {
+                    text_updates.push((blitz_id, text.clone()));
+                }
+            }
+            NodeData::Element(element) => {
+                let mut next = element.attrs.clone();
+                next.sort();
+                let old = previous.get(index).cloned().unwrap_or_default();
+                if old != next {
+                    for (key, value) in &next {
+                        let unchanged = old.iter().any(|(name, current)| name == key && current == value);
+                        if !unchanged {
+                            attr_sets.push((blitz_id, key.clone(), value.clone()));
+                        }
+                    }
+                    for (key, _) in &old {
+                        if !next.iter().any(|(name, _)| name == key) {
+                            attr_clears.push((blitz_id, key.clone()));
+                        }
+                    }
+                    if let Some(slot) = next_snapshot.get_mut(index) {
+                        *slot = next;
+                    }
+                }
+            }
+            NodeData::Document | NodeData::Comment(_) => {}
+        }
+    }
+    let css_changed = css != live.css;
+    {
+        let mut mutator = live.blitz.mutate();
+        for (id, text) in &text_updates {
+            mutator.set_node_text(*id, text);
+        }
+        for (id, key, value) in &attr_sets {
+            mutator.set_attribute(*id, attr_name(key), value);
+        }
+        for (id, key) in &attr_clears {
+            mutator.clear_attribute(*id, attr_name(key));
+        }
+        if css_changed && let Some(id) = live.style_text {
+            mutator.set_node_text(id, css);
+        }
+    }
+    live.snapshot = next_snapshot;
+    if css_changed {
+        live.css = css.to_string();
+    }
+}
+
+fn read_frame(blitz: &BaseDocument, mirror: &[Option<blitz_dom::NodeId>], doc: &Document) -> Frame {
     let mut styles = vec![ComputedStyle::initial(); doc.nodes.len()];
     let mut placed = (0..doc.nodes.len())
         .map(|_| Placed {
@@ -227,7 +370,7 @@ pub fn resolve(
         if node.flags.is_inline_root()
             && let Some(inline) = element.inline_layout_data.as_ref()
         {
-            placed[index].lines = inline_lines(&blitz, &mirror, index, node, inline);
+            placed[index].lines = inline_lines(blitz, mirror, index, node, inline);
         }
     }
     // Mixed block/inline parents wrap stray inlines in anonymous boxes. Those
@@ -263,20 +406,72 @@ pub fn resolve(
             else {
                 continue;
             };
-            let extra = inline_lines(&blitz, &mirror, index, child, inline);
+            let extra = inline_lines(blitz, mirror, index, child, inline);
             placed[index].lines.extend(extra);
         }
     }
     paint_fragments(doc, &styles, &mut placed);
-
-    let background = page_background(doc, &styles);
-    let frame = Frame {
+    Frame {
+        background: page_background(doc, &styles),
         styles,
         placed,
-        background,
-    };
-    FRAME_CACHE.with(|slot| *slot.borrow_mut() = Some((key, frame.clone())));
-    frame
+    }
+}
+
+fn structure_key(doc: &Document) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    doc.nodes.len().hash(&mut hasher);
+    for node in &doc.nodes {
+        node.parent.map(|id| id.0).hash(&mut hasher);
+        for child in &node.children {
+            child.0.hash(&mut hasher);
+        }
+        match &node.data {
+            NodeData::Document => 0u8.hash(&mut hasher),
+            NodeData::Element(element) => {
+                1u8.hash(&mut hasher);
+                element.name.hash(&mut hasher);
+            }
+            NodeData::Text(_) => 2u8.hash(&mut hasher),
+            NodeData::Comment(_) => 3u8.hash(&mut hasher),
+        }
+    }
+    hasher.finish()
+}
+
+fn attr_snapshot(doc: &Document) -> Vec<Vec<(String, String)>> {
+    doc.nodes
+        .iter()
+        .map(|node| match &node.data {
+            NodeData::Element(element) => {
+                let mut attrs = element.attrs.clone();
+                attrs.sort();
+                attrs
+            }
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn image_key(images: &[(NodeId, u32, u32)]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for (id, width, height) in images {
+        id.0.hash(&mut hasher);
+        width.hash(&mut hasher);
+        height.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn resource_key(fonts: &[(String, Vec<u8>)]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for (family, bytes) in fonts {
+        family.hash(&mut hasher);
+        bytes.len().hash(&mut hasher);
+        bytes.first().hash(&mut hasher);
+        bytes.last().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn frame_key(

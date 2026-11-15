@@ -32,6 +32,8 @@ pub struct DomMutation {
     pub target: NodeId,
     pub kind: String,
     pub attribute: Option<String>,
+    pub added: Vec<NodeId>,
+    pub removed: Vec<NodeId>,
 }
 
 #[derive(Clone, Debug)]
@@ -217,7 +219,21 @@ impl Document {
             data: NodeData::Text(text.to_string()),
         });
         self.nodes[parent.0].children.push(id);
+        self.note_children(parent, vec![id], Vec::new());
         Some(id)
+    }
+
+    fn note_children(&mut self, target: NodeId, added: Vec<NodeId>, removed: Vec<NodeId>) {
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+        self.mutations.push(DomMutation {
+            target,
+            kind: "childList".to_string(),
+            attribute: None,
+            added,
+            removed,
+        });
     }
 
     pub fn set_attr(&mut self, id: NodeId, name: &str, value: &str) {
@@ -299,11 +315,12 @@ impl Document {
             return;
         }
         let children = std::mem::take(&mut self.nodes[id.0].children);
-        for child in children {
+        for child in &children {
             if let Some(node) = self.nodes.get_mut(child.0) {
                 node.parent = None;
             }
         }
+        self.note_children(id, Vec::new(), children);
     }
 
     pub fn set_text_content(&mut self, id: NodeId, text: &str) {
@@ -324,13 +341,17 @@ impl Document {
         let Some(node) = self.nodes.get(id.0) else {
             return;
         };
-        if let Some(parent) = node.parent
+        let parent = node.parent;
+        if let Some(parent) = parent
             && let Some(parent_node) = self.nodes.get_mut(parent.0)
         {
             parent_node.children.retain(|child| *child != id);
         }
         if let Some(node) = self.nodes.get_mut(id.0) {
             node.parent = None;
+        }
+        if let Some(parent) = parent {
+            self.note_children(parent, Vec::new(), vec![id]);
         }
     }
 
@@ -420,6 +441,7 @@ impl Document {
         self.detach(child);
         self.nodes[child.0].parent = Some(parent);
         self.nodes[parent.0].children.push(child);
+        self.note_children(parent, vec![child], Vec::new());
         true
     }
 
@@ -445,9 +467,11 @@ impl Document {
                 .position(|id| *id == before)
         {
             self.nodes[parent.0].children.insert(index, child);
+            self.note_children(parent, vec![child], Vec::new());
             return true;
         }
         self.nodes[parent.0].children.push(child);
+        self.note_children(parent, vec![child], Vec::new());
         true
     }
 
