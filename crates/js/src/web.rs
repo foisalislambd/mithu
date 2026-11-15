@@ -1721,7 +1721,7 @@ impl Class for MessagePortHost {
         class.method(
             js_string!("start"),
             0,
-            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            NativeFunction::from_fn_ptr(port_start),
         );
         class.method(
             js_string!("close"),
@@ -1759,6 +1759,10 @@ impl Class for MessagePortHost {
             .map(|port| port.id)
             .unwrap_or(0);
         remember_port(context, id, instance.clone().upcast().into())?;
+        let object = instance.clone().upcast();
+        let get = crate::native(context, "get onmessage", 0, port_onmessage_get);
+        let set = crate::native(context, "set onmessage", 1, port_onmessage_set);
+        let _ = crate::define_accessor(&object, context, "onmessage", get, Some(set));
         Ok(())
     }
 }
@@ -2724,17 +2728,94 @@ fn port_post(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     let Some(peer_object) = peer_value.as_object() else {
         return Ok(JsValue::undefined());
     };
-    let mut event = ObjectInitializer::new(context);
-    event.property(js_string!("data"), data, ATTR);
-    let event = JsValue::from(event.build());
-    let handler = peer_object.get(js_string!("onmessage"), context)?;
+    let event = ObjectInitializer::new(context)
+        .property(js_string!("data"), data, ATTR)
+        .property(js_string!("target"), peer_value.clone(), ATTR)
+        .build();
+    let event = JsValue::from(event);
+    let started = peer_object
+        .get(js_string!("__started"), context)?
+        .as_boolean()
+        .unwrap_or(false);
+    if started {
+        crate::schedule_callback(context, event, 3, 0)?;
+        return Ok(JsValue::undefined());
+    }
+    let existing = peer_object.get(js_string!("__queue"), context)?;
+    let list = if let Some(list) = existing.as_object() {
+        list
+    } else {
+        let list = JsObject::from(JsArray::from_iter([], context));
+        peer_object.set(js_string!("__queue"), list.clone(), true, context)?;
+        list
+    };
+    let len = list
+        .get(js_string!("length"), context)?
+        .to_u32(context)
+        .unwrap_or(0);
+    list.set(len, event, true, context)?;
+    Ok(JsValue::undefined())
+}
+
+fn port_onmessage_get(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::null());
+    };
+    object.get(js_string!("__onmessage"), context)
+}
+
+fn port_onmessage_set(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let handler = args.first().cloned().unwrap_or(JsValue::null());
+    if let Some(object) = this.as_object() {
+        object.set(js_string!("__onmessage"), handler.clone(), true, context)?;
+    }
+    port_start(this, &[], context)?;
+    Ok(handler)
+}
+
+fn port_start(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let already = object
+        .get(js_string!("__started"), context)?
+        .as_boolean()
+        .unwrap_or(false);
+    object.set(js_string!("__started"), JsValue::from(true), true, context)?;
+    if already {
+        return Ok(JsValue::undefined());
+    }
+    let queue = object.get(js_string!("__queue"), context)?;
+    object.set(js_string!("__queue"), JsValue::undefined(), true, context)?;
+    if let Some(list) = queue.as_object() {
+        let len = list
+            .get(js_string!("length"), context)?
+            .to_u32(context)
+            .unwrap_or(0);
+        for index in 0..len {
+            let event = list.get(index, context)?;
+            crate::schedule_callback(context, event, 3, 0)?;
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+pub(crate) fn deliver_port_message(event: &JsValue, context: &mut Context) -> JsResult<()> {
+    let Some(event_object) = event.as_object() else {
+        return Ok(());
+    };
+    let target = event_object.get(js_string!("target"), context)?;
+    let Some(peer) = target.as_object() else {
+        return Ok(());
+    };
+    let handler = peer.get(js_string!("onmessage"), context)?;
     if let Some(function) = handler
         .as_object()
         .filter(|function| function.is_callable())
     {
-        let _ = function.call(&peer_value, &[event.clone()], context);
+        let _ = function.call(&target, &[event.clone()], context);
     }
-    let listeners = peer_object.get(js_string!("__listeners"), context)?;
+    let listeners = peer.get(js_string!("__listeners"), context)?;
     if let Some(listeners) = listeners.as_object() {
         let len = listeners
             .get(js_string!("length"), context)?
@@ -2746,11 +2827,15 @@ fn port_post(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
                 .as_object()
                 .filter(|function| function.is_callable())
             {
-                let _ = function.call(&peer_value, &[event.clone()], context);
+                let _ = function.call(&target, &[event.clone()], context);
             }
         }
     }
-    Ok(JsValue::undefined())
+    Ok(())
+}
+
+pub(crate) fn clone_message_value(value: &JsValue, context: &mut Context) -> JsResult<JsValue> {
+    clone_message(value, context)
 }
 
 fn port_listen(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

@@ -67,6 +67,9 @@ pub struct BoxMetrics {
 
 struct Clock {
     now: u64,
+    /// Wall time at the last timer jump, so `performance.now()` keeps moving
+    /// during a task and still jumps when the event loop advances.
+    wall: std::time::Instant,
     next: u32,
     queue: Vec<Timer>,
 }
@@ -174,6 +177,7 @@ impl Session {
         let navigation = Rc::new(RefCell::new(None));
         let clock = Rc::new(RefCell::new(Clock {
             now: 0,
+            wall: std::time::Instant::now(),
             next: 0,
             queue: Vec::new(),
         }));
@@ -825,6 +829,11 @@ fn install_host(context: &mut Context) -> JsResult<()> {
         1,
         NativeFunction::from_fn_ptr(window_dispatch),
     )?;
+    context.register_global_callable(
+        js_string!("postMessage"),
+        1,
+        NativeFunction::from_fn_ptr(window_post_message),
+    )?;
     let local_storage = storage_object(context, false)?;
     let session_storage = storage_object(context, true)?;
     context.register_global_property(js_string!("localStorage"), local_storage, flags)?;
@@ -1235,7 +1244,7 @@ fn define_hidden(
         .map(|_| ())
 }
 
-fn define_accessor(
+pub(crate) fn define_accessor(
     proto: &JsObject,
     context: &mut Context,
     name: &str,
@@ -3460,12 +3469,21 @@ fn kebab_to_camel(name: &str) -> String {
 }
 
 fn queue_microtask(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    if let Some(function) = args
-        .first()
-        .and_then(|value| value.as_object())
-        .filter(|object| object.is_callable())
+    let function = args.first().cloned().unwrap_or(JsValue::undefined());
+    if !function
+        .as_object()
+        .is_some_and(|object| object.is_callable())
     {
-        let _ = function.call(&JsValue::undefined(), &[], context);
+        return Ok(JsValue::undefined());
+    }
+    // A fulfilled promise still queues its reaction as a microtask.
+    let promise = JsPromise::resolve(JsValue::undefined(), context)?;
+    let promise = JsValue::from(promise);
+    if let Some(object) = promise.as_object() {
+        let then = object.get(js_string!("then"), context)?;
+        if let Some(then) = then.as_object() {
+            let _ = then.call(&promise, &[function], context)?;
+        }
     }
     Ok(JsValue::undefined())
 }
@@ -4867,6 +4885,7 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
                 }
             }
             2 => crate::web::finish_xhr(&item, context)?,
+            3 => deliver_macrotask_message(&item, context)?,
             _ => {
                 if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
                     function.call(&JsValue::undefined(), &[], context)?;
@@ -5729,7 +5748,47 @@ fn performance_entries(
 
 fn performance_now(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
-    Ok(JsValue::from(host.clock.borrow().now as f64))
+    let clock = host.clock.borrow();
+    let elapsed = clock.wall.elapsed().as_secs_f64() * 1000.0;
+    Ok(JsValue::from(clock.now as f64 + elapsed))
+}
+
+fn window_post_message(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = crate::web::clone_message_value(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let event = ObjectInitializer::new(context)
+        .property(js_string!("data"), data, ATTR)
+        .property(js_string!("type"), js_string!("message"), ATTR)
+        .property(js_string!("__window"), JsValue::from(true), ATTR)
+        .build();
+    schedule_callback(context, JsValue::from(event), 3, 0)?;
+    Ok(JsValue::undefined())
+}
+
+fn deliver_macrotask_message(event: &JsValue, context: &mut Context) -> JsResult<()> {
+    let window_message = event
+        .as_object()
+        .and_then(|object| object.get(js_string!("__window"), context).ok())
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false);
+    if !window_message {
+        return crate::web::deliver_port_message(event, context);
+    }
+    let functions = read_listeners(context, "win:message").unwrap_or_default();
+    let this = JsValue::from(context.global_object().clone());
+    for function in functions {
+        let _ = function.call(&this, &[event.clone()], context);
+    }
+    let onmessage = context
+        .global_object()
+        .get(js_string!("onmessage"), context)?;
+    if let Some(function) = onmessage.as_object().filter(|object| object.is_callable()) {
+        let _ = function.call(&this, &[event.clone()], context);
+    }
+    Ok(())
 }
 
 fn set_interval(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -6768,7 +6827,11 @@ mod tests {
                 (doc.element_name(NodeId(index)) == Some("body")).then_some(NodeId(index))
             })
             .unwrap();
-        assert_eq!(doc.attr(body, "data-raf"), Some("0"));
+        let raf = doc.attr(body, "data-raf").unwrap_or("");
+        assert!(
+            raf.parse::<f64>().is_ok_and(|value| value >= 0.0),
+            "{raf}"
+        );
         let frame = doc
             .nodes
             .iter()
@@ -6836,6 +6899,59 @@ mod tests {
             "{:?}",
             doc.stylesheets
         );
+    }
+
+    #[test]
+    fn message_channel_and_post_message_are_macrotasks() {
+        let doc = parse_html(
+            r#"<html><body></body>
+            <script>
+              var seen = [];
+              var channel = new MessageChannel();
+              channel.port1.addEventListener("message", function (event) {
+                seen.push("listener:" + event.data);
+              });
+              channel.port2.postMessage("early");
+              channel.port1.start();
+              channel.port2.postMessage("late");
+              channel.port1.onmessage = function (event) { seen.push("handler:" + event.data); };
+              channel.port2.postMessage("after");
+              window.addEventListener("message", function (event) { seen.push("win:" + event.data); });
+              window.onmessage = function (event) { seen.push("on:" + event.data); };
+              window.postMessage("hello");
+              queueMicrotask(function () { seen.push("micro"); });
+              var before = performance.now();
+              seen.push("script");
+              setTimeout(function () {
+                var after = performance.now();
+                document.documentElement.setAttribute("data-order", seen.join(","));
+                document.documentElement.setAttribute("data-now", String(after >= before));
+              }, 0);
+            </script></html>"#,
+        );
+        let mut session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let _ = session.advance(0);
+        let html = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(mithu_dom::NodeId(index)) == Some("html"))
+                    .then_some(mithu_dom::NodeId(index))
+            })
+            .unwrap();
+        let order = session
+            .document()
+            .attr(html, "data-order")
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(
+            order,
+            "script,micro,handler:early,listener:early,handler:late,listener:late,handler:after,listener:after,win:hello,on:hello"
+        );
+        assert_eq!(session.document().attr(html, "data-now"), Some("true"));
     }
 
     #[test]
@@ -7492,7 +7608,9 @@ mod tests {
               var img = new Image();
               img.src = "https://example.com/pixel.png";
               var channel = new MessageChannel();
-              channel.port1.onmessage = function (event) { img.alt = event.data; };
+              channel.port1.onmessage = function (event) {
+                document.documentElement.setAttribute("data-port", event.data);
+              };
               channel.port2.postMessage("ported");
               var bytes = new Uint8Array(4);
               crypto.getRandomValues(bytes);
@@ -7520,7 +7638,7 @@ mod tests {
               style.sheet.insertRule("a{}", 0);
               document.title = [
                 img.src,
-                img.alt,
+                "",
                 crypto.randomUUID().length,
                 link.host,
                 location.search,
@@ -7544,10 +7662,22 @@ mod tests {
                 .then(|| "export const name = \"react\";".to_string())
         });
         assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let _ = session.advance(0);
+        let port = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(mithu_dom::NodeId(index)) == Some("html"))
+                    .then_some(mithu_dom::NodeId(index))
+            })
+            .and_then(|html| session.document().attr(html, "data-port").map(str::to_string));
+        assert_eq!(port.as_deref(), Some("ported"));
         let title = session.document().title.clone();
         assert_eq!(
             title,
-            "https://example.com/pixel.png|ported|36|cdn.example|?q=mithu||dark|sd|function|function|function|true|Linux x86_64|function|ping|true|1"
+            "https://example.com/pixel.png||36|cdn.example|?q=mithu||dark|sd|function|function|function|true|Linux x86_64|function|ping|true|1"
         );
         let html = session
             .document()

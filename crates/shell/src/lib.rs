@@ -1608,6 +1608,10 @@ impl Browser {
         page.layout = layout;
         page.session = Some(session);
         page.focused = None;
+        // React and Polymer schedule paints on MessageChannel. Those tasks are
+        // due immediately, so drain them before the first painted frame.
+        self.advance_timers(0);
+        let page = self.page_mut();
         page.find_query = find_query;
         page.find_open = find_open;
         page.find_at = 0;
