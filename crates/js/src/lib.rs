@@ -4670,13 +4670,16 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
         clock.now = clock.now.saturating_add(ms);
     }
     let mut ran = false;
-    for _ in 0..100 {
+    // One-shot tasks (React, rAF) need to drain. A repeating timer must not
+    // occupy every slot in this pass, or those tasks never run.
+    let mut fired_repeat = Vec::new();
+    for _ in 0..2_000 {
         let next = {
             let clock = host.clock.borrow();
             clock
                 .queue
                 .iter()
-                .filter(|timer| timer.due <= clock.now)
+                .filter(|timer| timer.due <= clock.now && !fired_repeat.contains(&timer.id))
                 .min_by_key(|timer| timer.due)
                 .map(|timer| timer.id)
         };
@@ -4703,6 +4706,9 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
             }
             (repeat, kind)
         };
+        if repeat.is_some() {
+            fired_repeat.push(id);
+        }
         let item = timer_value(context, id)?;
         match kind {
             1 => {
@@ -4852,6 +4858,9 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     let spec = fetch_spec(args, context)?;
     if spec.is_empty() {
         return reject_promise(context, "fetch requires a url");
+    }
+    if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+        eprintln!("fetch {spec}");
     }
     let host = host(context)?;
     let location = host.location.borrow().clone();
