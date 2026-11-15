@@ -219,14 +219,76 @@ impl Canvas<'_> {
         if text.is_empty() || color.a == 0 || size <= 0.0 {
             return;
         }
+        self.draw_glyphs(
+            fonts, x, baseline, text, size, color, bold, mono, underline, family, None, clip,
+        );
+    }
+
+    /// Draw `text` in the layout slot `slot_width`. A wider shaping is compressed
+    /// so it stays inside the width Parley already measured.
+    pub fn text_fitted(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        slot_width: f32,
+        clip: Rect,
+    ) {
+        self.draw_glyphs(
+            fonts,
+            x,
+            baseline,
+            text,
+            size,
+            color,
+            bold,
+            mono,
+            underline,
+            family,
+            Some(slot_width),
+            clip,
+        );
+    }
+
+    fn draw_glyphs(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        slot_width: Option<f32>,
+        clip: Rect,
+    ) {
+        if text.is_empty() || color.a == 0 || size <= 0.0 {
+            return;
+        }
+        let glyphs = fonts.shape(text, size, bold, mono, family);
+        let shaped: f32 = glyphs.iter().map(|glyph| glyph.advance).sum();
+        let fit = match slot_width {
+            Some(slot) if shaped > slot + 0.5 && slot > 0.0 => slot / shaped,
+            _ => 1.0,
+        };
         let mut pen = x;
-        for glyph in fonts.shape(text, size, bold, mono, family) {
+        for glyph in glyphs {
             if !pen.is_finite() || pen < -100_000.0 || pen > 100_000.0 {
                 break;
             }
             let left = (pen.round() as i32)
-                .saturating_add(glyph.xmin)
-                .saturating_add(glyph.x_offset.round() as i32);
+                .saturating_add((glyph.xmin as f32 * fit).round() as i32)
+                .saturating_add((glyph.x_offset * fit).round() as i32);
             let top = glyph_top(baseline - glyph.y_offset, &glyph);
             for row in 0..glyph.height {
                 for col in 0..glyph.width {
@@ -246,10 +308,13 @@ impl Canvas<'_> {
                     self.pixels[index] = blend(self.pixels[index], color, coverage);
                 }
             }
-            pen += glyph.advance;
+            pen += glyph.advance * fit;
         }
         if underline {
-            let width = fonts.width_family(text, size, bold, mono, family);
+            let width = match slot_width {
+                Some(slot) if slot > 0.0 => slot,
+                _ => fonts.width_family(text, size, bold, mono, family),
+            };
             let y = baseline + (size * 0.12).max(1.0);
             self.fill(Rect::new(x, y, width, (size * 0.06).max(1.0)), color, clip);
         }
@@ -482,7 +547,7 @@ fn paint_box_with_opacity(
             line.baseline - scroll + origin_y
         } + shift;
         for fragment in &line.fragments {
-            canvas.text_family(
+            canvas.text_fitted(
                 fonts,
                 fragment.x,
                 baseline,
@@ -493,6 +558,7 @@ fn paint_box_with_opacity(
                 fragment.mono,
                 fragment.underline,
                 &fragment.family,
+                fragment.width,
                 child_clip,
             );
         }

@@ -326,48 +326,93 @@ fn inline_lines(
     for line in inline.layout.lines() {
         let metrics = line.metrics();
         let mut fragments = Vec::new();
-        // A Parley `Run` can split into several glyph runs that all report the
-        // run's full text range. Clusters are the pieces that belong to one style.
-        let mut consumed = HashSet::new();
-        for item in line.items() {
+        // Glyph runs of one Parley run all report that run's full text range.
+        // Walk each run's clusters once, in logical order, and split whenever
+        // the style changes so a space between two spans stays a space.
+        let items: Vec<_> = line.items().collect();
+        let mut seen_runs = HashSet::new();
+        for item in &items {
             let parley::PositionedLayoutItem::GlyphRun(run) = item else {
                 continue;
             };
-            let style_index = run.style_index();
-            let mut slice = String::new();
-            let mut advance = 0.0;
-            for cluster in run.run().clusters() {
-                if cluster.style_index() != style_index {
-                    continue;
-                }
-                let range = cluster.text_range();
-                if !consumed.insert(range.start) {
-                    continue;
-                }
-                let part = text.get(range).unwrap_or("").replace('\u{FFFC}', "");
-                if part.is_empty() {
-                    continue;
-                }
-                slice.push_str(&part);
-                advance += cluster.advance();
-            }
-            if slice.is_empty() {
+            let range = run.run().text_range();
+            if !seen_runs.insert((range.start, range.end)) {
                 continue;
             }
-            let brush = run.style().brush.id;
-            let mithu_id = mithu_for(mirror, brush).unwrap_or(NodeId(host));
-            fragments.push(PlacedFragment {
-                x: content_x + run.offset() / scale,
-                text: slice,
-                node: mithu_id,
-                width: advance / scale,
-                color: Color::BLACK,
-                size: 16.0,
-                bold: false,
-                mono: false,
-                family: String::new(),
-                underline: false,
-            });
+            let min_offset = items
+                .iter()
+                .filter_map(|other| {
+                    let parley::PositionedLayoutItem::GlyphRun(other) = other else {
+                        return None;
+                    };
+                    (other.run().text_range() == range).then_some(other.offset())
+                })
+                .fold(f32::MAX, f32::min);
+            let mut cursor = if min_offset.is_finite() {
+                min_offset
+            } else {
+                run.offset()
+            };
+            let mut group_style: Option<u16> = None;
+            let mut group_brush = run.style().brush.id;
+            let mut group_text = String::new();
+            let mut group_advance = 0.0;
+            let mut group_x = cursor;
+            let mut flush = |style: &mut Option<u16>,
+                             brush: &mut blitz_dom::NodeId,
+                             slice: &mut String,
+                             advance: &mut f32,
+                             at: &mut f32| {
+                if slice.is_empty() {
+                    return;
+                }
+                let mithu_id = mithu_for(mirror, *brush).unwrap_or(NodeId(host));
+                fragments.push(PlacedFragment {
+                    x: content_x + *at / scale,
+                    text: std::mem::take(slice),
+                    node: mithu_id,
+                    width: *advance / scale,
+                    color: Color::BLACK,
+                    size: 16.0,
+                    bold: false,
+                    mono: false,
+                    family: String::new(),
+                    underline: false,
+                });
+                *style = None;
+                *advance = 0.0;
+            };
+            for cluster in run.run().clusters() {
+                let style_index = cluster.style_index();
+                if group_style != Some(style_index) {
+                    flush(
+                        &mut group_style,
+                        &mut group_brush,
+                        &mut group_text,
+                        &mut group_advance,
+                        &mut group_x,
+                    );
+                    group_style = Some(style_index);
+                    group_brush = cluster.style().brush.id;
+                    group_x = cursor;
+                }
+                let part = text
+                    .get(cluster.text_range())
+                    .unwrap_or("")
+                    .replace('\u{FFFC}', "");
+                if !part.is_empty() {
+                    group_text.push_str(&part);
+                    group_advance += cluster.advance();
+                }
+                cursor += cluster.advance();
+            }
+            flush(
+                &mut group_style,
+                &mut group_brush,
+                &mut group_text,
+                &mut group_advance,
+                &mut group_x,
+            );
         }
         if fragments.is_empty() {
             continue;

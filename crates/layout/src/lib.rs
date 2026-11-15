@@ -298,6 +298,34 @@ mod tests {
         assert_eq!(text, "AB CD");
     }
 
+    #[test]
+    fn a_space_between_inline_spans_is_kept() {
+        let doc = parse_html(r#"<h1 id="h"><span>The</span> <span>Progressive</span></h1>"#);
+        let styles = style_document(&doc, "");
+        let tree = layout_tree(&doc, &styles, 800.0, 400.0, &NaiveMetrics, &HashMap::new());
+        let heading = find(&tree.root, doc.get_element_by_id("h").unwrap()).unwrap();
+        let text = all_text(heading);
+        assert!(
+            text.contains("The") && text.contains("Progressive") && text.contains(' '),
+            "collapsed to {text:?}"
+        );
+        let mut pieces: Vec<_> = heading
+            .lines
+            .iter()
+            .flat_map(|line| line.fragments.iter())
+            .filter(|fragment| !fragment.text.trim().is_empty())
+            .collect();
+        pieces.sort_by(|left, right| left.x.partial_cmp(&right.x).unwrap());
+        for pair in pieces.windows(2) {
+            assert!(
+                pair[1].x + 1.0 >= pair[0].x + pair[0].width * 0.85,
+                "{:?} overlaps {:?}",
+                pair[0].text,
+                pair[1].text
+            );
+        }
+    }
+
     fn all_text(box_: &LayoutBox) -> String {
         let mut text: String = box_
             .lines
