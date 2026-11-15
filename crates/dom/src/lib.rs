@@ -545,6 +545,91 @@ impl Document {
             .find(|child| self.element_name(*child).is_some())
     }
 
+    pub fn shadow_root(&self, id: NodeId) -> Option<NodeId> {
+        self.attr(id, "mithu-shadow")
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .filter(|index| *index < self.nodes.len())
+            .map(NodeId)
+    }
+
+    /// Children that participate in layout. A shadow host contributes its
+    /// shadow tree. A `<slot>` contributes its assigned light-DOM nodes, or
+    /// its fallback children when nothing is assigned.
+    pub fn rendered_children(&self, id: NodeId) -> Vec<NodeId> {
+        let host = if self.shadow_root(id).is_some() {
+            Some(id)
+        } else {
+            self.shadow_host_for_node(id)
+        };
+        let source = self.shadow_root(id).unwrap_or(id);
+        let mut out = Vec::new();
+        for child in self
+            .nodes
+            .get(source.0)
+            .map(|node| node.children.clone())
+            .unwrap_or_default()
+        {
+            out.extend(self.expand_slot(child, host));
+        }
+        out
+    }
+
+    fn expand_slot(&self, id: NodeId, host: Option<NodeId>) -> Vec<NodeId> {
+        if self.element_name(id) != Some("slot") {
+            return vec![id];
+        }
+        let Some(host) = host else {
+            return self
+                .nodes
+                .get(id.0)
+                .map(|node| node.children.clone())
+                .unwrap_or_default();
+        };
+        let name = self.attr(id, "name").unwrap_or("");
+        let assigned = self
+            .nodes
+            .get(host.0)
+            .map(|node| node.children.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|child| self.assigned_to_slot(*child, name))
+            .collect::<Vec<_>>();
+        if assigned.is_empty() {
+            return self
+                .nodes
+                .get(id.0)
+                .map(|node| node.children.clone())
+                .unwrap_or_default();
+        }
+        assigned
+    }
+
+    fn assigned_to_slot(&self, id: NodeId, slot_name: &str) -> bool {
+        if self.element_name(id) == Some("template") {
+            return false;
+        }
+        let name = self.attr(id, "slot").unwrap_or("");
+        if slot_name.is_empty() {
+            name.is_empty()
+        } else {
+            name == slot_name
+        }
+    }
+
+    fn shadow_host_for_node(&self, id: NodeId) -> Option<NodeId> {
+        let mut current = Some(id);
+        while let Some(node) = current {
+            if let Some(raw) = self.attr(node, "mithu-host")
+                && let Ok(index) = raw.parse::<usize>()
+                && index < self.nodes.len()
+            {
+                return Some(NodeId(index));
+            }
+            current = self.nodes.get(node.0).and_then(|item| item.parent);
+        }
+        None
+    }
+
     pub fn refresh_metadata(&mut self) {
         self.stylesheets.clear();
         self.stylesheet_links.clear();
@@ -561,7 +646,11 @@ impl Document {
                     );
                 }
                 Some("style") => {
-                    let text = self.text_content(id);
+                    let mut text = self.text_content(id);
+                    if let Some(host) = self.shadow_host_for_node(id) {
+                        let name = self.element_name(host).unwrap_or("*");
+                        text = scope_shadow_css(&text, name);
+                    }
                     if !text.trim().is_empty() {
                         self.stylesheets.push(text);
                     }
@@ -602,6 +691,66 @@ impl Document {
         }
         Ok(())
     }
+}
+
+/// `:host` and `::slotted()` only match inside a shadow tree. The flattened
+/// tree is one document, so those selectors become the host tag and the
+/// slotted selector.
+pub fn scope_shadow_css(css: &str, host: &str) -> String {
+    let mut rest = css;
+    let mut out = String::new();
+    while let Some(index) = next_shadow_selector(rest) {
+        out.push_str(&rest[..index]);
+        let tail = &rest[index..];
+        if let Some(inner) = tail.strip_prefix("::slotted(") {
+            let Some((body, after)) = split_group(inner) else {
+                out.push_str("::slotted(");
+                rest = inner;
+                continue;
+            };
+            out.push_str(body);
+            rest = after;
+        } else if let Some(inner) = tail.strip_prefix(":host(") {
+            out.push_str(host);
+            out.push_str(":is(");
+            rest = inner;
+        } else if let Some(inner) = tail.strip_prefix(":host") {
+            out.push_str(host);
+            rest = inner;
+        } else {
+            out.push_str(&tail[..1]);
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn next_shadow_selector(css: &str) -> Option<usize> {
+    let host = css.find(":host");
+    let slotted = css.find("::slotted(");
+    match (host, slotted) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(index), None) | (None, Some(index)) => Some(index),
+        (None, None) => None,
+    }
+}
+
+fn split_group(input: &str) -> Option<(&str, &str)> {
+    let mut depth = 1i32;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&input[..index], &input[index + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 impl Default for Document {

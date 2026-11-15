@@ -1326,6 +1326,17 @@ impl Parser {
             self.doc.append_child(fragment, child);
         }
         self.doc.template_contents.push((id, fragment));
+        let declarative = self.doc.attr(id, "shadowrootmode").is_some()
+            || self.doc.attr(id, "shadowroot").is_some();
+        if declarative
+            && let Some(parent) = self.doc.nodes[id.0].parent
+        {
+            self.doc
+                .set_attr(fragment, "mithu-host", &parent.0.to_string());
+            self.doc
+                .set_attr(parent, "mithu-shadow", &fragment.0.to_string());
+            self.doc.detach(id);
+        }
     }
 
     fn capture_raw_element(&mut self, id: NodeId, name: &str) {

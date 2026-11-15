@@ -1300,6 +1300,26 @@ mod tests {
         assert!(color.r > color.g && color.r > 100, "{color:?}");
     }
 
+    #[test]
+    fn a_declarative_shadow_root_slots_light_dom_text() {
+        let mut doc = parse_html(
+            r#"<x-card><template shadowrootmode="open"><style>:host{display:block} p{color:#111}</style><slot></slot></template><p id="label">Hello shadow</p></x-card>"#,
+        );
+        doc.refresh_metadata();
+        let css = doc.stylesheets.join("\n");
+        let styles = style_document(&doc, &css);
+        let tree = layout_tree(&doc, &styles, 400.0, 200.0, &NaiveMetrics, &HashMap::new());
+        let text = line_text(&tree.root);
+        let label = doc.get_element_by_id("label").unwrap();
+        let color = styles[label.0].color;
+        assert!(text.contains("Hello shadow"), "{text}");
+        assert!(color.r < 40 && color.g < 40 && color.b < 40, "{color:?}");
+        assert!(
+            css.contains("x-card") && !css.contains(":host"),
+            "{css}"
+        );
+    }
+
     fn line_text(box_: &LayoutBox) -> String {
         let mut text = String::new();
         text.push_str(&box_

@@ -88,11 +88,11 @@ fn walk(
     if style.display == Display::None || !style.visible && style.display == Display::None {
         return None;
     }
-    let source = shadow_source(doc, id);
+    let rendered = doc.rendered_children(id);
     if style.display == Display::Contents {
         let mut boxes = Vec::new();
-        for child in children_of(doc, source) {
-            if let Some(layout) = walk(doc, frame, images, child, href.clone()) {
+        for child in &rendered {
+            if let Some(layout) = walk(doc, frame, images, *child, href.clone()) {
                 boxes.push(layout);
             }
         }
@@ -108,8 +108,8 @@ fn walk(
     }
     let href = own_href(doc, id).or(href);
     let mut children = Vec::new();
-    for child in children_of(doc, source) {
-        if let Some(layout) = walk(doc, frame, images, child, href.clone()) {
+    for child in &rendered {
+        if let Some(layout) = walk(doc, frame, images, *child, href.clone()) {
             if layout.rect.width > 0.0
                 || layout.rect.height > 0.0
                 || !layout.lines.is_empty()
@@ -253,21 +253,6 @@ fn fragment_of(fragment: &PlacedFragment, href: Option<String>) -> TextFragment 
         width: fragment.width,
         node: fragment.node,
     }
-}
-
-fn children_of(doc: &Document, id: NodeId) -> Vec<NodeId> {
-    doc.nodes
-        .get(id.0)
-        .map(|node| node.children.clone())
-        .unwrap_or_default()
-}
-
-fn shadow_source(doc: &Document, id: NodeId) -> NodeId {
-    doc.attr(id, "mithu-shadow")
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|index| *index < doc.nodes.len())
-        .map(NodeId)
-        .unwrap_or(id)
 }
 
 fn own_href(doc: &Document, id: NodeId) -> Option<String> {

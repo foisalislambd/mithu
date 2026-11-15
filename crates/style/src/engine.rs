@@ -530,7 +530,8 @@ fn form_controls_sheet() -> UserAgentStylesheet {
     static SHEET: LazyLock<UserAgentStylesheet> = LazyLock::new(|| {
         UserAgentStylesheet::parse(
             "button, input[type=button], input[type=submit], input[type=reset] { white-space: nowrap; }
-             noscript, noembed, noframes { display: none !important; }",
+             noscript, noembed, noframes { display: none !important; }
+             slot { display: contents; }",
         )
     });
     SHEET.clone()
@@ -1257,8 +1258,7 @@ fn build_children(
     editor: &mut Editor<'_>,
     mirror: &mut [Option<blitz_dom::NodeId>],
 ) {
-    let source = shadow_source(doc, parent);
-    let children = doc.nodes.get(source.0).map(|node| node.children.clone()).unwrap_or_default();
+    let children = doc.rendered_children(parent);
     let mut ids = Vec::new();
     for child in children {
         let Some(node) = doc.nodes.get(child.0) else {
@@ -1325,14 +1325,6 @@ fn style_parent(
         }
     }
     Some(editor.doc_root())
-}
-
-fn shadow_source(doc: &Document, id: NodeId) -> NodeId {
-    doc.attr(id, "mithu-shadow")
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|index| *index < doc.nodes.len())
-        .map(NodeId)
-        .unwrap_or(id)
 }
 
 fn html_name(name: &str) -> markup5ever::QualName {

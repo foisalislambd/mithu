@@ -4299,9 +4299,9 @@ pub(crate) fn attach_shadow(
     }
     if let Some(host_id) = node_of(this) {
         let host = host(context)?;
-        host.doc
-            .borrow_mut()
-            .set_attr(host_id, "mithu-shadow", &root_id.0.to_string());
+        let mut doc = host.doc.borrow_mut();
+        doc.set_attr(root_id, "mithu-host", &host_id.0.to_string());
+        doc.set_attr(host_id, "mithu-shadow", &root_id.0.to_string());
     }
     Ok(root)
 }
