@@ -2140,6 +2140,11 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(get_elements_by_name),
+            js_string!("getElementsByName"),
+            1,
+        )
+        .function(
             NativeFunction::from_fn_ptr(document_listener),
             js_string!("addEventListener"),
             2,
@@ -2830,6 +2835,15 @@ fn get_elements_by_tag_name(
     })
 }
 
+fn get_elements_by_name(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = arg_string(args, 0, context)?;
+    collect_named(this, context, move |doc, id| doc.attr(id, "name") == Some(name.as_str()))
+}
+
 fn get_elements_by_class_name(
     this: &JsValue,
     args: &[JsValue],
@@ -3054,6 +3068,11 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         .function(
             NativeFunction::from_fn_ptr(get_elements_by_class_name),
             js_string!("getElementsByClassName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_elements_by_name),
+            js_string!("getElementsByName"),
             1,
         )
         .function(
@@ -8347,6 +8366,10 @@ mod tests {
               if (new WeakRef({ id: 7 }).deref().id !== 7) throw new Error("weak");
               new FinalizationRegistry(function () {});
               if (typeof location.assign !== "function" || location.toString().indexOf("example.com") < 0) throw new Error("location");
+              var named = document.createElement("input");
+              named.setAttribute("name", "q");
+              document.documentElement.appendChild(named);
+              if (document.getElementsByName("q").length !== 1) throw new Error("by name");
               document.title = "platform";
             </script>"#,
         );
