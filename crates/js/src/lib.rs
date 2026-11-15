@@ -1161,6 +1161,8 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     define_hidden(&proto, context, "isSameNode", JsValue::from(same))?;
     let clone = native(context, "cloneNode", 1, clone_node);
     define_hidden(&proto, context, "cloneNode", JsValue::from(clone))?;
+    let replace_with_fn = native(context, "replaceWith", 0, replace_with);
+    define_hidden(&proto, context, "replaceWith", JsValue::from(replace_with_fn))?;
     let replace = native(context, "replaceChild", 2, replace_child);
     define_hidden(&proto, context, "replaceChild", JsValue::from(replace))?;
     let text_get = native(context, "get textContent", 0, get_text);
@@ -3091,6 +3093,16 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(get_attribute_names),
+            js_string!("getAttributeNames"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(has_attributes),
+            js_string!("hasAttributes"),
+            0,
+        )
+        .function(
             NativeFunction::from_fn_ptr(query_selector),
             js_string!("querySelector"),
             1,
@@ -4458,6 +4470,63 @@ fn set_class(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     let value = arg_string(args, 0, context)?;
     host.doc.borrow_mut().set_attr(id, "class", &value);
     Ok(JsValue::undefined())
+}
+
+fn replace_with(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = node_of(this).ok_or_else(type_error)?;
+    let parent_id = {
+        let host = host(context)?;
+        host.doc.borrow().node(id).parent
+    };
+    let Some(parent_id) = parent_id else {
+        return Ok(JsValue::undefined());
+    };
+    let parent = node_value(parent_id.0, context);
+    for node in args {
+        if node.is_null() || node.is_undefined() {
+            continue;
+        }
+        insert_before_child(&parent, &[node.clone(), this.clone()], context)?;
+    }
+    remove_child(&parent, &[this.clone()], context)?;
+    Ok(JsValue::undefined())
+}
+
+fn get_attribute_names(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsArray::from_iter([], context).into());
+    };
+    let names = {
+        let host = host(context)?;
+        let doc = host.doc.borrow();
+        match &doc.node(id).data {
+            NodeData::Element(element) => element
+                .attrs
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        }
+    };
+    let values = names
+        .into_iter()
+        .map(|name| JsValue::from(js_string!(name)))
+        .collect::<Vec<_>>();
+    Ok(JsArray::from_iter(values, context).into())
+}
+
+fn has_attributes(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let names = get_attribute_names(this, args, context)?;
+    let count = names
+        .as_object()
+        .and_then(|object| object.get(js_string!("length"), context).ok())
+        .and_then(|value| value.as_number())
+        .unwrap_or(0.0);
+    Ok(JsValue::from(count > 0.0))
 }
 
 fn get_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -8267,6 +8336,12 @@ mod tests {
               var named = document.createElement("div");
               named.setAttribute("id", "z");
               if ([...named.attributes][0].name !== "id") throw new Error("attrs");
+              if (named.getAttributeNames()[0] !== "id" || !named.hasAttributes()) throw new Error("names");
+              var slot = document.createElement("span");
+              document.body.appendChild(slot);
+              slot.appendChild(document.createTextNode("old"));
+              slot.replaceWith(document.createTextNode("ok"));
+              if (document.body.textContent.indexOf("ok") < 0) throw new Error("replace");
               if (!document.firstElementChild) throw new Error("first");
               document.title = "stable";
             </script>"#,
