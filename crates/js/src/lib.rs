@@ -99,6 +99,8 @@ struct PageLoader {
     fetch: RefCell<Box<dyn FnMut(&str) -> Option<String>>>,
     cache: RefCell<HashMap<String, Module>>,
     imports: HashMap<String, String>,
+    /// Document URL. Relative imports from a classic script resolve against it.
+    base: String,
 }
 
 #[derive(Debug)]
@@ -195,6 +197,7 @@ impl Session {
             fetch: RefCell::new(Box::new(fetch)),
             cache: RefCell::new(HashMap::new()),
             imports,
+            base: href.to_string(),
         });
         let local = Rc::new(RefCell::new(local));
         let session_store = Rc::new(RefCell::new(session_store));
@@ -315,6 +318,11 @@ impl Session {
 
     pub fn document(&self) -> Document {
         self.doc.borrow().clone()
+    }
+
+    /// Tree generation. The shell skips style and layout while this stays put.
+    pub fn revision(&self) -> u64 {
+        self.doc.borrow().revision
     }
 
     pub fn edit(&mut self, update: impl FnOnce(&mut Document)) {
@@ -1205,7 +1213,44 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     define_accessor(&proto, context, "nextSibling", next_sibling, None)?;
     define_accessor(&proto, context, "previousSibling", previous_sibling, None)?;
     define_accessor(&proto, context, "childNodes", child_nodes, None)?;
+    let element = context.global_object().get(js_string!("Element"), context)?;
+    if let Some(element) = element.as_object() {
+        let proto = element.get(js_string!("prototype"), context)?;
+        if let Some(proto) = proto.as_object() {
+            let namespace = native(context, "get namespaceURI", 0, get_namespace_uri);
+            let property = engine::property::PropertyDescriptor::builder()
+                .get(JsValue::from(namespace))
+                .enumerable(false)
+                .configurable(true);
+            proto.define_property_or_throw(js_string!("namespaceURI"), property, context)?;
+        }
+    }
     Ok(())
+}
+
+fn get_namespace_uri(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::null());
+    };
+    let host = host(context)?;
+    let doc = host.doc.borrow();
+    if doc.element_name(id).is_none() {
+        return Ok(JsValue::null());
+    }
+    Ok(js_string!(element_namespace(&doc, id)).into())
+}
+
+fn element_namespace(doc: &Document, id: NodeId) -> &'static str {
+    let mut current = Some(id);
+    while let Some(node) = current {
+        match doc.element_name(node) {
+            Some("foreignObject") => return "http://www.w3.org/1999/xhtml",
+            Some("svg") => return "http://www.w3.org/2000/svg",
+            Some("math") => return "http://www.w3.org/1998/Math/MathML",
+            _ => current = doc.parent_element(node),
+        }
+    }
+    "http://www.w3.org/1999/xhtml"
 }
 
 fn install_group(context: &mut Context) -> JsResult<()> {
@@ -7387,10 +7432,12 @@ impl ModuleLoader for PageLoader {
         let specifier = if let Some(mapped) = mapped {
             mapped
         } else {
-            referrer
+            let base = referrer
                 .path()
                 .and_then(|path| path.to_str())
-                .and_then(|base| resolve_request(base, &requested).ok())
+                .filter(|path| !path.is_empty())
+                .unwrap_or(self.base.as_str());
+            resolve_request(base, &requested)
                 .map(|url| url.to_display())
                 .unwrap_or(requested)
         };
@@ -7982,6 +8029,9 @@ mod tests {
               }
               if (typeof DocumentType === "undefined" || !DocumentType.prototype) {
                 throw new Error("doctype");
+              }
+              if (!box.namespaceURI || box.namespaceURI.indexOf("1999/xhtml") < 0) {
+                throw new Error("namespace");
               }
               var script = document.createElement("script");
               script.innerHTML = "for (var r = 1; r < 3; r++) { window.__ran = r; }";

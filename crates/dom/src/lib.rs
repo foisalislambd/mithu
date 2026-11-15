@@ -24,6 +24,8 @@ pub struct Document {
     /// `<template>` elements keep their contents in a detached fragment, the
     /// way the HTML parser does, so the template itself has no child nodes.
     pub template_contents: Vec<(NodeId, NodeId)>,
+    /// Bumps on a tree or attribute change so layout can skip an unchanged page.
+    pub revision: u64,
 }
 
 /// One DOM change a `MutationObserver` can report.
@@ -98,7 +100,12 @@ impl Document {
             import_maps: Vec::new(),
             mutations: Vec::new(),
             template_contents: Vec::new(),
+            revision: 0,
         }
+    }
+
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn template_content(&self, template: NodeId) -> Option<NodeId> {
@@ -207,9 +214,12 @@ impl Document {
             return None;
         }
         if let Some(last) = self.nodes[parent.0].children.last().copied()
-            && let NodeData::Text(existing) = &mut self.nodes[last.0].data
+            && matches!(self.nodes[last.0].data, NodeData::Text(_))
         {
-            existing.push_str(text);
+            if let NodeData::Text(existing) = &mut self.nodes[last.0].data {
+                existing.push_str(text);
+            }
+            self.touch();
             return Some(last);
         }
         let id = NodeId(self.nodes.len());
@@ -227,6 +237,7 @@ impl Document {
         if added.is_empty() && removed.is_empty() {
             return;
         }
+        self.touch();
         self.mutations.push(DomMutation {
             target,
             kind: "childList".to_string(),
@@ -256,6 +267,7 @@ impl Document {
         if name == "class" {
             element.classes = value.split_whitespace().map(str::to_string).collect();
         }
+        self.touch();
     }
 
     pub fn remove_attr(&mut self, id: NodeId, name: &str) {
@@ -270,6 +282,7 @@ impl Document {
         if name == "class" {
             element.classes.clear();
         }
+        self.touch();
     }
 
     pub fn append_comment(&mut self, parent: NodeId, text: &str) -> NodeId {
@@ -337,8 +350,16 @@ impl Document {
         if self.nodes.get(id.0).is_none() {
             return;
         }
-        if let NodeData::Text(existing) | NodeData::Comment(existing) = &mut self.nodes[id.0].data {
-            *existing = text.to_string();
+        if matches!(
+            self.nodes[id.0].data,
+            NodeData::Text(_) | NodeData::Comment(_)
+        ) {
+            if let NodeData::Text(existing) | NodeData::Comment(existing) =
+                &mut self.nodes[id.0].data
+            {
+                *existing = text.to_string();
+            }
+            self.touch();
             return;
         }
         self.clear_children(id);

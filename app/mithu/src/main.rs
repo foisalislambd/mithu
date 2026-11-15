@@ -62,17 +62,36 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
         // run here, sharing one 15 second budget with timers, so a page with
         // dozens of bundles still paints.
         browser.set_cooperative_scripts(true);
+        let nav = Instant::now();
         browser.navigate(url);
+        if std::env::var_os("MITHU_TIMING").is_some() {
+            eprintln!("timing navigate {}ms", nav.elapsed().as_millis());
+        }
         let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(15) {
-            if browser.pump_scripts(Duration::from_millis(200)) {
+        let mut seen = browser.content_revision();
+        let mut stable_since = Instant::now();
+        while started.elapsed() < Duration::from_secs(8) {
+            let pending = browser.pump_scripts(Duration::from_millis(200));
+            let revision = browser.content_revision();
+            if revision != seen {
+                seen = revision;
+                stable_since = Instant::now();
+            }
+            if pending {
                 continue;
             }
             browser.advance_timers(0);
+            // A page that keeps a short timer alive (analytics, rAF) has
+            // already painted once the DOM stops changing.
+            if stable_since.elapsed() > Duration::from_millis(800)
+                && started.elapsed() > Duration::from_secs(1)
+            {
+                break;
+            }
             let Some(wait) = browser.next_timer_ms() else {
                 break;
             };
-            if wait > 1_000 && started.elapsed() > Duration::from_secs(2) {
+            if wait > 1_000 {
                 break;
             }
             browser.advance_timers(wait.clamp(1, 250));

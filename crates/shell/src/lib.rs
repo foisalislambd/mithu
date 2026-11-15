@@ -4,7 +4,7 @@
 //! so the engine can be tested without a display server.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mithu_base::{Color, Rect};
@@ -92,6 +92,8 @@ struct Page {
     zoom: f32,
     author_css: String,
     hover: Option<NodeId>,
+    /// Last document generation that was styled. `None` until the first paint.
+    painted_revision: Option<u64>,
     pinned: bool,
     group: Option<u8>,
 }
@@ -144,6 +146,7 @@ impl Page {
             zoom: 1.0,
             author_css: String::new(),
             hover: None,
+            painted_revision: None,
             pinned: false,
             group: None,
         }
@@ -433,6 +436,10 @@ impl Browser {
 
     /// Run pending script tasks for `budget`, then refresh the page.
     /// Returns true while scripts remain, so the window keeps painting.
+    pub fn content_revision(&self) -> Option<u64> {
+        self.page().session.as_ref().map(Session::revision)
+    }
+
     pub fn pump_scripts(&mut self, budget: Duration) -> bool {
         let pending = {
             let Some(session) = self.page_mut().session.as_mut() else {
@@ -1485,7 +1492,12 @@ impl Browser {
                 .unwrap_or_else(|_| fetched.url.clone()),
             None => fetched.url.clone(),
         };
+        let timed = std::env::var_os("MITHU_TIMING").is_some();
+        let mark = Instant::now();
         prefetch_page(&document, &base);
+        if timed {
+            eprintln!("timing prefetch {}ms", mark.elapsed().as_millis());
+        }
         let module_base = base.clone();
         let origin = origin_key(&fetched.url);
         let local = self.local_data.get(&origin).cloned().unwrap_or_default();
@@ -1497,28 +1509,8 @@ impl Browser {
             local,
             session_store,
         );
-        {
-            let document = session.document();
-            let author = author_css(&document, &base);
-            let styles = style_with(
-                &document,
-                &author,
-                StyleState {
-                    hover: None,
-                    viewport_width: layout_width,
-                    ..StyleState::default()
-                },
-            );
-            let images = load_images(&document, &base, &styles);
-            let layout = layout_tree(
-                &document,
-                &styles,
-                layout_width,
-                self.layout_height(),
-                &self.fonts,
-                &images,
-            );
-            session.set_geometry(Self::metrics_from(&layout.root), 0.0);
+        if timed {
+            eprintln!("timing session {}ms", mark.elapsed().as_millis());
         }
         if !self.cooperative {
             while session.scripts_pending() {
@@ -1550,6 +1542,9 @@ impl Browser {
             author.push('\n');
         }
         let mut seen = Vec::new();
+        if timed {
+            eprintln!("timing css-start {}ms", mark.elapsed().as_millis());
+        }
         for href in document.stylesheet_links.iter().take(40) {
             if let Some(css) = fetch_text(&base, href)
                 && css.len() <= 1_500_000
@@ -1559,7 +1554,17 @@ impl Browser {
             }
         }
         author = expand_imports(&author, &base, 0, &mut seen);
+        if timed {
+            eprintln!(
+                "timing css {}ms bytes={}",
+                mark.elapsed().as_millis(),
+                author.len()
+            );
+        }
         self.install_web_fonts(&author, &base);
+        if timed {
+            eprintln!("timing fonts {}ms", mark.elapsed().as_millis());
+        }
         let styles = style_with(
             &document,
             &author,
@@ -1569,7 +1574,13 @@ impl Browser {
                 ..StyleState::default()
             },
         );
+        if timed {
+            eprintln!("timing style {}ms nodes={}", mark.elapsed().as_millis(), document.nodes.len());
+        }
         let images = load_images(&document, &base, &styles);
+        if timed {
+            eprintln!("timing images {}ms", mark.elapsed().as_millis());
+        }
         let layout_height = self.layout_height();
         let layout = layout_tree(
             &document,
@@ -1579,6 +1590,11 @@ impl Browser {
             &self.fonts,
             &images,
         );
+        session.set_geometry(Self::metrics_from(&layout.root), 0.0);
+        if timed {
+            eprintln!("timing layout {}ms", mark.elapsed().as_millis());
+        }
+        let painted_revision = Some(session.revision());
         self.omnibox_focused = false;
         let page = self.page_mut();
         let committed = process::RendererToBrowser::Committed {
@@ -1622,6 +1638,7 @@ impl Browser {
         page.zoom = zoom;
         page.author_css = author;
         page.hover = None;
+        page.painted_revision = painted_revision;
         let reopen = page.find_open && !page.find_query.is_empty();
         let _ = page;
         self.publish_geometry();
@@ -1906,17 +1923,25 @@ impl Browser {
     }
 
     fn install_web_fonts(&mut self, css: &str, base: &Url) {
-        for (family, url) in font_faces(css).into_iter().take(24) {
-            if self.fonts.has_family(&family) {
-                continue;
-            }
-            if let Some(bytes) = fetch_bytes(base, &url) {
-                self.fonts.add_family(&family, &bytes);
+        let wanted: Vec<(String, String)> = font_faces(css)
+            .into_iter()
+            .filter(|(family, _)| !self.fonts.has_family(family))
+            .take(24)
+            .collect();
+        let hrefs = wanted.iter().map(|(_, url)| url.clone()).collect();
+        let fetched = fetch_parallel(base, hrefs);
+        for (family, url) in wanted {
+            if let Some(bytes) = fetched.get(&url) {
+                self.fonts.add_family(&family, bytes);
             }
         }
     }
 
     fn pull_page(&mut self) {
+        let revision = self.page().session.as_ref().map(Session::revision);
+        if revision.is_some() && revision == self.page().painted_revision {
+            return;
+        }
         let base = self.page().base.clone();
         let (document, logs) = {
             let Some(session) = self.page_mut().session.as_mut() else {
@@ -1951,6 +1976,7 @@ impl Browser {
             page.images = images;
             page.document = document;
             page.author_css = author;
+            page.painted_revision = revision;
         }
         self.relayout();
     }
@@ -3731,18 +3757,37 @@ fn load_images(
     let fetched = fetch_parallel(base, network);
     let mut images = HashMap::new();
     for (id, src) in wanted {
-        let bitmap = if src.starts_with("data:") {
-            mithu_image::decode_data_url(&src).or_else(|| rasterize_svg_url(&src))
-        } else {
-            fetched
-                .get(&src)
-                .and_then(|bytes| decode_image_bytes(bytes))
-        };
+        let bitmap = cached_bitmap(&src, || {
+            if src.starts_with("data:") {
+                mithu_image::decode_data_url(&src).or_else(|| rasterize_svg_url(&src))
+            } else {
+                fetched.get(&src).and_then(|bytes| decode_image_bytes(bytes))
+            }
+        });
         if let Some(bitmap) = bitmap {
-            images.insert(id, Arc::new(bitmap));
+            images.insert(id, bitmap);
         }
     }
     images
+}
+
+fn bitmap_cache() -> &'static Mutex<HashMap<String, Arc<Bitmap>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Bitmap>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_bitmap(src: &str, decode: impl FnOnce() -> Option<Bitmap>) -> Option<Arc<Bitmap>> {
+    if let Some(hit) = bitmap_cache().lock().ok().and_then(|map| map.get(src).cloned()) {
+        return Some(hit);
+    }
+    let bitmap = Arc::new(decode()?);
+    if let Ok(mut map) = bitmap_cache().lock() {
+        if map.len() > 400 {
+            map.clear();
+        }
+        map.insert(src.to_string(), Arc::clone(&bitmap));
+    }
+    Some(bitmap)
 }
 
 fn fetch_parallel(base: &Url, hrefs: Vec<String>) -> HashMap<String, Vec<u8>> {

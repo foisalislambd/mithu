@@ -2138,6 +2138,20 @@ impl Context {
     }
 
     fn take_exception(&mut self) -> JsError {
+        // Reading an exception can throw (a deep stack's toString, or a
+        // getter). Re-entering this function is how a recursion error turned
+        // into a native stack overflow.
+        if READING_EXCEPTION.with(Cell::get) {
+            unsafe { wrappers2::JS_ClearPendingException(self.js()) };
+            return JsError { message: "JavaScript error".to_string() };
+        }
+        READING_EXCEPTION.with(|flag| flag.set(true));
+        let error = self.take_exception_message();
+        READING_EXCEPTION.with(|flag| flag.set(false));
+        error
+    }
+
+    fn take_exception_message(&mut self) -> JsError {
         let _entered = Entered::new(self as *mut Context);
         unsafe {
             rooted!(in(self.raw) let mut rval = UndefinedValue());
@@ -2434,9 +2448,10 @@ unsafe extern "C" fn module_load_hook(
             }
             string_to_rust((*context).js(), string)
         };
-        let path = if referrer.ptr.is_null() || (*referrer.ptr).is_null() {
-            None
-        } else {
+        let path = script_filename(referrer).or_else(|| {
+            if referrer.ptr.is_null() || (*referrer.ptr).is_null() {
+                return None;
+            }
             let script = mozjs::gc::Handle::from_raw(referrer);
             let module_object = wrappers2::GetModuleObject(script);
             if module_object.is_null() {
@@ -2447,7 +2462,7 @@ unsafe extern "C" fn module_load_hook(
                     .get(&(module_object as usize))
                     .map(|(_, path)| path.clone())
             }
-        };
+        });
         let loaded = (*context).loader.clone().map(|loader| {
             loader.load_imported_module(
                 module::Referrer::new(path),
@@ -2486,7 +2501,11 @@ unsafe extern "C" fn module_load_hook(
             }
             Some(Err(error)) => {
                 throw_message(&mut *context, &error.message);
-                false
+                let payload_handle = mozjs::gc::Handle::from_raw(payload);
+                wrappers2::FinishLoadingImportedModuleFailedWithPendingException(
+                    (*context).js(),
+                    payload_handle,
+                )
             }
             None => {
                 throw_message(&mut *context, "module loader is missing");
@@ -2634,6 +2653,31 @@ fn unicode_property_class(name: &str, negated: bool) -> String {
     class.to_string()
 }
 
+unsafe extern "C" {
+    // SpiderMonkey compiles this as C++. The Itanium name is stable for the
+    // `JSScript*` argument this mozjs build exports.
+    #[link_name = "_Z20JS_GetScriptFilenameP8JSScript"]
+    fn JS_GetScriptFilename(script: *mut std::ffi::c_void) -> *const std::ffi::c_char;
+}
+
+fn script_filename(referrer: jsapi::Handle<*mut jsapi::JSScript>) -> Option<PathBuf> {
+    unsafe {
+        if referrer.ptr.is_null() || (*referrer.ptr).is_null() {
+            return None;
+        }
+        let name = JS_GetScriptFilename((*referrer.ptr).cast());
+        if name.is_null() {
+            return None;
+        }
+        let text = CStr::from_ptr(name).to_string_lossy();
+        if text.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(text.as_ref()))
+        }
+    }
+}
+
 fn payload_is_promise(raw: *mut RawJSContext, payload: jsapi::Handle<Value>) -> bool {
     unsafe {
         let value = *payload.ptr;
@@ -2673,6 +2717,7 @@ fn new_string(context: &mut Context, text: &str) -> *mut JSString {
 
 thread_local! {
     static ENCODED: RefCell<String> = const { RefCell::new(String::new()) };
+    static READING_EXCEPTION: Cell<bool> = const { Cell::new(false) };
 }
 
 unsafe extern "C" fn encoded_callback(ptr: *const std::ffi::c_char) {
