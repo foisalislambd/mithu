@@ -32,24 +32,62 @@ use mozjs::rust::{JSEngine, RealmOptions, SIMPLE_GLOBAL_CLASS, transform_str_to_
 
 thread_local! {
     static CURRENT: Cell<*mut Context> = const { Cell::new(ptr::null_mut()) };
+    /// SpiderMonkey allows one `JSContext` per thread. Pages and tests share
+    /// it and each keep their own global.
+    static RUNTIME: RefCell<Option<ThreadRuntime>> = const { RefCell::new(None) };
 }
 
-fn enter(cx: *mut Context) -> *mut Context {
-    CURRENT.with(|slot| {
+struct ThreadRuntime {
+    raw: *mut RawJSContext,
+    live: usize,
+}
+
+struct JsFrame {
+    previous: *mut Context,
+    realm: *mut jsapi::Realm,
+    entered: bool,
+}
+
+fn enter(cx: *mut Context) -> JsFrame {
+    let previous = CURRENT.with(|slot| {
         let previous = slot.get();
         slot.set(cx);
         previous
-    })
+    });
+    let (realm, entered) = if cx.is_null() {
+        (ptr::null_mut(), false)
+    } else {
+        let context = unsafe { &*cx };
+        match context.global.as_ref() {
+            Some(global) if !global.ptr.is_null() => {
+                let realm = unsafe { wrappers2::EnterRealm(&context.cx, global.ptr) };
+                (realm, true)
+            }
+            _ => (ptr::null_mut(), false),
+        }
+    };
+    JsFrame {
+        previous,
+        realm,
+        entered,
+    }
 }
 
-fn leave(previous: *mut Context) {
-    CURRENT.with(|slot| slot.set(previous));
+fn leave(frame: JsFrame) {
+    if frame.entered {
+        let cx = CURRENT.with(|slot| slot.get());
+        if !cx.is_null() {
+            let context = unsafe { &*cx };
+            unsafe { wrappers2::LeaveRealm(&context.cx, frame.realm) };
+        }
+    }
+    CURRENT.with(|slot| slot.set(frame.previous));
 }
 
-struct Entered(*mut Context);
+struct Entered(JsFrame);
 
 /// Keeps this context current so reflector helpers can find it.
-pub struct ContextBind(*mut Context);
+pub struct ContextBind(JsFrame);
 
 impl Context {
     pub fn bind(&mut self) -> ContextBind {
@@ -59,7 +97,14 @@ impl Context {
 
 impl Drop for ContextBind {
     fn drop(&mut self) {
-        leave(self.0);
+        leave(std::mem::replace(
+            &mut self.0,
+            JsFrame {
+                previous: ptr::null_mut(),
+                realm: ptr::null_mut(),
+                entered: false,
+            },
+        ));
     }
 }
 impl Entered {
@@ -69,7 +114,14 @@ impl Entered {
 }
 impl Drop for Entered {
     fn drop(&mut self) {
-        leave(self.0);
+        leave(std::mem::replace(
+            &mut self.0,
+            JsFrame {
+                previous: ptr::null_mut(),
+                realm: ptr::null_mut(),
+                entered: false,
+            },
+        ));
     }
 }
 
@@ -1594,30 +1646,56 @@ impl ContextBuilder {
     }
 }
 
-impl Context {
-    fn init(loader: Option<Rc<dyn ModuleLoader>>, hooks: Option<Rc<dyn HostHooks>>) -> Result<Self, JsError> {
-        ensure_engine();
-        let raw = unsafe {
-            jsapi::JS_NewContext(64 * 1024 * 1024, ptr::null_mut())
-        };
-        let raw = NonNull::new(raw).ok_or_else(|| JsError { message: "JS_NewContext failed".to_string() })?;
-        let mut cx = unsafe { JSContext::from_ptr(raw) };
+fn acquire_runtime() -> Result<*mut RawJSContext, JsError> {
+    RUNTIME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(runtime) = slot.as_mut() {
+            runtime.live += 1;
+            return Ok(runtime.raw);
+        }
+        let created = unsafe { jsapi::JS_NewContext(64 * 1024 * 1024, ptr::null_mut()) };
+        let created = NonNull::new(created).ok_or_else(|| JsError {
+            message: "JS_NewContext failed".to_string(),
+        })?;
+        let mut cx = unsafe { JSContext::from_ptr(created) };
         unsafe {
             wrappers2::UseInternalJobQueues(&cx);
             wrappers2::JS_AddExtraGCRootsTracer(&cx, Some(trace_live_roots), ptr::null_mut());
-            wrappers2::JS_SetGCParameter(
-                &mut cx,
-                jsapi::JSGCParamKey::JSGC_NURSERY_ENABLED,
-                0,
-            );
-            wrappers2::JS_SetGCParameter(
-                &mut cx,
-                jsapi::JSGCParamKey::JSGC_COMPACTING_ENABLED,
-                0,
-            );
+            wrappers2::JS_SetGCParameter(&mut cx, jsapi::JSGCParamKey::JSGC_NURSERY_ENABLED, 0);
+            wrappers2::JS_SetGCParameter(&mut cx, jsapi::JSGCParamKey::JSGC_COMPACTING_ENABLED, 0);
             let cache = jsapi::__BindgenOpaqueArray::<u64, 2>::default();
-            jsapi::InitSelfHostedCode(raw.as_ptr(), cache, None);
+            jsapi::InitSelfHostedCode(created.as_ptr(), cache, None);
         }
+        *slot = Some(ThreadRuntime {
+            raw: created.as_ptr(),
+            live: 1,
+        });
+        Ok(created.as_ptr())
+    })
+}
+
+fn release_runtime(raw: *mut RawJSContext) {
+    RUNTIME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(runtime) = slot.as_mut() else {
+            return;
+        };
+        if runtime.raw != raw {
+            return;
+        }
+        runtime.live = runtime.live.saturating_sub(1);
+        if runtime.live == 0 {
+            unsafe { jsapi::JS_DestroyContext(raw) };
+            *slot = None;
+        }
+    });
+}
+
+impl Context {
+    fn init(loader: Option<Rc<dyn ModuleLoader>>, hooks: Option<Rc<dyn HostHooks>>) -> Result<Self, JsError> {
+        ensure_engine();
+        let raw = acquire_runtime()?;
+        let mut cx = unsafe { JSContext::from_ptr(NonNull::new_unchecked(raw)) };
         let options = RealmOptions::default();
         let global_ptr = unsafe {
             wrappers2::JS_NewGlobalObject(
@@ -1628,13 +1706,19 @@ impl Context {
                 &*options,
             )
         };
-        let old_realm = unsafe { wrappers2::EnterRealm(&cx, global_ptr) };
+        if global_ptr.is_null() {
+            release_runtime(raw);
+            return Err(JsError {
+                message: "JS_NewGlobalObject failed".to_string(),
+            });
+        }
+        let entered = unsafe { wrappers2::EnterRealm(&cx, global_ptr) };
         unsafe { wrappers2::InitRealmStandardClasses(&mut cx) };
         let mut context = Context {
             cx,
-            raw: raw.as_ptr(),
+            raw,
             global: None,
-            old_realm,
+            old_realm: ptr::null_mut(),
             data: HashMap::new(),
             natives: HashMap::new(),
             functions: HashMap::new(),
@@ -1650,6 +1734,7 @@ impl Context {
         }
         let global = context.wrap_object(global_ptr);
         context.global = Some(global);
+        unsafe { wrappers2::LeaveRealm(&context.cx, entered) };
         Ok(context)
     }
 
@@ -2506,18 +2591,14 @@ fn handle_values(values: &[Value]) -> jsapi::HandleValueArray {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        unsafe {
-            wrappers2::LeaveRealm(&self.cx, self.old_realm);
-            // Roots drop with the struct fields before this body runs? Drop
-            // runs the body first, then fields. Clear JS objects before the
-            // context is destroyed by dropping them here.
-            self.global.take();
-            self.natives.clear();
-            self.classes.clear();
-            self.modules.clear();
-            self.functions.clear();
-            jsapi::JS_DestroyContext(self.raw);
-        }
+        // Drop runs this body first, then the fields. Clear JS objects before
+        // the last user destroys the shared context.
+        self.global.take();
+        self.natives.clear();
+        self.classes.clear();
+        self.modules.clear();
+        self.functions.clear();
+        release_runtime(self.raw);
     }
 }
 
