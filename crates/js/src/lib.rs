@@ -4864,6 +4864,11 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     }
     let host = host(context)?;
     let location = host.location.borrow().clone();
+    let extra = fetch_headers(args, context)?;
+    let extra_refs: Vec<(&str, &str)> = extra
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
     let outcome = resolve_request(&location, &spec).and_then(|url| {
         let initiator = mithu_url::Url::parse(&location)
             .ok()
@@ -4873,7 +4878,7 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
         let origin = page.as_ref().map(serialized_origin);
         let response = if let (Some(host), Some(origin)) = (initiator.as_deref(), origin.as_deref())
         {
-            mithu_net::get_with_origin(&url, host, origin)
+            mithu_net::get_with_origin_headers(&url, host, origin, &extra_refs)
         } else if let Some(host) = initiator.as_deref() {
             mithu_net::get_from(&url, host)
         } else {
@@ -4951,6 +4956,30 @@ pub(crate) fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
         return true;
     }
     allow == serialized_origin(page)
+}
+
+fn fetch_headers(args: &[JsValue], context: &mut Context) -> JsResult<Vec<(String, String)>> {
+    let Some(init) = args.get(1).and_then(JsValue::as_object) else {
+        return Ok(Vec::new());
+    };
+    let headers = init.get(js_string!("headers"), context)?;
+    let Some(object) = headers.as_object() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for name in ["accept", "Accept", "content-type", "Content-Type", "authorization", "Authorization"]
+    {
+        let value = object.get(js_string!(name), context)?;
+        if value.is_null() || value.is_undefined() {
+            continue;
+        }
+        let value = value.to_string(context)?.to_std_string_lossy();
+        if value.is_empty() {
+            continue;
+        }
+        out.push((name.to_string(), value));
+    }
+    Ok(out)
 }
 
 fn fetch_mode(args: &[JsValue], context: &mut Context) -> String {
