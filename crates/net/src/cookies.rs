@@ -359,9 +359,13 @@ fn path_matches(cookie_path: &str, request_path: &str) -> bool {
 }
 
 fn default_path(path: &str) -> String {
+    // RFC 6265: directory of the request path, excluding the query and the
+    // right-most slash. `/api/auth/v1/session` stores `/api/auth/v1`, which
+    // still matches `/api/auth/v1/users/me`.
+    let path = path.split(['?', '#']).next().unwrap_or(path);
     match path.rfind('/') {
         Some(0) | None => "/".to_string(),
-        Some(index) => path[..=index].to_string(),
+        Some(index) => path[..index].to_string(),
     }
 }
 
@@ -567,6 +571,28 @@ mod tests {
             .header_for(&url("https://prothomalo.com/"))
             .unwrap_or_default();
         assert!(joined.contains("qt-auth=one"), "{joined}");
+        let api = jar
+            .header_for(&url("https://services.prothomalo.com/api/auth/v1/users/me"))
+            .unwrap_or_default();
+        assert!(api.contains("qt-auth=one"), "{api}");
+    }
+
+    #[test]
+    fn default_path_is_the_directory_and_still_matches_the_api() {
+        let mut jar = CookieJar::new();
+        jar.ingest(
+            &url("https://www.prothomalo.com/api/auth/v1/session"),
+            &[(
+                "set-cookie".into(),
+                "qt-auth=guest; Domain=prothomalo.com".into(),
+            )],
+        );
+        let users = jar
+            .header_for(&url("https://www.prothomalo.com/api/auth/v1/users/me"))
+            .unwrap_or_default();
+        assert!(users.contains("qt-auth=guest"), "{users}");
+        let other = jar.header_for(&url("https://www.prothomalo.com/sports"));
+        assert!(other.is_none(), "{other:?}");
     }
 
     #[test]

@@ -15,7 +15,7 @@ use blitz_dom::node::{ImageData, RasterImageData, SpecialElementData};
 use blitz_dom::{Attribute, BaseDocument, DocumentConfig, UserAgentStylesheet};
 use blitz_traits::shell::{ColorScheme, Viewport};
 use mithu_base::{Color, Edges, Rect};
-use mithu_dom::{Document, NodeData, NodeId};
+use mithu_dom::{Document, ElementData, NodeData, NodeId};
 use parley::FontContext;
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use style::invalidation::element::restyle_hints::RestyleHint;
@@ -116,10 +116,10 @@ pub fn resolve(
     let _guard = RESOLVE_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     // Stylo parses `mask` and not the prefixed form. Vector icons set
     // `-webkit-mask-image` (and the shorthand) on `::before`.
-    let aliased = author_css
-        .contains("-webkit-mask")
-        .then(|| author_css.replace("-webkit-mask", "mask"));
-    let author_css = aliased.as_deref().unwrap_or(author_css);
+    // `::placeholder` is not a Stylo pseudo here. Empty inputs carry the
+    // hint as a text child marked `data-mithu-placeholder`.
+    let rewritten = rewrite_author_css(author_css);
+    let author_css = rewritten.as_deref().unwrap_or(author_css);
     let key = frame_key(doc, author_css, state, viewport_height, images, fonts);
     if let Some(frame) = FRAME_CACHE.with(|slot| {
         slot.borrow()
@@ -547,12 +547,35 @@ fn frame_key(
     hasher.finish()
 }
 
+fn rewrite_author_css(css: &str) -> Option<String> {
+    if !css.contains("-webkit-mask") && !css.contains("placeholder") {
+        return None;
+    }
+    let mut text = css.to_string();
+    if text.contains("-webkit-mask") {
+        text = text.replace("-webkit-mask", "mask");
+    }
+    if text.contains("placeholder") {
+        for pseudo in [
+            "::-webkit-input-placeholder",
+            "::-moz-placeholder",
+            "::-ms-input-placeholder",
+            ":-ms-input-placeholder",
+            "::placeholder",
+        ] {
+            text = text.replace(pseudo, "[data-mithu-placeholder]");
+        }
+    }
+    Some(text)
+}
+
 fn form_controls_sheet() -> UserAgentStylesheet {
     static SHEET: LazyLock<UserAgentStylesheet> = LazyLock::new(|| {
         UserAgentStylesheet::parse(
             "button, input[type=button], input[type=submit], input[type=reset] { white-space: nowrap; }
              noscript, noembed, noframes { display: none !important; }
-             slot { display: contents; }",
+             slot { display: contents; }
+             [data-mithu-placeholder] { color: #6a6a6a; }",
         )
     });
     SHEET.clone()
@@ -1305,6 +1328,47 @@ impl<'a> Editor<'a> {
     }
 }
 
+/// The hint an empty text field should paint. Checkbox, radio, and button
+/// inputs have a `placeholder` in the wild only by mistake, so they are skipped.
+fn placeholder_text(doc: &Document, id: NodeId, element: &ElementData) -> Option<String> {
+    if element.name != "input" && element.name != "textarea" {
+        return None;
+    }
+    if element.name == "input" {
+        let kind = element
+            .attrs
+            .iter()
+            .find(|(name, _)| name == "type")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("text");
+        if !matches!(
+            kind,
+            "text" | "search" | "email" | "url" | "tel" | "password" | "number" | ""
+        ) {
+            return None;
+        }
+    }
+    let value = if element.name == "textarea" {
+        doc.text_content(id)
+    } else {
+        element
+            .attrs
+            .iter()
+            .find(|(name, _)| name == "value")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
+    if !value.trim().is_empty() {
+        return None;
+    }
+    element
+        .attrs
+        .iter()
+        .find(|(name, _)| name == "placeholder")
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty())
+}
+
 fn build_children(
     doc: &Document,
     parent: NodeId,
@@ -1332,7 +1396,7 @@ fn build_children(
                 } else {
                     html_name(&element.name)
                 };
-                let attrs = element
+                let mut attrs: Vec<Attribute> = element
                     .attrs
                     .iter()
                     .map(|(key, value)| Attribute {
@@ -1340,10 +1404,21 @@ fn build_children(
                         value: value.clone(),
                     })
                     .collect();
+                let placeholder = placeholder_text(doc, child, element);
+                if placeholder.is_some() {
+                    attrs.push(Attribute {
+                        name: attr_name("data-mithu-placeholder"),
+                        value: "1".to_string(),
+                    });
+                }
                 let id = {
                     let mut mutator = editor.doc.mutate();
                     let id = mutator.create_element(name, attrs);
                     mutator.append_children(blitz_parent, &[id]);
+                    if let Some(text) = placeholder.as_deref() {
+                        let text_id = mutator.create_text_node(text);
+                        mutator.append_children(id, &[text_id]);
+                    }
                     id
                 };
                 mirror[child.0] = Some(id);

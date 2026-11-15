@@ -353,7 +353,7 @@ impl Session {
         let Some(context) = self.context.as_mut() else {
             return false;
         };
-        match run_due_timers(context, ms) {
+        match run_due_timers(context, ms, None) {
             Ok(ran) => ran,
             Err(error) => {
                 self.log
@@ -685,7 +685,23 @@ fn record_rejection(_this: &JsValue, args: &[JsValue], context: &mut Context) ->
 
 fn note_error(context: &Context, error: &dyn std::fmt::Display) {
     if let Some(host) = context.get_data::<Host>() {
-        let message = format!("JavaScript error: {error}");
+        let at = host
+            .current_script
+            .borrow()
+            .and_then(|id| {
+                host.doc
+                    .borrow()
+                    .attr(id, "src")
+                    .map(str::to_string)
+                    .filter(|src| !src.is_empty())
+            })
+            .unwrap_or_default();
+        let prefix = if at.is_empty() {
+            String::new()
+        } else {
+            format!("{at}: ")
+        };
+        let message = format!("JavaScript error: {prefix}{error}");
         let extra = debug_source_window(host, &message);
         host.log.borrow_mut().push(format!("{message}{extra}"));
     }
@@ -801,8 +817,14 @@ fn drive_scripts(
             if let Err(error) = deliver_mutations(&mut context) {
                 note_error(&context, &error);
             }
+            // Script-inserted external scripts are tasks of their own. Drain
+            // them before the next classic script so a stub can finish
+            // installing `window.clarity.q` before the tag reads it.
+            if let Err(error) = run_due_timers(&mut context, 0, Some(5)) {
+                note_error(&context, &error);
+            }
         }
-        if let Err(error) = run_due_timers(&mut context, 0) {
+        if let Err(error) = run_due_timers(&mut context, 0, None) {
             note_error(&context, &error);
         }
         signal_document_loaded(&mut context);
@@ -855,6 +877,26 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("outerWidth"), JsValue::from(1280), flags)?;
     context.register_global_property(js_string!("outerHeight"), JsValue::from(800), flags)?;
     context.register_global_property(js_string!("devicePixelRatio"), JsValue::from(1), flags)?;
+    let scroll_y = native(context, "get scrollY", 0, get_scroll_y);
+    let scroll_x = native(context, "get scrollX", 0, get_scroll_x);
+    let origin = native(context, "get window origin", 0, get_origin);
+    for (name, getter) in [
+        ("scrollX", scroll_x.clone()),
+        ("pageXOffset", scroll_x),
+        ("scrollY", scroll_y.clone()),
+        ("pageYOffset", scroll_y),
+        ("origin", origin),
+    ] {
+        let descriptor = engine::property::PropertyDescriptor::builder()
+            .get(JsValue::from(getter))
+            .enumerable(true)
+            .configurable(true);
+        context.global_object().define_property_or_throw(
+            js_string!(name),
+            descriptor,
+            context,
+        )?;
+    }
     context.register_global_property(js_string!("location"), location.clone(), flags)?;
     if let Ok(document) = context.global_object().get(js_string!("document"), context)
         && let Some(document) = document.as_object()
@@ -968,8 +1010,155 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     )?;
     context.eval(Source::from_bytes(READABLE_STREAM))?;
     context.eval(Source::from_bytes(include_str!("platform.js")))?;
+    let _ = context.eval(Source::from_bytes(HOST_GAPS));
+    context.register_global_callable(
+        js_string!("__mithuMissing"),
+        1,
+        NativeFunction::from_fn_ptr(record_missing),
+    )?;
+    let _ = context.eval(Source::from_bytes(MISSING_TRACE));
     Ok(())
 }
+
+fn get_scroll_y(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    Ok(JsValue::from(f64::from(host.scroll.get())))
+}
+
+fn get_scroll_x(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(0))
+}
+
+/// Host objects YouTube and GitHub read while booting. Each one is the
+/// smallest object that keeps a feature-detect from throwing.
+const HOST_GAPS: &str = r#"
+(function () {
+  if (typeof ReadableStream === "function") globalThis.ReadableStream = ReadableStream;
+  if (!globalThis.trustedTypes) {
+    var policy = {
+      createHTML: function (value) { return String(value); },
+      createScript: function (value) { return String(value); },
+      createScriptURL: function (value) { return String(value); }
+    };
+    globalThis.trustedTypes = {
+      createPolicy: function () { return policy; },
+      getAttributeType: function () { return null; },
+      emptyHTML: "",
+      emptyScript: "",
+      defaultPolicy: policy
+    };
+  }
+  if (!globalThis.caches) {
+    var cache = {
+      match: function () { return Promise.resolve(undefined); },
+      keys: function () { return Promise.resolve([]); },
+      put: function () { return Promise.resolve(); },
+      delete: function () { return Promise.resolve(false); }
+    };
+    globalThis.caches = {
+      open: function () { return Promise.resolve(cache); },
+      match: cache.match,
+      keys: cache.keys,
+      has: function () { return Promise.resolve(false); },
+      delete: cache.delete
+    };
+  }
+  if (!globalThis.indexedDB) {
+    globalThis.indexedDB = {
+      open: function () {
+        var request = {
+          result: {
+            objectStoreNames: { contains: function () { return false; } },
+            createObjectStore: function () { return {}; },
+            transaction: function () {
+              var store = {
+                get: function () { var inner = {}; Promise.resolve().then(function () { if (inner.onsuccess) inner.onsuccess({ target: inner }); }); return inner; },
+                put: function () { return {}; },
+                openCursor: function () { var inner = {}; Promise.resolve().then(function () { if (inner.onsuccess) inner.onsuccess({ target: { result: null } }); }); return inner; },
+                index: function () { return store; }
+              };
+              return { objectStore: function () { return store; } };
+            }
+          }
+        };
+        Promise.resolve().then(function () { if (request.onsuccess) request.onsuccess({ target: request }); });
+        return request;
+      },
+      deleteDatabase: function () {
+        var request = {};
+        Promise.resolve().then(function () { if (request.onsuccess) request.onsuccess({ target: request }); });
+        return request;
+      }
+    };
+  }
+})();
+"#;
+
+fn record_missing(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if std::env::var_os("MITHU_LOGS").is_none() {
+        return Ok(JsValue::undefined());
+    }
+    let name = args
+        .first()
+        .map(|value| value.display().to_string())
+        .unwrap_or_default();
+    if !name.is_empty()
+        && let Some(host) = context.get_data::<Host>()
+    {
+        let line = format!("missing {name}");
+        let mut log = host.log.borrow_mut();
+        if !log.iter().any(|seen| seen == &line) {
+            log.push(line);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+/// Log the first missing `window` / `document` properties a page reads.
+/// The proxy sits in front of the existing prototype, and `getPrototypeOf`
+/// keeps `instanceof` on the real prototype chain.
+const MISSING_TRACE: &str = r#"
+(function () {
+  var seen = Object.create(null);
+  var count = 0;
+  var closed = false;
+  function note(name) {
+    if (closed || seen[name]) return;
+    seen[name] = true;
+    count++;
+    if (count > 40) closed = true;
+    if (typeof globalThis.__mithuMissing === "function") globalThis.__mithuMissing(name);
+  }
+  function trap(label) {
+    return {
+      get: function (obj, prop, recv) {
+        var named = typeof prop === "string";
+        var has = named && prop in obj;
+        var value = Reflect.get(obj, prop, recv);
+        if (!closed && named && !has && prop !== "then" && prop !== "constructor" && prop.slice(0, 2) !== "__") note(label + "." + prop);
+        return value;
+      },
+      getPrototypeOf: function (target) {
+        return Object.getPrototypeOf(target);
+      }
+    };
+  }
+  function watchPrototype(ctor, obj, label) {
+    if (!ctor || !ctor.prototype || !obj) return;
+    var previous = Object.getPrototypeOf(obj);
+    var previousCtor = ctor.prototype;
+    var proxy = new Proxy(previousCtor, trap(label));
+    try { ctor.prototype = proxy; } catch (e) {}
+    try { Object.setPrototypeOf(obj, proxy); } catch (e) {}
+    if (!(obj instanceof ctor)) {
+      try { ctor.prototype = previousCtor; } catch (e) {}
+      try { Object.setPrototypeOf(obj, previous); } catch (e) {}
+    }
+  }
+  watchPrototype(globalThis.Window, globalThis, "window");
+  watchPrototype(globalThis.Document, globalThis.document, "document");
+})();
+"#;
 
 /// Enough of `ReadableStream` for a React flight stream: enqueue, close,
 /// `getReader().read()`, and `tee()`.
@@ -1102,6 +1291,7 @@ fn wire_prototype_chain(context: &mut Context) -> JsResult<()> {
         ("HTMLTemplateElement", "HTMLElement"),
         ("HTMLImageElement", "HTMLElement"),
         ("HTMLElement", "Element"),
+        ("SVGElement", "Element"),
         ("Element", "Node"),
         ("Document", "Node"),
         ("DocumentFragment", "Node"),
@@ -3145,6 +3335,8 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let name_get = native(context, "get nodeName", 0, get_node_name);
     let value_get = native(context, "get value", 0, get_value);
     let value_set = native(context, "set value", 1, set_value);
+    let placeholder_get = native(context, "get placeholder", 0, get_placeholder);
+    let placeholder_set = native(context, "set placeholder", 1, set_placeholder);
     let checked_get = native(context, "get checked", 0, get_checked);
     let checked_set = native(context, "set checked", 1, set_checked);
     let href_get = native(context, "get href", 0, get_href);
@@ -3390,6 +3582,12 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         )
         .accessor(js_string!("value"), Some(value_get), Some(value_set), ATTR)
         .accessor(
+            js_string!("placeholder"),
+            Some(placeholder_get),
+            Some(placeholder_set),
+            ATTR,
+        )
+        .accessor(
             js_string!("checked"),
             Some(checked_get),
             Some(checked_set),
@@ -3410,6 +3608,16 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             NativeFunction::from_fn_ptr(get_bounding_rect),
             js_string!("getBoundingClientRect"),
             0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_bbox),
+            js_string!("getBBox"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(animate_element),
+            js_string!("animate"),
+            1,
         )
         .accessor(js_string!("offsetWidth"), Some(offset_width), None, ATTR)
         .accessor(js_string!("offsetHeight"), Some(offset_height), None, ATTR)
@@ -3448,7 +3656,7 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             .build();
         let _ = value.set(js_string!("delegate"), delegate, false, context);
     }
-    let ctor_name = JsString::from(element_interface(&tag));
+    let ctor_name = JsString::from(element_interface_for(id, &tag, context));
     if let Ok(ctor) = context.global_object().get(ctor_name, context)
         && let Some(ctor) = ctor.as_object()
         && let Ok(proto) = ctor.get(js_string!("prototype"), context)
@@ -3460,6 +3668,16 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let value = JsValue::from(value);
     remember_node(id, &value, context);
     value
+}
+
+fn element_interface_for(id: usize, tag: &str, context: &mut Context) -> &'static str {
+    if let Ok(host) = host(context) {
+        let doc = host.doc.borrow();
+        if element_namespace(&doc, NodeId(id)) == "http://www.w3.org/2000/svg" {
+            return "SVGElement";
+        }
+    }
+    element_interface(tag)
 }
 
 fn element_interface(tag: &str) -> &'static str {
@@ -4601,6 +4819,13 @@ fn set_id(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<J
 fn get_class(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
+    let svg = {
+        let doc = host.doc.borrow();
+        element_namespace(&doc, id) == "http://www.w3.org/2000/svg"
+    };
+    if svg {
+        return Ok(svg_animated_string(id.0, "class", context).into());
+    }
     Ok(js_string!(
         host.doc
             .borrow()
@@ -4609,6 +4834,126 @@ fn get_class(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResu
             .to_string()
     )
     .into())
+}
+
+/// `SVGAnimatedString`: `baseVal` reads and writes the attribute, `animVal` reads it.
+fn svg_animated_string(node: usize, attr: &'static str, context: &mut Context) -> JsObject {
+    let holder = ObjectInitializer::new(context)
+        .property(js_string!("node"), JsValue::from(node as u32), ATTR)
+        .property(js_string!("attr"), js_string!(attr), ATTR)
+        .build();
+    let get = native(context, "get baseVal", 0, get_animated_string);
+    let set = native(context, "set baseVal", 1, set_animated_string);
+    ObjectInitializer::new(context)
+        .property(js_string!("__holder"), holder, ATTR)
+        .accessor(js_string!("baseVal"), Some(get.clone()), Some(set), ATTR)
+        .accessor(js_string!("animVal"), Some(get), None, ATTR)
+        .build()
+}
+
+fn animated_holder(this: &JsValue, context: &mut Context) -> Option<(usize, String)> {
+    let object = this.as_object()?;
+    let holder = object.get(js_string!("__holder"), context).ok()?;
+    let holder = holder.as_object()?;
+    let node = holder
+        .get(js_string!("node"), context)
+        .ok()
+        .and_then(|value| value.as_number())? as usize;
+    let attr = holder
+        .get(js_string!("attr"), context)
+        .ok()
+        .and_then(|value| value.as_string())
+        .map(|value| value.to_std_string_escaped())?;
+    Some((node, attr))
+}
+
+fn get_animated_string(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some((node, attr)) = animated_holder(this, context) else {
+        return Ok(js_string!("").into());
+    };
+    let host = host(context)?;
+    let value = host
+        .doc
+        .borrow()
+        .attr(NodeId(node), &attr)
+        .unwrap_or("")
+        .to_string();
+    Ok(js_string!(value).into())
+}
+
+fn set_animated_string(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some((node, attr)) = animated_holder(this, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let host = host(context)?;
+    let value = arg_string(args, 0, context)?;
+    host.doc.borrow_mut().set_attr(NodeId(node), &attr, &value);
+    Ok(JsValue::undefined())
+}
+
+fn get_bbox(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let metrics = box_metrics(this, context).unwrap_or_default();
+    let x = f64::from(metrics.x);
+    let y = f64::from(metrics.y);
+    let width = f64::from(metrics.width);
+    let height = f64::from(metrics.height);
+    let mut object = ObjectInitializer::new(context);
+    object
+        .property(js_string!("x"), JsValue::from(x), ATTR)
+        .property(js_string!("y"), JsValue::from(y), ATTR)
+        .property(js_string!("width"), JsValue::from(width), ATTR)
+        .property(js_string!("height"), JsValue::from(height), ATTR);
+    Ok(object.build().into())
+}
+
+fn animate_element(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(frames) = args.first().and_then(|value| value.as_object()) {
+        let len = frames
+            .get(js_string!("length"), context)
+            .ok()
+            .and_then(|value| value.as_number())
+            .unwrap_or(0.0) as i32;
+        if len > 0
+            && let Ok(last) = frames.get(js_string!((len - 1).to_string()), context)
+            && let Some(last) = last.as_object()
+            && let Ok(opacity) = last.get(js_string!("opacity"), context)
+            && !opacity.is_undefined()
+            && !opacity.is_null()
+        {
+            let text = opacity
+                .as_number()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| opacity.display().to_string());
+            let _ = write_style(this, "opacity", &[js_string!(text).into()], context);
+        }
+    }
+    let finished = JsPromise::resolve(
+        JsValue::from(ObjectInitializer::new(context).build()),
+        context,
+    )?;
+    let mut object = ObjectInitializer::new(context);
+    object
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("play"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("pause"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("cancel"),
+            0,
+        )
+        .property(js_string!("finished"), finished, ATTR);
+    Ok(object.build().into())
 }
 
 fn set_class(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -5197,7 +5542,7 @@ fn execute_inserted_script(id: NodeId, context: &mut Context) {
     let Some(host) = context.get_data::<Host>().cloned() else {
         return;
     };
-    let (module, src, inline) = {
+    let (src, inline) = {
         let doc = host.doc.borrow();
         if doc.element_name(id) != Some("script") || !doc.is_connected(id) {
             return;
@@ -5228,7 +5573,7 @@ fn execute_inserted_script(id: NodeId, context: &mut Context) {
         } else {
             String::new()
         };
-        (kind == "module", src, inline)
+        (src, inline)
     };
     if host.ran_scripts.borrow().contains(&id.0) {
         return;
@@ -5237,6 +5582,41 @@ fn execute_inserted_script(id: NodeId, context: &mut Context) {
         return;
     }
     host.ran_scripts.borrow_mut().insert(id.0);
+    // An external script inserted by another script is a separate task.
+    // Running it inside `appendChild` lets Clarity's loader replace
+    // `window.clarity` before the stub has published `.q`.
+    if src.is_some() {
+        let _ = schedule_callback(context, JsValue::from(id.0 as u32), 5, 0);
+        return;
+    }
+    finish_inserted_script(id, context);
+}
+
+fn finish_inserted_script(id: NodeId, context: &mut Context) {
+    let Some(host) = context.get_data::<Host>().cloned() else {
+        return;
+    };
+    let (module, src, inline) = {
+        let doc = host.doc.borrow();
+        if doc.element_name(id) != Some("script") {
+            return;
+        }
+        let kind = doc
+            .attr(id, "type")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let src = doc
+            .attr(id, "src")
+            .map(str::to_string)
+            .filter(|value| !value.is_empty());
+        let inline = if src.is_none() {
+            doc.text_content(id)
+        } else {
+            String::new()
+        };
+        (kind == "module", src, inline)
+    };
     let code = if let Some(src) = src.as_deref() {
         let base = host.location.borrow().clone();
         let url = resolve_request(&base, src)
@@ -5520,7 +5900,7 @@ fn settle_fonts(context: &mut Context) {
     }
 }
 
-fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
+fn run_due_timers(context: &mut Context, ms: u64, only: Option<u8>) -> JsResult<bool> {
     let _bound = context.bind();
     settle_fonts(context);
     let host = host(context)?;
@@ -5538,7 +5918,11 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
             clock
                 .queue
                 .iter()
-                .filter(|timer| timer.due <= clock.now && !fired_repeat.contains(&timer.id))
+                .filter(|timer| {
+                    timer.due <= clock.now
+                        && !fired_repeat.contains(&timer.id)
+                        && only.is_none_or(|kind| timer.kind == kind)
+                })
                 .min_by_key(|timer| timer.due)
                 .map(|timer| timer.id)
         };
@@ -5579,6 +5963,11 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
             2 => crate::web::finish_xhr(&item, context)?,
             3 => deliver_macrotask_message(&item, context)?,
             4 => crate::web::deliver_layout_observer(&item, context)?,
+            5 => {
+                if let Some(id) = item.as_number() {
+                    finish_inserted_script(NodeId(id as usize), context);
+                }
+            }
             _ => {
                 if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
                     function.call(&JsValue::undefined(), &[], context)?;
@@ -7006,6 +7395,14 @@ fn get_href(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResul
 
 fn set_href(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     write_attr(this, "href", args, context)
+}
+
+fn get_placeholder(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    attr_value(this, "placeholder", context)
+}
+
+fn set_placeholder(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    write_attr(this, "placeholder", args, context)
 }
 
 fn attr_value(this: &JsValue, name: &str, context: &mut Context) -> JsResult<JsValue> {
@@ -9045,5 +9442,69 @@ mod tests {
         assert_eq!(session.document().title, "platform");
         let dialog = session.document().get_element_by_id("ask").unwrap();
         assert!(session.document().attr(dialog, "open").is_none());
+    }
+
+    #[test]
+    fn unicode_property_escapes_inside_strings_stay_strings() {
+        let doc = parse_html(
+            r#"<script>
+              var pattern = "\\p{N}";
+              var letter = /\p{L}/u.test("A");
+              var ident = /^[$_\p{ID_Start}][$_\u{200C}\u{200D}\p{ID_Continue}]*$/u;
+              var punct = new RegExp("\\p{P}|\\p{S}", "u");
+              var yx = RegExp("\\p{RI}\\p{RI}|\\p{Emoji}(\\p{EMod}|\\u{FE0F})", "gu");
+              document.title = pattern === "[0-9]" && letter && ident.test("name") && punct.test("!") && String(yx).indexOf("p{") < 0 ? "kept" : String(yx);
+            </script>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "kept");
+    }
+
+    #[test]
+    fn an_inserted_external_script_runs_after_the_caller() {
+        let doc = parse_html(
+            r#"<html><body><script>
+              window.clarity = function () { window.clarity.q.push([].slice.call(arguments)); };
+              window.clarity.q = [];
+              var tag = document.createElement("script");
+              tag.src = "/tag.js";
+              document.head.appendChild(tag);
+              window.clarity.q.push(["queued"]);
+            </script></body></html>"#,
+        );
+        let session = Session::open_at(doc, "https://example.test/", |src| {
+            src.ends_with("/tag.js").then(|| {
+                "document.documentElement.setAttribute('data-seen', String(window.clarity.q.length));".to_string()
+            })
+        });
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let html = session.document().nodes.iter().enumerate().find_map(|(index, _)| {
+            (session.document().element_name(NodeId(index)) == Some("html")).then_some(NodeId(index))
+        }).unwrap();
+        assert_eq!(session.document().attr(html, "data-seen"), Some("1"));
+    }
+
+    #[test]
+    fn svg_class_name_is_an_animated_string() {
+        let doc = parse_html(
+            r#"<svg id="icon" class="mark"><rect id="box" width="10" height="4"></rect></svg>
+            <script>
+              var icon = document.getElementById("icon");
+              var box = document.getElementById("box");
+              if (typeof SVGAnimatedString !== "function") throw new Error("ctor");
+              if (typeof SVGElement !== "function") throw new Error("svg");
+              if (!(icon instanceof SVGElement)) throw new Error("instance");
+              if (icon.className.baseVal !== "mark") throw new Error("base");
+              icon.className.baseVal = "mark on";
+              var bounds = box.getBBox();
+              document.title = icon.className.animVal + ":" + bounds.width;
+            </script>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "mark on:0");
+        let icon = session.document().get_element_by_id("icon").unwrap();
+        assert_eq!(session.document().attr(icon, "class"), Some("mark on"));
     }
 }

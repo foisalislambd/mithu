@@ -2479,8 +2479,10 @@ unsafe extern "C" fn module_load_hook(
                 // A dynamic `import()` passes a promise. SpiderMonkey then
                 // links immediately, which rejects a module that is still New.
                 // Load its dependencies first so the record becomes Unlinked.
-                let dynamic = payload_is_promise((*context).raw, payload);
-                if dynamic {
+                // Static and dynamic edges both have to leave `New` before
+                // SpiderMonkey links them. A module whose own imports are
+                // still outstanding stays `New` and `ModuleLink` throws.
+                {
                     rooted!(in((*context).raw) let host = UndefinedValue());
                     let _ = wrappers2::LoadRequestedModules(
                         (*context).js(),
@@ -2578,33 +2580,228 @@ fn prepare_source(code: &str) -> std::borrow::Cow<'_, str> {
     if !code.contains("\\p{") && !code.contains("\\P{") {
         return std::borrow::Cow::Borrowed(code);
     }
+    // Walk like a lexer. A property escape inside a string or comment is
+    // source text (`new RegExp("\\p{N}")`), and rewriting it changes the
+    // string the page compiles. Regex literals stay in code mode, so
+    // `/\p{L}/u` is still rewritten for the intl-less build.
+    let chars: Vec<char> = code.chars().collect();
     let mut out = String::with_capacity(code.len() + 32);
-    let mut rest = code;
-    while let Some(index) = rest.find('\\') {
-        out.push_str(&rest[..index]);
-        let after = &rest[index + 1..];
-        let negated = after.starts_with('P');
-        let property = after.starts_with('p') || negated;
-        if property && after[1..].starts_with('{') {
-            if let Some(end) = after[2..].find('}') {
-                let name = &after[2..2 + end];
-                let class = unicode_property_class(name, negated);
-                if inside_character_class(&out) {
-                    out.push_str(&class);
-                } else if negated {
-                    out.push_str(&format!("[^{class}]"));
-                } else {
-                    out.push_str(&format!("[{class}]"));
-                }
-                rest = &after[2 + end + 1..];
+    let mut index = 0;
+    // 0 code, 1 single, 2 double, 3 template, 4 line comment, 5 block comment, 6 regex.
+    let mut mode = 0u8;
+    let mut braces = 0i32;
+    let mut class_depth = 0i32;
+    while index < chars.len() {
+        let ch = chars[index];
+        if mode == 4 {
+            out.push(ch);
+            index += 1;
+            if ch == '\n' {
+                mode = 0;
+            }
+            continue;
+        }
+        if mode == 5 {
+            out.push(ch);
+            if ch == '*' && chars.get(index + 1) == Some(&'/') {
+                out.push('/');
+                index += 2;
+                mode = 0;
                 continue;
             }
+            index += 1;
+            continue;
         }
-        out.push('\\');
-        rest = after;
+        if matches!(mode, 1 | 2 | 3) {
+            if ch == '\\' && index + 1 < chars.len() {
+                // `"\\p{L}"` is a string whose value is the property escape.
+                // Replace that escape with a class and drop the extra
+                // backslash, so `new RegExp("\\p{L}")` still parses.
+                if chars[index + 1] == '\\' {
+                    let mut property_at = index + 1;
+                    if rewrite_property(&chars, &mut property_at, &mut out, true) {
+                        index = property_at;
+                        continue;
+                    }
+                }
+                out.push(ch);
+                out.push(chars[index + 1]);
+                index += 2;
+                continue;
+            }
+            let end = match mode {
+                1 => '\'',
+                2 => '"',
+                _ => '`',
+            };
+            if ch == end {
+                out.push(ch);
+                index += 1;
+                mode = 0;
+                continue;
+            }
+            if mode == 3 && ch == '$' && chars.get(index + 1) == Some(&'{') {
+                out.push('$');
+                out.push('{');
+                index += 2;
+                mode = 0;
+                braces = 1;
+                continue;
+            }
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if mode == 6 {
+            if ch == '\\' && index + 1 < chars.len() {
+                // A quoted `\\p{Name}` can sit inside a `/.../` the lexer has
+                // not closed yet. Rewrite it as a string class so the
+                // RegExp constructor does not see a raw property escape.
+                if chars[index + 1] == '\\' {
+                    let mut property_at = index + 1;
+                    if rewrite_property(&chars, &mut property_at, &mut out, true) {
+                        index = property_at;
+                        continue;
+                    }
+                }
+                if rewrite_property(&chars, &mut index, &mut out, false) {
+                    continue;
+                }
+                out.push(ch);
+                out.push(chars[index + 1]);
+                index += 2;
+                continue;
+            }
+            if ch == '[' {
+                class_depth += 1;
+            } else if ch == ']' && class_depth > 0 {
+                class_depth -= 1;
+            }
+            out.push(ch);
+            index += 1;
+            if ch == '/' && class_depth == 0 {
+                mode = 0;
+            }
+            continue;
+        }
+        if braces > 0 && ch == '{' {
+            braces += 1;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if braces > 0 && ch == '}' {
+            braces -= 1;
+            out.push(ch);
+            index += 1;
+            if braces == 0 {
+                mode = 3;
+            }
+            continue;
+        }
+        if ch == '/' && chars.get(index + 1) == Some(&'/') {
+            out.push('/');
+            out.push('/');
+            index += 2;
+            mode = 4;
+            continue;
+        }
+        if ch == '/' && chars.get(index + 1) == Some(&'*') {
+            out.push('/');
+            out.push('*');
+            index += 2;
+            mode = 5;
+            continue;
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            out.push(ch);
+            index += 1;
+            mode = match ch {
+                '\'' => 1,
+                '"' => 2,
+                _ => 3,
+            };
+            continue;
+        }
+        if ch == '/' && regex_literal_follows(&out) {
+            out.push(ch);
+            index += 1;
+            mode = 6;
+            class_depth = 0;
+            continue;
+        }
+        if ch == '\\' && rewrite_property(&chars, &mut index, &mut out, false) {
+            continue;
+        }
+        out.push(ch);
+        index += 1;
     }
-    out.push_str(rest);
     std::borrow::Cow::Owned(out)
+}
+
+/// True when a `/` in code is a regex literal rather than division.
+fn regex_literal_follows(so_far: &str) -> bool {
+    let trimmed = so_far.trim_end();
+    let Some(last) = trimmed.chars().next_back() else {
+        return true;
+    };
+    if matches!(
+        last,
+        '(' | ',' | '=' | ':' | ';' | '!' | '&' | '|' | '?' | '{' | '}' | '[' | '~' | '^'
+            | '+' | '-' | '*' | '%' | '<' | '>'
+    ) {
+        return true;
+    }
+    // `return /\p{L}/u` and the same form after the other keywords. The
+    // keyword's last letter would otherwise look like division.
+    for word in [
+        "return", "case", "throw", "else", "do", "void", "typeof", "delete", "in", "of",
+        "yield", "await", "new",
+    ] {
+        if let Some(head) = trimmed.strip_suffix(word) {
+            let boundary = head.chars().next_back();
+            if boundary.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '$') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Rewrites `\p{Name}` / `\P{Name}` at `index` when that is the current char.
+fn rewrite_property(chars: &[char], index: &mut usize, out: &mut String, in_string: bool) -> bool {
+    if chars.get(*index) != Some(&'\\') {
+        return false;
+    }
+    let Some(mark) = chars.get(*index + 1).copied() else {
+        return false;
+    };
+    let negated = mark == 'P';
+    if mark != 'p' && !negated {
+        return false;
+    }
+    if chars.get(*index + 2) != Some(&'{') {
+        return false;
+    }
+    let Some(end) = chars[*index + 3..].iter().position(|ch| *ch == '}') else {
+        return false;
+    };
+    let name: String = chars[*index + 3..*index + 3 + end].iter().collect();
+    let class = unicode_property_class(&name);
+    let class = if in_string {
+        class.replace('\\', "\\\\")
+    } else {
+        class
+    };
+    if !in_string && inside_character_class(out) {
+        out.push_str(&class);
+    } else if negated {
+        out.push_str(&format!("[^{class}]"));
+    } else {
+        out.push_str(&format!("[{class}]"));
+    }
+    *index += 3 + end + 1;
+    true
 }
 
 fn inside_character_class(so_far: &str) -> bool {
@@ -2630,7 +2827,7 @@ fn inside_character_class(so_far: &str) -> bool {
     depth > 0
 }
 
-fn unicode_property_class(name: &str, negated: bool) -> String {
+fn unicode_property_class(name: &str) -> String {
     let key = name
         .split('=')
         .next_back()
@@ -2638,18 +2835,19 @@ fn unicode_property_class(name: &str, negated: bool) -> String {
         .trim()
         .to_ascii_lowercase()
         .replace(['_', ' '], "");
+    // Classes stay inside ASCII and `\u` escapes. A quote or backtick in the
+    // replacement closes the surrounding string and the script no longer parses.
     let class = match key.as_str() {
-        "l" | "letter" | "latin" => "A-Za-z\\u00C0-\\u024F\\u0400-\\u04FF\\u0900-\\u097F\\u0980-\\u09FF",
-        "ll" | "lowercaseletter" => "a-z\\u00DF-\\u00FF",
-        "lu" | "uppercaseletter" => "A-Z\\u00C0-\\u00D6\\u00D8-\\u00DE",
+        "l" | "letter" | "latin" | "ll" | "lowercaseletter" | "lu" | "uppercaseletter"
+        | "idstart" => "A-Za-z",
         "n" | "number" | "nd" | "decimalnumber" => "0-9",
-        "z" | "zs" | "separator" | "spaceseparator" => " \\t\\u00A0",
-        "p" | "punctuation" => "!-/:-@\\[-`{-~",
-        "emoji" => "\\u{1F300}-\\u{1FAFF}",
-        _ if negated => "\\s\\S",
+        "idcontinue" => "A-Za-z0-9",
+        "z" | "zs" | "separator" | "spaceseparator" => "\\s",
+        "p" | "punctuation" | "s" | "symbol" => "\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E",
+        "emoji" | "emod" => "\\u{1F300}-\\u{1FAFF}",
+        "ri" => "\\u{1F1E6}-\\u{1F1FF}",
         _ => "\\s\\S",
     };
-    let _ = negated;
     class.to_string()
 }
 
@@ -2675,17 +2873,6 @@ fn script_filename(referrer: jsapi::Handle<*mut jsapi::JSScript>) -> Option<Path
         } else {
             Some(PathBuf::from(text.as_ref()))
         }
-    }
-}
-
-fn payload_is_promise(raw: *mut RawJSContext, payload: jsapi::Handle<Value>) -> bool {
-    unsafe {
-        let value = *payload.ptr;
-        if !value.is_object() {
-            return false;
-        }
-        rooted!(in(raw) let object = value.to_object());
-        wrappers2::IsPromiseObject(object.handle().into())
     }
 }
 

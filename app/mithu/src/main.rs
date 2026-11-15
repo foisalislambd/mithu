@@ -70,7 +70,7 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
         let started = Instant::now();
         let mut seen = browser.content_revision();
         let mut stable_since = Instant::now();
-        while started.elapsed() < Duration::from_secs(8) {
+        while started.elapsed() < Duration::from_secs(5) {
             let pending = browser.pump_scripts(Duration::from_millis(200));
             let revision = browser.content_revision();
             if revision != seen {

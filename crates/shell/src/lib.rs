@@ -3,7 +3,7 @@
 //! The window crate only forwards input. Loading, layout, and painting live here
 //! so the engine can be tested without a display server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -84,6 +84,7 @@ struct Page {
     styles: Vec<ComputedStyle>,
     layout: LayoutTree,
     images: HashMap<NodeId, Arc<Bitmap>>,
+    announced_images: HashSet<usize>,
     session: Option<Session>,
     focused: Option<NodeId>,
     find_query: String,
@@ -138,6 +139,7 @@ impl Page {
                 &HashMap::new(),
             ),
             images: HashMap::new(),
+            announced_images: HashSet::new(),
             session: None,
             focused: None,
             find_query: String::new(),
@@ -1631,6 +1633,7 @@ impl Browser {
         // React and Polymer schedule paints on MessageChannel. Those tasks are
         // due immediately, so drain them before the first painted frame.
         self.advance_timers(0);
+        self.signal_image_loads();
         let page = self.page_mut();
         page.find_query = find_query;
         page.find_open = find_open;
@@ -1979,6 +1982,30 @@ impl Browser {
             page.painted_revision = revision;
         }
         self.relayout();
+        self.signal_image_loads();
+    }
+
+    /// Fire `load` once on each image that has a decoded bitmap. Pages that
+    /// fade a hero in from `opacity: 0` wait for this event before calling
+    /// `animation.play()`.
+    fn signal_image_loads(&mut self) {
+        let fresh: Vec<NodeId> = {
+            let page = self.page();
+            page.images
+                .keys()
+                .copied()
+                .filter(|id| {
+                    matches!(page.document.element_name(*id), Some("img" | "video"))
+                        && !page.announced_images.contains(&id.0)
+                })
+                .collect()
+        };
+        for id in fresh {
+            self.page_mut().announced_images.insert(id.0);
+            if let Some(session) = self.page_mut().session.as_mut() {
+                session.dispatch(id, "load");
+            }
+        }
     }
 
     fn send_form(&mut self, submission: Submission) {
