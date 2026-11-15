@@ -1461,6 +1461,9 @@ impl Browser {
     }
 
     fn install(&mut self, mut fetched: Fetched) {
+        // SpiderMonkey keeps one context per thread. The previous page's
+        // context has to be destroyed before this page creates its own.
+        self.page_mut().session = None;
         if let Some(name) = fetched.download_name.clone() {
             self.downloads.push((name, fetched.url.to_display()));
             if self.downloads.len() > 100 {
@@ -1722,21 +1725,32 @@ impl Browser {
         boxes
     }
 
-    /// A frame document gets its own Boa realm. Scripts there cannot see the parent window.
+    /// A frame document gets its own realm. SpiderMonkey allows one context
+    /// per thread, and the parent page already owns the UI thread's context,
+    /// so the frame realm is created and destroyed on a worker thread.
     fn run_frame_scripts(doc: Document, base: &Url) -> Document {
         let module_base = base.clone();
-        let mut session = Session::open_cooperative(
-            doc,
-            &base.to_display(),
-            move |src| fetch_text(&module_base, src),
-            HashMap::new(),
-            HashMap::new(),
-        );
-        let start = Instant::now();
-        while session.scripts_pending() && start.elapsed() < Duration::from_millis(800) {
-            session.pump(Duration::from_millis(80));
-        }
-        session.document()
+        let display = base.to_display();
+        std::thread::Builder::new()
+            .name("mithu-frame".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let mut session = Session::open_cooperative(
+                    doc,
+                    &display,
+                    move |src| fetch_text(&module_base, src),
+                    HashMap::new(),
+                    HashMap::new(),
+                );
+                let start = Instant::now();
+                while session.scripts_pending() && start.elapsed() < Duration::from_millis(800) {
+                    session.pump(Duration::from_millis(80));
+                }
+                session.document()
+            })
+            .expect("frame script thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 
     /// Load each iframe `src` into a nested document and paint it in the frame.
