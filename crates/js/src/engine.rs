@@ -2155,23 +2155,125 @@ impl Context {
         let _entered = Entered::new(self as *mut Context);
         unsafe {
             rooted!(in(self.raw) let mut rval = UndefinedValue());
-            if !wrappers2::JS_GetPendingException(self.js(), rval.handle_mut()) {
+            // `throw undefined` and other non-Error values stringify to
+            // "undefined". The pending exception stack still has the file,
+            // line, and the real value.
+            let info = mozjs::rust::error_info_from_exception_stack(self.js(), rval.handle_mut());
+            if info.is_none() && !wrappers2::JS_GetPendingException(self.js(), rval.handle_mut()) {
                 wrappers2::JS_ClearPendingException(self.js());
                 return JsError { message: "JavaScript error".to_string() };
             }
             wrappers2::JS_ClearPendingException(self.js());
             let value = self.wrap_value(rval.get());
-            let mut message = self.stringify(&value);
+            let described = self.describe_thrown(&value);
+            let mut message = match info.as_ref() {
+                Some(info)
+                    if !info.message.is_empty()
+                        && info.message != "undefined"
+                        && info.message != "uncaught exception: undefined" =>
+                {
+                    info.message.clone()
+                }
+                _ => described,
+            };
+            if let Some(info) = info.as_ref()
+                && (!info.filename.is_empty() || info.line > 0)
+            {
+                message.push('\n');
+                message.push_str(&info.filename);
+                message.push(':');
+                message.push_str(&info.line.to_string());
+                message.push(':');
+                message.push_str(&info.col.to_string());
+            }
             if let Some(object) = value.as_object()
                 && let Ok(stack) = self.get_prop(object.ptr, &PropKey::Name("stack".to_string()))
             {
                 let stack = self.stringify(&stack);
-                if !stack.is_empty() && stack != "undefined" {
+                if !stack.is_empty() && stack != "undefined" && !message.contains(&stack) {
                     message.push('\n');
                     message.push_str(&stack);
                 }
             }
             JsError { message }
+        }
+    }
+
+    fn describe_thrown(&mut self, value: &JsValue) -> String {
+        match &value.kind {
+            ValueKind::Undefined => "thrown undefined".to_string(),
+            ValueKind::Null => "thrown null".to_string(),
+            ValueKind::Bool(flag) => format!("thrown {flag}"),
+            ValueKind::Number(number) => format!("thrown {number}"),
+            ValueKind::String(text) => format!("thrown {text}"),
+            ValueKind::Object(_) => "thrown object".to_string(),
+        }
+    }
+
+    /// A rejected promise whose reason is `undefined` still has an allocation
+    /// site and a resolution site. Those saved frames name the throwing file.
+    pub(crate) fn rejection_report(&mut self, promise: &JsValue, reason: &JsValue) -> String {
+        let mut message = match &reason.kind {
+            ValueKind::Undefined => "rejected undefined".to_string(),
+            ValueKind::Null => "rejected null".to_string(),
+            ValueKind::Bool(flag) => format!("rejected {flag}"),
+            ValueKind::Number(number) => format!("rejected {number}"),
+            ValueKind::String(text) => format!("rejected {text}"),
+            ValueKind::Object(_) => {
+                let text = self.stringify(reason);
+                if text.is_empty() || text == "undefined" {
+                    "rejected object".to_string()
+                } else {
+                    text
+                }
+            }
+        };
+        let Some(object) = promise.as_object() else {
+            return message;
+        };
+        let _entered = Entered::new(self as *mut Context);
+        unsafe {
+            rooted!(in(self.raw) let promise = object.ptr);
+            if !wrappers2::IsPromiseObject(promise.handle()) {
+                return message;
+            }
+            let resolution = wrappers2::GetPromiseResolutionSite(promise.handle());
+            let allocation = wrappers2::GetPromiseAllocationSite(promise.handle());
+            if let Some(text) = self.saved_frame_text(resolution) {
+                message.push_str("\nresolution ");
+                message.push_str(&text);
+            }
+            if allocation != resolution
+                && let Some(text) = self.saved_frame_text(allocation)
+            {
+                message.push_str("\nallocation ");
+                message.push_str(&text);
+            }
+        }
+        message
+    }
+
+    fn saved_frame_text(&mut self, frame: *mut JSObject) -> Option<String> {
+        if frame.is_null() {
+            return None;
+        }
+        unsafe {
+            rooted!(in(self.raw) let frame = frame);
+            rooted!(in(self.raw) let mut stack = ptr::null_mut::<JSString>());
+            let ok = wrappers2::BuildStackString(
+                self.js(),
+                ptr::null_mut(),
+                frame.handle(),
+                stack.handle_mut(),
+                0,
+                jsapi::StackFormat::SpiderMonkey,
+            );
+            if !ok {
+                wrappers2::JS_ClearPendingException(self.js());
+                return None;
+            }
+            let text = string_to_rust(self.js(), stack.get());
+            if text.is_empty() { None } else { Some(text) }
         }
     }
 

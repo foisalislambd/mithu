@@ -3959,7 +3959,42 @@ fn image_source(document: &Document, id: NodeId) -> Option<String> {
     {
         return Some(picked);
     }
+    if src.as_deref().is_none_or(|value| {
+        value.is_empty()
+            || value.starts_with("data:image/gif")
+            || value.starts_with("data:image/svg")
+            || value.contains("placeholder")
+    }) && let Some(picked) = picture_source(document, id)
+    {
+        return Some(picked);
+    }
     src
+}
+
+fn picture_source(document: &Document, id: NodeId) -> Option<String> {
+    let parent = document.parent_element(id)?;
+    if document.element_name(parent) != Some("picture") {
+        return None;
+    }
+    for child in document.rendered_children(parent) {
+        if document.element_name(child) != Some("source") {
+            continue;
+        }
+        let kind = document.attr(child, "type").unwrap_or("");
+        if kind.contains("avif") {
+            continue;
+        }
+        let srcset = document
+            .attr(child, "srcset")
+            .or_else(|| document.attr(child, "data-srcset"))?;
+        if let Some(picked) = pick_srcset(srcset) {
+            if picked.contains(".avif") {
+                continue;
+            }
+            return Some(picked);
+        }
+    }
+    None
 }
 
 fn pick_srcset(value: &str) -> Option<String> {
@@ -4061,11 +4096,23 @@ fn fetch_text(base: &Url, href: &str) -> Option<String> {
     match url.scheme.as_str() {
         "http" | "https" => {
             let response = if base.host.is_empty() {
-                get(&url).ok()?
+                get(&url)
             } else {
-                mithu_net::get_from(&url, &base.host).ok()?
+                mithu_net::get_from(&url, &base.host)
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    if std::env::var_os("MITHU_LOGS").is_some() {
+                        eprintln!("fetch text {error} {}", url.to_display());
+                    }
+                    return None;
+                }
             };
             if response.status >= 400 {
+                if std::env::var_os("MITHU_LOGS").is_some() {
+                    eprintln!("fetch text {} {}", response.status, url.to_display());
+                }
                 return None;
             }
             Some(response.text())

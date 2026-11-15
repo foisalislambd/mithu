@@ -2690,7 +2690,7 @@ pub(crate) fn deliver_layout_observer(value: &JsValue, context: &mut Context) ->
         .as_object()
         .filter(|function| function.is_callable())
     {
-        let _ = function.call(value, &[records, value.clone()], context);
+        function.call(value, &[records, value.clone()], context)?;
     }
     Ok(())
 }

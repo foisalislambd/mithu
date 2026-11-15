@@ -572,32 +572,88 @@ pub struct Submission {
     pub query: String,
 }
 
+/// Registrable-ish site of an absolute URL: the last two host labels.
+fn script_site(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("//"))?;
+    let host = rest.split(['/', '?', '#']).next()?.split('@').last()?;
+    let host = host.split(':').next().unwrap_or(host);
+    let parts: Vec<&str> = host.split('.').filter(|part| !part.is_empty()).collect();
+    if parts.len() >= 2 {
+        Some(format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]))
+    } else if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
 fn script_jobs(
     context: &Context,
     doc: &Rc<RefCell<Document>>,
     loader: &PageLoader,
 ) -> Vec<ScriptJob> {
     let scripts = doc.borrow().scripts.clone();
+    let page_site = script_site(&loader.base).unwrap_or_default();
+    if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+        eprintln!("page site {page_site} from {}", loader.base);
+    }
     let mut classic = Vec::new();
+    let mut classic_late = Vec::new();
     let mut deferred = Vec::new();
     let mut asynchronous = Vec::new();
     for script in scripts {
         if !script.javascript || script.nomodule {
             continue;
         }
-        if script.module || script.defer {
+        if std::env::var_os("MITHU_JS_DEBUG").is_some()
+            && let Some(src) = &script.src
+        {
+            eprintln!(
+                "classify async={} defer={} site={:?} {src}",
+                script.asynchronous,
+                script.defer,
+                script_site(src)
+            );
+        }
+        let third_party = script
+            .src
+            .as_deref()
+            .and_then(script_site)
+            .is_some_and(|site| !page_site.is_empty() && site != page_site);
+        if script.module || (script.defer && !third_party) {
             deferred.push(script);
         } else if script.asynchronous {
             asynchronous.push(script);
+        } else if third_party {
+            // A third-party parser-blocking script (ads) can spend the whole
+            // load budget. The document's own async bundle runs first.
+            classic_late.push(script);
         } else {
             classic.push(script);
         }
     }
     let mut jobs = Vec::new();
-    for script in classic.into_iter().chain(deferred).chain(asynchronous) {
+    for script in classic
+        .into_iter()
+        .chain(deferred)
+        .chain(asynchronous)
+        .chain(classic_late)
+    {
         let code = if let Some(src) = &script.src {
             let mut fetch = loader.fetch.borrow_mut();
-            fetch(src).unwrap_or_default()
+            match fetch(src) {
+                Some(code) if !code.trim().is_empty() => code,
+                _ => {
+                    if std::env::var_os("MITHU_LOGS").is_some() {
+                        eprintln!("script empty {src}");
+                    }
+                    continue;
+                }
+            }
         } else {
             script.code.clone()
         };
@@ -671,13 +727,17 @@ impl engine::HostHooks for RejectionHooks {
 }
 
 fn record_rejection(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let reason = args.first().cloned().unwrap_or(JsValue::undefined());
-    let mut message = reason.display().to_string();
+    let promise = args.first().cloned().unwrap_or(JsValue::undefined());
+    let reason = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    let mut message = context.rejection_report(&promise, &reason);
     if let Some(object) = reason.as_object()
         && let Ok(stack) = object.get(js_string!("stack"), context)
     {
-        message.push('\n');
-        message.push_str(&stack.display().to_string());
+        let stack = stack.display().to_string();
+        if !stack.is_empty() && stack != "undefined" && !message.contains(&stack) {
+            message.push('\n');
+            message.push_str(&stack);
+        }
     }
     note_error(context, &message);
     Ok(JsValue::undefined())
@@ -1258,10 +1318,31 @@ class ReadableStream {
     return [left, right];
   }
 }
+(function () {
+  var origin = Date.now();
+  var start = performance.now();
+  Date.now = function () { return origin + (performance.now() - start); };
+})();
+if (typeof caches === "undefined") {
+  function MithuCache() {}
+  MithuCache.prototype.match = function () { return Promise.resolve(undefined); };
+  MithuCache.prototype.matchAll = function () { return Promise.resolve([]); };
+  MithuCache.prototype.put = function () { return Promise.resolve(undefined); };
+  MithuCache.prototype.delete = function () { return Promise.resolve(false); };
+  MithuCache.prototype.keys = function () { return Promise.resolve([]); };
+  var cache = new MithuCache();
+  globalThis.caches = {
+    open: function () { return Promise.resolve(cache); },
+    has: function () { return Promise.resolve(false); },
+    delete: function () { return Promise.resolve(false); },
+    keys: function () { return Promise.resolve([]); },
+    match: function () { return Promise.resolve(undefined); }
+  };
+}
 globalThis.__mithuReportRejection = function (promise) {
   Promise.resolve().then(function () {
     if (promise.__mithuUnhandled) {
-      promise.catch(function (reason) { globalThis.__mithuRecordRejection(reason); });
+      promise.catch(function (reason) { globalThis.__mithuRecordRejection(promise, reason); });
     }
   });
 };
@@ -5910,8 +5991,11 @@ fn run_due_timers(context: &mut Context, ms: u64, only: Option<u8>) -> JsResult<
     }
     let mut ran = false;
     // One-shot tasks (React, rAF) need to drain. A repeating timer must not
-    // occupy every slot in this pass, or those tasks never run.
+    // occupy every slot in this pass, or those tasks never run. Animation
+    // frames advance the clock 16ms each so tweens see time pass, and a pass
+    // stops after 40 frames so the page can paint.
     let mut fired_repeat = Vec::new();
+    let mut frames = 0u32;
     for _ in 0..2_000 {
         let next = {
             let clock = host.clock.borrow();
@@ -5922,6 +6006,7 @@ fn run_due_timers(context: &mut Context, ms: u64, only: Option<u8>) -> JsResult<
                     timer.due <= clock.now
                         && !fired_repeat.contains(&timer.id)
                         && only.is_none_or(|kind| timer.kind == kind)
+                        && !(timer.kind == 6 && frames >= 90)
                 })
                 .min_by_key(|timer| timer.due)
                 .map(|timer| timer.id)
@@ -5966,6 +6051,20 @@ fn run_due_timers(context: &mut Context, ms: u64, only: Option<u8>) -> JsResult<
             5 => {
                 if let Some(id) = item.as_number() {
                     finish_inserted_script(NodeId(id as usize), context);
+                }
+            }
+            6 => {
+                frames += 1;
+                {
+                    let mut clock = host.clock.borrow_mut();
+                    clock.now = clock.now.saturating_add(16);
+                }
+                if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
+                    let now = {
+                        let clock = host.clock.borrow();
+                        clock.now as f64 + clock.wall.elapsed().as_secs_f64() * 1000.0
+                    };
+                    function.call(&JsValue::undefined(), &[JsValue::from(now)], context)?;
                 }
             }
             _ => {
@@ -6800,11 +6899,15 @@ fn request_animation_frame(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let mut timed = args.to_vec();
-    if timed.len() < 2 {
-        timed.push(JsValue::from(0));
+    let function = args.first().cloned().unwrap_or(JsValue::undefined());
+    if !function
+        .as_object()
+        .is_some_and(|object| object.is_callable())
+    {
+        return Ok(JsValue::from(0));
     }
-    schedule_timer(context, &timed, false)
+    // Kind 6 is one animation frame. The callback receives the frame time.
+    schedule_callback(context, function, 6, 0)
 }
 
 fn performance_object(context: &mut Context) -> JsResult<JsObject> {
@@ -7842,7 +7945,13 @@ impl ModuleLoader for PageLoader {
             if let Some(module) = self.cache.borrow().get(&specifier).cloned() {
                 return Ok(module);
             }
+            if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+                eprintln!("import {specifier}");
+            }
             let code = (self.fetch.borrow_mut())(&specifier).ok_or_else(|| {
+                if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+                    eprintln!("import failed {specifier}");
+                }
                 JsError::from(
                     JsNativeError::typ().with_message(format!("module not found: {specifier}")),
                 )
@@ -8275,6 +8384,15 @@ mod tests {
         );
         let session = Session::open(doc, |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let rejected = parse_html(
+            r#"<html><body><script>Promise.reject(undefined);</script></body></html>"#,
+        );
+        let rejected = Session::open(rejected, |_| None);
+        let lines = rejected.logs().join("\n");
+        assert!(
+            lines.contains("rejected undefined"),
+            "{lines}"
+        );
         let html = session
             .document()
             .nodes

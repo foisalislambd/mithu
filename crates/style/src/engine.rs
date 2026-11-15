@@ -118,8 +118,12 @@ pub fn resolve(
     // `-webkit-mask-image` (and the shorthand) on `::before`.
     // `::placeholder` is not a Stylo pseudo here. Empty inputs carry the
     // hint as a text child marked `data-mithu-placeholder`.
-    let rewritten = rewrite_author_css(author_css);
-    let author_css = rewritten.as_deref().unwrap_or(author_css);
+    // `light-dark()` polyfills set a scheme flag on one element. An empty
+    // custom property does not inherit, so descendants fall back to the light
+    // color. Repeat the flag for the subtree.
+    let scheme = propagate_color_scheme(author_css);
+    let rewritten = rewrite_author_css(&scheme);
+    let author_css = rewritten.as_deref().unwrap_or(scheme.as_ref());
     let key = frame_key(doc, author_css, state, viewport_height, images, fonts);
     if let Some(frame) = FRAME_CACHE.with(|slot| {
         slot.borrow()
@@ -355,7 +359,14 @@ fn read_frame(blitz: &BaseDocument, mirror: &[Option<blitz_dom::NodeId>], doc: &
             && let Some(values) = before.primary_styles()
         {
             let pseudo = project(&values);
-            if pseudo.mask_image.is_some() {
+            // Wikipedia paints the icon on an empty box. A search field's
+            // `::before` is only the glyph; copying its `currentcolor`
+            // background would fill the whole control.
+            let text = doc.text_content(NodeId(index));
+            let name = doc.element_name(NodeId(index));
+            let icon = text.trim().is_empty()
+                && !matches!(name, Some("button" | "input" | "textarea" | "select"));
+            if icon && pseudo.mask_image.is_some() {
                 styles[index].mask_image = pseudo.mask_image;
                 if styles[index].background.a == 0 {
                     styles[index].background = pseudo.background;
@@ -545,6 +556,152 @@ fn frame_key(
         bytes.last().hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// Repeat a csstools scheme flag onto descendants.
+///
+/// `.homepage--dark { --csstools-color-scheme--light: ; }` makes that
+/// element's own `var()` use the dark color. The empty value does not
+/// inherit, so a button inside the section still resolves the light fallback.
+fn propagate_color_scheme(css: &str) -> std::borrow::Cow<'_, str> {
+    if !css.contains("--csstools-color-scheme--light:") {
+        return std::borrow::Cow::Borrowed(css);
+    }
+    let mut inserts = Vec::new();
+    let mut search = 0;
+    while let Some(rel) = css[search..].find("--csstools-color-scheme--light:") {
+        let at = search + rel;
+        let Some(open) = matching_brace_open(css, at) else {
+            search = at + 32;
+            continue;
+        };
+        let Some(close) = matching_brace_close(css, open) else {
+            search = at + 32;
+            continue;
+        };
+        let selector = selector_before(css, open);
+        if selector.is_empty()
+            || selector.starts_with('@')
+            || selector.split(',').any(|part| part.trim().ends_with(" *"))
+        {
+            search = close + 1;
+            continue;
+        }
+        let body = &css[open + 1..close];
+        let Some(value) = declaration_value(body, "--csstools-color-scheme--light:") else {
+            search = close + 1;
+            continue;
+        };
+        // `initial` is the light default. Repeating it would outrank a later
+        // dark class. Only the empty value selects the dark color.
+        if value != "" {
+            search = close + 1;
+            continue;
+        }
+        let mut decl = format!("--csstools-color-scheme--light:{value};");
+        if let Some(scheme) = declaration_value(body, "color-scheme:") {
+            decl.push_str(&format!("color-scheme:{scheme};"));
+        }
+        inserts.push((close + 1, format!("{selector} *{{{decl}}}")));
+        search = close + 1;
+    }
+    if inserts.is_empty() {
+        return std::borrow::Cow::Borrowed(css);
+    }
+    let mut out = String::with_capacity(css.len() + inserts.iter().map(|(_, text)| text.len()).sum::<usize>());
+    let mut cursor = 0;
+    for (pos, text) in inserts {
+        out.push_str(&css[cursor..pos]);
+        out.push_str(&text);
+        cursor = pos;
+    }
+    out.push_str(&css[cursor..]);
+    std::borrow::Cow::Owned(out)
+}
+
+fn matching_brace_open(css: &str, inside: usize) -> Option<usize> {
+    let chars: Vec<char> = css[..inside].chars().collect();
+    let mut depth = 1i32;
+    let mut index = chars.len();
+    let mut quote = None;
+    while index > 0 {
+        index -= 1;
+        let ch = chars[index];
+        if quote.is_some() {
+            if ch == quote.unwrap() && !escaped(&chars, index) {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '}' => depth += 1,
+            '{' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(css.char_indices().nth(index).map(|(byte, _)| byte).unwrap_or(0));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn escaped(chars: &[char], index: usize) -> bool {
+    let mut count = 0;
+    let mut cursor = index;
+    while cursor > 0 && chars[cursor - 1] == '\\' {
+        count += 1;
+        cursor -= 1;
+    }
+    count % 2 == 1
+}
+
+fn matching_brace_close(css: &str, open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut quote = None;
+    let bytes = css.as_bytes();
+    let mut index = open;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        if quote.is_some() {
+            if ch == quote.unwrap() && (index == 0 || bytes[index - 1] != b'\\') {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn selector_before(css: &str, open: usize) -> String {
+    let head = &css[..open];
+    let start = head
+        .rfind(['{', '}'])
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    head[start..].trim().to_string()
+}
+
+fn declaration_value(body: &str, property: &str) -> Option<String> {
+    let at = body.find(property)?;
+    let rest = body[at + property.len()..].trim_start();
+    let end = rest.find([';', '}']).unwrap_or(rest.len());
+    Some(rest[..end].trim().to_string())
 }
 
 fn rewrite_author_css(css: &str) -> Option<String> {
@@ -1078,7 +1235,10 @@ fn project_color(css: &str) -> Color {
             .unwrap_or(255);
         return Color::rgba(r, g, b, a);
     }
-    Color::BLACK
+    match css {
+        "transparent" | "rgba(0, 0, 0, 0)" | "rgba(0,0,0,0)" => Color::TRANSPARENT,
+        _ => Color::BLACK,
+    }
 }
 
 fn hex_color(hex: &str) -> Color {

@@ -791,4 +791,74 @@ mod tests {
         );
         assert_eq!(painted[html].background, Color::rgb(248, 250, 252));
     }
+
+    #[test]
+    fn dark_scheme_flag_reaches_form_controls() {
+        let doc = parse_html(
+            r#"<body class="homepage--dark"><button class="search">Search</button></body>"#,
+        );
+        let styles = style_document(
+            &doc,
+            r#"
+            :root {
+              --color-gray-10: #212426;
+              --color-gray-90: #f7f7f8;
+            }
+            * {
+              --csstools-light-dark-toggle: var(--csstools-color-scheme--light) var(--color-gray-10);
+              --color-background-primary: var(--csstools-light-dark-toggle, var(--color-gray-90));
+            }
+            .homepage--dark {
+              --csstools-color-scheme--light: ;
+              background-color: var(--color-background-primary);
+              color-scheme: dark;
+            }
+            button.search { background-color: var(--color-background-primary); color: white }
+            "#,
+        );
+        let body = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("body")).then_some(index)
+            })
+            .unwrap();
+        let button = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("button")).then_some(index)
+            })
+            .unwrap();
+        assert_eq!(styles[body].background, Color::rgb(33, 36, 38));
+        assert_eq!(styles[button].background, Color::rgb(33, 36, 38));
+    }
+
+    #[test]
+    fn search_glyph_does_not_paint_the_field() {
+        let doc = parse_html(r#"<button class="search">Search</button>"#);
+        let styles = style_document(
+            &doc,
+            r#"
+            button.search { background-color: transparent; color: white }
+            button.search::before {
+              content: "";
+              background-color: currentcolor;
+              mask-image: url(/icon.svg);
+            }
+            "#,
+        );
+        let button = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("button")).then_some(index)
+            })
+            .unwrap();
+        assert_eq!(styles[button].background.a, 0);
+        assert!(styles[button].mask_image.is_none());
+    }
 }
