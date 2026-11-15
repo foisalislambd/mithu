@@ -2,7 +2,7 @@
 
 Mithu is a lightweight browser written in Rust, in this repository, from scratch. It is named for a rose-ringed parakeet who lived with a family and died a long time ago.
 
-The license is MIT. Anyone can use it, read it, and build on it. The source lives at [github.com/foisalislambd/mithu](https://github.com/foisalislambd/mithu). [@foisalislambd](https://github.com/foisalislambd) maintains it.
+The license is MIT. Files adapted from Servo stay MPL-2.0; see [THIRD_PARTY/NOTICE](THIRD_PARTY/NOTICE). Anyone can use it, read it, and build on it. The source lives at [github.com/foisalislambd/mithu](https://github.com/foisalislambd/mithu). [@foisalislambd](https://github.com/foisalislambd) maintains it.
 
 HTML, CSS, the DOM, JavaScript, layout, paint, URLs, and HTTP are implemented here. The HTML parser builds the implied document, tables, and `select` lists, and it repairs mis-nested formatting tags. `white-space: nowrap` keeps a line from wrapping. JavaScript runs in this process on the [Boa](https://github.com/boa-dev/boa) virtual machine, including module scripts. Scripts can change the document, listen for events, set timers, call `fetch`, and assign `location.href`. Click, input, and submit events reach those scripts before the browser follows a link or sends a form. Each tab keeps its own page, history, and scroll. Ctrl+F finds text on the page, highlights every match, and scrolls the active match into view. Ctrl+Plus, Ctrl+Minus, and Ctrl+0 zoom the page and lay it out again at the new size. Ctrl+D saves or removes the current page as a bookmark, and Ctrl+B opens the list. The address bar suggests bookmarks and pages already visited. A right click opens a menu to follow a link, open it in a new tab, go back, reload, or bookmark the page. PNG, JPEG, GIF, and WebP images are decoded and painted. There is no WASM runtime and no imported browser engine. The other outside crates are the operating-system edges: a window (`winit`, `softbuffer`), TLS (`rustls`), TrueType rasterization (`fontdue`), image decoders (`image`), and content-encoding (`flate2`, `brotli`). Rewriting those would not make the browser stronger. JavaScript stays on Boa.
 
@@ -32,6 +32,8 @@ Issues and pull requests go to [github.com/foisalislambd/mithu](https://github.c
 ## License
 
 [MIT](LICENSE). Copyright 2026 Mithu contributors.
+
+`crates/net/src/cors.rs` and `crates/js/src/custom_element.rs` are adapted from [Servo](https://github.com/servo/servo) and are MPL-2.0. The headers on those files name the Servo sources. [THIRD_PARTY/NOTICE](THIRD_PARTY/NOTICE) lists them.
 
 ## Workspace
 

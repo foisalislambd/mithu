@@ -1014,6 +1014,7 @@ fn xhr_roundtrip(
         initiator.as_ref().map(|page| page.host.as_str()),
         origin.as_deref(),
         &header_refs,
+        true,
     );
     match result {
         Ok(response) => {

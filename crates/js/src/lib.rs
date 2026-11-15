@@ -4,6 +4,7 @@
 //! are the window, document, and node tree. Timers and `location` report back to
 //! the browser. Script tasks yield between files so the UI thread can paint.
 
+mod custom_element;
 mod engine;
 
 #[macro_export]
@@ -4526,6 +4527,14 @@ fn upgrade_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(JsValue::undefined())
 }
 
+thread_local! {
+    static UPGRADE_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+fn upgrading() -> bool {
+    UPGRADE_DEPTH.with(|slot| slot.get() > 0)
+}
+
 fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
     if !tag.contains('-') {
         return;
@@ -4533,9 +4542,6 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
     // A constructor that creates another instance of itself would recurse
     // until the native stack aborts. Stop that chain and keep the element.
     const MAX_UPGRADE_DEPTH: u32 = 256;
-    thread_local! {
-        static UPGRADE_DEPTH: Cell<u32> = const { Cell::new(0) };
-    }
     let depth = UPGRADE_DEPTH.with(|slot| {
         let depth = slot.get();
         slot.set(depth.saturating_add(1));
@@ -4610,8 +4616,82 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
                 .ok()
                 .is_some_and(|host| host.doc.borrow().is_connected(id))
         });
-        if connected {
-            call_connected(value, context);
+        let observed = observed_attribute_names(&ctor, context);
+        let attributes = node_of(value)
+            .map(|id| element_attribute_pairs(id, context))
+            .unwrap_or_default();
+        for reaction in custom_element::upgrade_reactions(connected, &attributes, &observed) {
+            run_reaction(value, &reaction, context);
+        }
+    }
+}
+
+fn observed_attribute_names(ctor: &JsObject, context: &mut Context) -> Vec<String> {
+    let Ok(list) = ctor.get(js_string!("observedAttributes"), context) else {
+        return Vec::new();
+    };
+    let Some(list) = list.as_object() else {
+        return Vec::new();
+    };
+    let length = list
+        .get(js_string!("length"), context)
+        .ok()
+        .and_then(|value| value.to_u32(context).ok())
+        .unwrap_or(0);
+    let mut names = Vec::new();
+    for index in 0..length {
+        if let Ok(name) = list.get(index, context)
+            && let Ok(name) = name.to_string(context)
+        {
+            names.push(name.to_std_string_lossy());
+        }
+    }
+    names
+}
+
+fn element_attribute_pairs(id: NodeId, context: &mut Context) -> Vec<(String, String)> {
+    let Ok(host) = host(context) else {
+        return Vec::new();
+    };
+    let doc = host.doc.borrow();
+    match &doc.node(id).data {
+        mithu_dom::NodeData::Element(element) => element.attrs.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn run_reaction(value: &JsValue, reaction: &custom_element::Reaction, context: &mut Context) {
+    match reaction {
+        custom_element::Reaction::Connected => call_connected(value, context),
+        custom_element::Reaction::AttributeChanged { name, old, new } => {
+            let Some(object) = value.as_object() else {
+                return;
+            };
+            let Ok(callback) = object.get(js_string!("attributeChangedCallback"), context) else {
+                return;
+            };
+            let Some(callback) = callback.as_object().filter(|callback| callback.is_callable())
+            else {
+                return;
+            };
+            let old = old
+                .as_ref()
+                .map(|text| JsValue::from(js_string!(text.clone())))
+                .unwrap_or(JsValue::null());
+            let new = new
+                .as_ref()
+                .map(|text| JsValue::from(js_string!(text.clone())))
+                .unwrap_or(JsValue::null());
+            let _ = callback.call(
+                value,
+                &[
+                    js_string!(name.clone()).into(),
+                    old,
+                    new,
+                    JsValue::null(),
+                ],
+                context,
+            );
         }
     }
 }
@@ -5200,8 +5280,24 @@ fn set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let id = node_of(this).ok_or_else(type_error)?;
     let name = arg_string(args, 0, context)?;
     let value = arg_string(args, 1, context)?;
+    let old = host.doc.borrow().attr(id, &name).map(str::to_string);
     host.doc.borrow_mut().set_attr(id, &name, &value);
-    note_mutation(context, id, "attributes", Some(name))?;
+    note_mutation(context, id, "attributes", Some(name.clone()))?;
+    if !upgrading() {
+        let tag = host.doc.borrow().element_name(id).unwrap_or("").to_string();
+        if tag.contains('-')
+            && let Ok(bag) = custom_registry(context)
+            && let Ok(ctor) = bag.get(js_string!(tag), context)
+            && let Some(ctor) = ctor.as_object()
+        {
+            let observed = observed_attribute_names(&ctor, context);
+            if let Some(reaction) =
+                custom_element::attribute_reaction(&name, old, value, &observed)
+            {
+                run_reaction(this, &reaction, context);
+            }
+        }
+    }
     Ok(JsValue::undefined())
 }
 
@@ -5855,18 +5951,19 @@ fn call_connected(value: &JsValue, context: &mut Context) {
     if done {
         return;
     }
+    let Ok(callback) = object.get(js_string!("connectedCallback"), context) else {
+        return;
+    };
+    let Some(callback) = callback.as_object().filter(|callback| callback.is_callable()) else {
+        return;
+    };
     let _ = object.set(
         js_string!("__mithuConnected"),
         JsValue::from(true),
         false,
         context,
     );
-    if let Ok(callback) = object.get(js_string!("connectedCallback"), context)
-        && let Some(callback) = callback.as_object()
-        && callback.is_callable()
-    {
-        let _ = callback.call(value, &[], context);
-    }
+    let _ = callback.call(value, &[], context);
 }
 
 fn notify_connected(id: NodeId, context: &mut Context) {
@@ -6353,6 +6450,15 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
             .filter(|host| !host.is_empty());
         let page = mithu_url::Url::parse(&location).ok();
         let origin = page.as_ref().map(serialized_origin);
+        let credentials = fetch_credentials(args, context);
+        let cross = page
+            .as_ref()
+            .is_some_and(|page| cross_origin(page, &url));
+        let send_cookies = match credentials.as_str() {
+            "omit" => false,
+            "include" => true,
+            _ => !cross,
+        };
         let response = mithu_net::send(
             &method,
             &url,
@@ -6361,15 +6467,21 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
             initiator.as_deref(),
             origin.as_deref(),
             &extra_refs,
+            send_cookies,
         );
         let mode = fetch_mode(args, context);
         response
             .map_err(|error| error.to_string())
             .and_then(|response| {
+                let allow = response.header("access-control-allow-origin");
                 if let Some(page) = page.as_ref()
                     && cross_origin(page, &response.url)
                     && mode != "no-cors"
-                    && !cors_allows(page, response.header("access-control-allow-origin"))
+                    && (!cors_allows(page, allow)
+                        || !mithu_net::credentials_allow_origin(
+                            allow,
+                            credentials == "include",
+                        ))
                 {
                     return Err(format!("cross-origin fetch was blocked ({})", response.url));
                 }
@@ -6386,13 +6498,20 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
                         String::new(),
                     ));
                 }
+                let same_origin = page
+                    .as_ref()
+                    .is_none_or(|page| !cross_origin(page, &response.url));
+                let visible = mithu_net::visible_response_headers(
+                    &response.headers,
+                    same_origin || mode == "no-cors",
+                    credentials == "include",
+                );
                 Ok((
                     response.status,
                     (200..300).contains(&response.status),
                     response.url.to_string(),
                     response.text(),
-                    response
-                        .headers
+                    visible
                         .iter()
                         .map(|(name, value)| format!("{name}: {value}"))
                         .collect::<Vec<_>>()
@@ -6437,27 +6556,120 @@ pub(crate) fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
 }
 
 fn fetch_headers(args: &[JsValue], context: &mut Context) -> JsResult<Vec<(String, String)>> {
-    let Some(init) = args.get(1).and_then(JsValue::as_object) else {
-        return Ok(Vec::new());
-    };
-    let headers = init.get(js_string!("headers"), context)?;
-    let Some(object) = headers.as_object() else {
+    let Some(object) = header_bag(args, context)? else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
-    for name in ["accept", "Accept", "content-type", "Content-Type", "authorization", "Authorization"]
-    {
-        let value = object.get(js_string!(name), context)?;
+    let list = object.get(js_string!("_list"), context)?;
+    if let Some(list) = list.as_object() {
+        let length = list
+            .get(js_string!("length"), context)?
+            .to_u32(context)
+            .unwrap_or(0);
+        for index in 0..length {
+            let pair = list.get(index, context)?;
+            let Some(pair) = pair.as_object() else {
+                continue;
+            };
+            let name = pair
+                .get(0, context)?
+                .to_string(context)?
+                .to_std_string_lossy();
+            let value = pair
+                .get(1, context)?
+                .to_string(context)?
+                .to_std_string_lossy();
+            push_request_header(&mut out, name, value);
+        }
+        return Ok(out);
+    }
+    let keys = object_keys(&object, context)?;
+    for name in keys {
+        if name.starts_with('_') {
+            continue;
+        }
+        let value = object.get(js_string!(name.clone()), context)?;
         if value.is_null() || value.is_undefined() {
             continue;
         }
         let value = value.to_string(context)?.to_std_string_lossy();
-        if value.is_empty() {
-            continue;
-        }
-        out.push((name.to_string(), value));
+        push_request_header(&mut out, name, value);
     }
     Ok(out)
+}
+
+fn header_bag(args: &[JsValue], context: &mut Context) -> JsResult<Option<JsObject>> {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let headers = object.get(js_string!("headers"), context)?;
+        if let Some(headers) = headers.as_object() {
+            return Ok(Some(headers));
+        }
+        if object.get(js_string!("_list"), context)?.is_object() {
+            return Ok(Some(object.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn push_request_header(out: &mut Vec<(String, String)>, name: String, value: String) {
+    if name.is_empty() || value.is_empty() || mithu_net::is_forbidden_request_header(&name) {
+        return;
+    }
+    out.push((name, value));
+}
+
+fn object_keys(value: &JsObject, context: &mut Context) -> JsResult<Vec<String>> {
+    let object_ctor = context.global_object().get(js_string!("Object"), context)?;
+    let Some(object_ctor) = object_ctor.as_object() else {
+        return Ok(Vec::new());
+    };
+    let keys = object_ctor.get(js_string!("keys"), context)?;
+    let Some(keys) = keys.as_object() else {
+        return Ok(Vec::new());
+    };
+    let listed = keys.call(
+        &JsValue::from(object_ctor.clone()),
+        &[JsValue::from(value.clone())],
+        context,
+    )?;
+    let Some(listed) = listed.as_object() else {
+        return Ok(Vec::new());
+    };
+    let length = listed
+        .get(js_string!("length"), context)?
+        .to_u32(context)
+        .unwrap_or(0);
+    let mut names = Vec::new();
+    for index in 0..length {
+        names.push(
+            listed
+                .get(index, context)?
+                .to_string(context)?
+                .to_std_string_lossy(),
+        );
+    }
+    Ok(names)
+}
+
+fn fetch_credentials(args: &[JsValue], context: &mut Context) -> String {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let Ok(value) = object.get(js_string!("credentials"), context) else {
+            continue;
+        };
+        if let Some(text) = value.as_string() {
+            let text = text.to_std_string_lossy();
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    "same-origin".to_string()
 }
 
 fn fetch_method(args: &[JsValue], context: &mut Context) -> String {
@@ -9139,6 +9351,38 @@ mod tests {
         eprintln!("wpt dom subset {passed}/{total} {title}");
         assert_eq!(total, files.len().to_string(), "{title}");
         assert_eq!(passed, total, "{title}");
+    }
+
+    #[test]
+    fn wpt_html_and_fetch_subset_reports_a_pass_rate() {
+        for (label, relative) in [("html", "../../tests/wpt/html"), ("fetch", "../../tests/wpt/fetch")]
+        {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let files = js_fixtures(&root);
+            assert!(!files.is_empty(), "{label}");
+            let mut script = String::from("var passed = 0; var failed = '';");
+            for path in &files {
+                let name = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("case");
+                let body = std::fs::read_to_string(path).unwrap();
+                script.push_str(&format!(
+                    "try {{ {body}; passed += 1; }} catch (error) {{ failed += '{name}:' + error + ','; }}"
+                ));
+            }
+            script.push_str(&format!(
+                "document.title = passed + '/' + {} + ' ' + failed;",
+                files.len()
+            ));
+            let doc = parse_html(&format!("<body><script>{script}</script></body>"));
+            let session = Session::open(doc, |_| None);
+            let title = session.document().title.clone();
+            eprintln!("wpt {label} subset {title}");
+            let (passed, rest) = title.split_once('/').unwrap_or(("0", "0"));
+            let total = rest.split_whitespace().next().unwrap_or("0");
+            assert_eq!(passed, total, "{title}");
+        }
     }
 
     #[test]

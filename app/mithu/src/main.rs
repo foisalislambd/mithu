@@ -150,7 +150,6 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
         let started = Instant::now();
         let mut seen = browser.content_revision();
         let mut stable_since = Instant::now();
-        let mut animated = 0u32;
         // Leave time to paint and encode. The whole shot, including navigate,
         // stays inside 9s so the harness finishes under 10s.
         while started.elapsed() < Duration::from_secs(5)
@@ -165,20 +164,17 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
             if pending {
                 continue;
             }
-            let frames_before = browser.animation_frames_pending();
             browser.advance_timers(0);
-            if frames_before {
-                animated = animated.saturating_add(90);
-            }
             let frames = browser.animation_frames_pending();
             let quiet = stable_since.elapsed() > Duration::from_millis(800)
                 && started.elapsed() > Duration::from_secs(1);
-            // A ticker that never stops must not hold the screenshot open.
-            // Once a couple of seconds of frames have run, a quiet DOM is enough.
-            if quiet && (!frames || animated >= 40) {
+            // Keep scheduling animation frames while a timeline (GSAP fromTo)
+            // is still queued. A ticker that never clears still stops after a
+            // few seconds so the shot stays inside its budget.
+            if quiet && !frames {
                 break;
             }
-            if started.elapsed() > Duration::from_millis(2500) && animated >= 40 {
+            if started.elapsed() > Duration::from_millis(3500) {
                 break;
             }
             if frames {

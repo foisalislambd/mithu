@@ -19,10 +19,15 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 mod cache;
 mod cookies;
+mod cors;
 mod http2;
 
 pub use cache::HttpCache;
 pub use cookies::{Cookie, CookieJar};
+pub use cors::{
+    credentials_allow_origin, is_forbidden_request_header, is_forbidden_response_header,
+    visible_response_headers,
+};
 
 /// Chrome's current stable major, with Mithu named after it the way Edge and Brave do.
 pub const CHROME_MAJOR: &str = "157";
@@ -215,7 +220,7 @@ fn decode_windows_1252(body: &[u8]) -> String {
 }
 
 pub fn get(url: &Url) -> Result<Response, NetError> {
-    fetch("GET", url, None, &[], 0, CacheMode::Use, None, true, None, &[])
+    fetch("GET", url, None, &[], 0, CacheMode::Use, None, true, None, &[], true)
 }
 
 /// A CORS `fetch` or XHR. `origin` is the page's serialized origin, which
@@ -235,6 +240,7 @@ pub fn send(
     initiator_host: Option<&str>,
     origin: Option<&str>,
     headers: &[(&str, &str)],
+    cookies: bool,
 ) -> Result<Response, NetError> {
     let cache = if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
         CacheMode::Use
@@ -256,6 +262,7 @@ pub fn send(
         false,
         origin,
         headers,
+        cookies,
     )
 }
 
@@ -276,6 +283,7 @@ pub fn get_with_origin_headers(
         false,
         Some(origin),
         headers,
+        true,
     )
 }
 
@@ -295,6 +303,7 @@ pub fn navigate_from(url: &Url, initiator_host: &str) -> Result<Response, NetErr
         true,
         None,
         &[],
+        true,
     )
 }
 
@@ -310,6 +319,7 @@ pub fn get_from(url: &Url, initiator_host: &str) -> Result<Response, NetError> {
         false,
         None,
         &[],
+        true,
     )
 }
 
@@ -326,6 +336,7 @@ pub fn reload(url: &Url) -> Result<Response, NetError> {
         true,
         None,
         &[],
+        true,
     )
 }
 
@@ -341,6 +352,7 @@ pub fn post(url: &Url, content_type: &str, body: &[u8]) -> Result<Response, NetE
         true,
         None,
         &[],
+        true,
     )
 }
 
@@ -355,6 +367,7 @@ fn fetch(
     top_level: bool,
     origin: Option<&str>,
     headers: &[(&str, &str)],
+    cookies: bool,
 ) -> Result<Response, NetError> {
     if redirects > 8 {
         return Err(NetError::TooManyRedirects);
@@ -385,15 +398,19 @@ fn fetch(
     } else {
         initiator.unwrap_or(url.host.as_str())
     };
-    let cookie = with_profile(|profile| {
-        profile.cookies.header_for_request(&cookies::CookieRequest {
-            url,
-            initiator_host: initiator,
-            top_level,
-            method,
-            top_level_host: Some(top_host),
+    let cookie = if cookies {
+        with_profile(|profile| {
+            profile.cookies.header_for_request(&cookies::CookieRequest {
+                url,
+                initiator_host: initiator,
+                top_level,
+                method,
+                top_level_host: Some(top_host),
+            })
         })
-    });
+    } else {
+        None
+    };
     let port = url.effective_port().unwrap_or(80);
     let request = build_request(
         method,
@@ -434,6 +451,7 @@ fn fetch(
                 top_level,
                 origin,
                 headers,
+                cookies,
             );
         }
         return fetch(
@@ -447,6 +465,7 @@ fn fetch(
             top_level,
             origin,
             headers,
+            cookies,
         );
     }
     let response = Response {

@@ -1,0 +1,15 @@
+Mithu is MIT licensed. The files listed here are adapted from Servo and
+remain under the Mozilla Public License, Version 2.0. Servo's source is
+https://github.com/servo/servo.
+
+crates/net/src/cors.rs
+  Adapted from components/script/dom/fetch/headers.rs
+  (is_forbidden_request_header, is_forbidden_response_header) and
+  components/net/fetch/methods.rs (CORS-exposed header-name list).
+
+crates/js/src/custom_element.rs
+  Adapted from components/script/dom/node/customelementregistry.rs
+  (upgrade_element, invoke_callback).
+
+Mozilla Public License, Version 2.0
+https://mozilla.org/MPL/2.0/
