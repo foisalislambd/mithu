@@ -41,6 +41,19 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     context.register_global_class::<FontFaceHost>()?;
     context.register_global_class::<RangeHost>()?;
     context.register_global_class::<IntersectionObserverHost>()?;
+    let style_sheet = FunctionObjectBuilder::new(
+        context.realm(),
+        NativeFunction::from_fn_ptr(crate::construct_style_sheet),
+    )
+    .name(js_string!("CSSStyleSheet"))
+    .length(0)
+    .constructor(true)
+    .build();
+    context.register_global_property(
+        js_string!("CSSStyleSheet"),
+        style_sheet,
+        Attribute::WRITABLE.union(Attribute::CONFIGURABLE),
+    )?;
     context.register_global_class::<ResizeObserverHost>()?;
     register_html_elements(context)?;
     let image = context.global_object().get(js_string!("Image"), context)?;

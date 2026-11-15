@@ -683,6 +683,13 @@ fn drive_scripts(
                 *host.current_script.borrow_mut() = Some(job.node);
                 remember_source(host, &job.path, &job.code);
             }
+            if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+                eprintln!(
+                    "script {} {}",
+                    if job.module { "module" } else { "classic" },
+                    job.path
+                );
+            }
             if job.module {
                 if let Err(error) = run_module(&mut context, &job.code, &job.path) {
                     note_error(&context, &error);
@@ -1880,6 +1887,8 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let head_get = native(context, "get head", 0, get_head);
     let script_get = native(context, "get currentScript", 0, get_current_script);
     let sheets_get = native(context, "get styleSheets", 0, get_style_sheets);
+    let adopted_sheets_get = native(context, "get adoptedStyleSheets", 0, adopted_get);
+    let adopted_sheets_set = native(context, "set adoptedStyleSheets", 1, adopted_set);
     let scripts_get = native(context, "get scripts", 0, get_scripts);
     let ready_get = native(context, "get readyState", 0, get_ready_state);
     let base_get = native(context, "get baseURI", 0, get_location);
@@ -1953,6 +1962,12 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
         .accessor(js_string!("head"), Some(head_get), None, ATTR)
         .accessor(js_string!("currentScript"), Some(script_get), None, ATTR)
         .accessor(js_string!("styleSheets"), Some(sheets_get), None, ATTR)
+        .accessor(
+            js_string!("adoptedStyleSheets"),
+            Some(adopted_sheets_get),
+            Some(adopted_sheets_set),
+            ATTR,
+        )
         .accessor(js_string!("scripts"), Some(scripts_get), None, ATTR)
         .accessor(js_string!("readyState"), Some(ready_get), None, ATTR)
         .accessor(js_string!("baseURI"), Some(base_get), None, ATTR)
@@ -2082,6 +2097,131 @@ fn get_style_sheets(
         values.push(sheet_for(&element, id, context)?);
     }
     Ok(JsObject::from(JsArray::from_iter(values, context)).into())
+}
+
+pub(crate) fn adopted_get(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if let Some(object) = this.as_object() {
+        let cached = object.get(js_string!("__adopted"), context)?;
+        if cached.is_object() {
+            return Ok(cached);
+        }
+    }
+    Ok(JsObject::from(JsArray::from_iter(Vec::<JsValue>::new(), context)).into())
+}
+
+pub(crate) fn adopted_set(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = args.first().cloned().unwrap_or(JsValue::undefined());
+    if let Some(object) = this.as_object() {
+        let _ = object.set(js_string!("__adopted"), value.clone(), true, context);
+    }
+    let css = adopted_css(&value, context)?;
+    apply_adopted_css(this, &css, context)?;
+    Ok(value)
+}
+
+fn adopted_css(value: &JsValue, context: &mut Context) -> JsResult<String> {
+    let Some(object) = value.as_object() else {
+        return Ok(String::new());
+    };
+    let length = object
+        .get(js_string!("length"), context)?
+        .as_number()
+        .unwrap_or(0.0) as usize;
+    let mut css = String::new();
+    for index in 0..length.min(32) {
+        let sheet = object.get(js_string!(index.to_string()), context)?;
+        let Some(sheet) = sheet.as_object() else {
+            continue;
+        };
+        let text = sheet.get(js_string!("__css"), context)?;
+        if let Some(text) = text.as_string() {
+            css.push_str(&text.to_std_string_escaped());
+            css.push('\n');
+        }
+    }
+    Ok(css)
+}
+
+fn apply_adopted_css(this: &JsValue, css: &str, context: &mut Context) -> JsResult<()> {
+    let host = host(context)?;
+    let mut doc = host.doc.borrow_mut();
+    let parent = node_of(this)
+        .filter(|id| doc.nodes.get(id.0).is_some())
+        .or_else(|| {
+            doc.nodes.iter().enumerate().find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("head")).then_some(NodeId(index))
+            })
+        });
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    let stale: Vec<NodeId> = doc
+        .nodes
+        .get(parent.0)
+        .map(|node| node.children.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| doc.attr(*id, "mithu-adopted").is_some())
+        .collect();
+    for id in stale {
+        doc.detach(id);
+    }
+    if !css.trim().is_empty() {
+        let style = doc.create_element(parent, "style");
+        doc.set_attr(style, "mithu-adopted", "1");
+        doc.append_text(style, css);
+    }
+    doc.refresh_metadata();
+    Ok(())
+}
+
+pub(crate) fn construct_style_sheet(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let object = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(style_replace_sync),
+            js_string!("replaceSync"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(style_replace),
+            js_string!("replace"),
+            1,
+        )
+        .build();
+    Ok(object.into())
+}
+
+fn style_replace_sync(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let text = args
+        .first()
+        .and_then(|value| value.as_string())
+        .map(|text| text.to_std_string_escaped())
+        .unwrap_or_default();
+    if let Some(object) = this.as_object() {
+        object.set(js_string!("__css"), js_string!(text), true, context)?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn style_replace(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    style_replace_sync(this, args, context)?;
+    Ok(boa_engine::object::builtins::JsPromise::resolve(
+        JsValue::undefined(),
+        context,
+    )?
+    .into())
 }
 
 fn get_sheet(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -4291,6 +4431,15 @@ pub(crate) fn attach_shadow(
     if let Some(object) = root.as_object() {
         object.set(js_string!("mode"), js_string!(mode.clone()), true, context)?;
         object.set(js_string!("host"), this.clone(), true, context)?;
+        let adopted_get_fn = native(context, "get adoptedStyleSheets", 0, adopted_get);
+        let adopted_set_fn = native(context, "set adoptedStyleSheets", 1, adopted_set);
+        let _ = define_accessor(
+            &object,
+            context,
+            "adoptedStyleSheets",
+            adopted_get_fn,
+            Some(adopted_set_fn),
+        );
     }
     if mode != "closed" {
         if let Some(object) = this.as_object() {
@@ -6686,6 +6835,29 @@ mod tests {
                 .any(|sheet| sheet.contains("opacity")),
             "{:?}",
             doc.stylesheets
+        );
+    }
+
+    #[test]
+    fn an_adopted_style_sheet_is_collected_for_layout() {
+        let mut doc = parse_html(
+            r#"<div id="host"></div><script>
+            var sheet = new CSSStyleSheet();
+            sheet.replaceSync("p{color:#111}");
+            document.adoptedStyleSheets = [sheet];
+            var root = document.getElementById("host").attachShadow({mode:"open"});
+            var local = new CSSStyleSheet();
+            local.replaceSync(":host{display:block}");
+            root.adoptedStyleSheets = [local];
+            </script>"#,
+        );
+        let log = run_scripts(&mut doc, |_| None);
+        assert!(log.is_empty(), "{log:?}");
+        let joined = doc.stylesheets.join("\n");
+        assert!(joined.contains("color"), "{joined}");
+        assert!(
+            joined.contains("display:block") && !joined.contains(":host"),
+            "{joined}"
         );
     }
 
