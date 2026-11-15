@@ -172,6 +172,9 @@ pub struct ComputedStyle {
     pub background: Color,
     /// First `url(...)` in `background-image`, when one is set.
     pub background_image: Option<String>,
+    /// First `url(...)` in `mask-image`. The painter tints this alpha with
+    /// the background color.
+    pub mask_image: Option<String>,
     pub font_size: f32,
     pub bold: bool,
     pub mono: bool,
@@ -250,6 +253,7 @@ impl ComputedStyle {
             fill: None,
             background: Color::TRANSPARENT,
             background_image: None,
+            mask_image: None,
             font_size: 16.0,
             bold: false,
             mono: false,

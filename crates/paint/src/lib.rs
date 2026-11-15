@@ -155,6 +155,39 @@ impl Canvas<'_> {
         );
     }
 
+    pub fn mask(&mut self, dest: Rect, bitmap: &Bitmap, tint: Color, clip: Rect) {
+        if dest.width <= 0.0 || dest.height <= 0.0 || bitmap.width == 0 || bitmap.height == 0 {
+            return;
+        }
+        let Some(visible) = intersect(dest, clip) else {
+            return;
+        };
+        let x0 = visible.x.floor().max(0.0) as i32;
+        let y0 = visible.y.floor().max(0.0) as i32;
+        let x1 = visible.right().ceil().min(self.width as f32) as i32;
+        let y1 = visible.bottom().ceil().min(self.height as f32) as i32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let u = ((x as f32 + 0.5 - dest.x) / dest.width * bitmap.width as f32).floor();
+                let v = ((y as f32 + 0.5 - dest.y) / dest.height * bitmap.height as f32).floor();
+                let u = (u as i64).clamp(0, bitmap.width as i64 - 1) as u32;
+                let v = (v as i64).clamp(0, bitmap.height as i64 - 1) as u32;
+                let packed = bitmap.pixels[(v * bitmap.width + u) as usize];
+                let alpha = ((packed >> 24) as u32 * u32::from(tint.a) / 255) as u8;
+                if alpha == 0 {
+                    continue;
+                }
+                let color = Color::rgba(tint.r, tint.g, tint.b, alpha);
+                let index = y as usize * self.width as usize + x as usize;
+                self.pixels[index] = if alpha == 255 {
+                    color.to_u32()
+                } else {
+                    blend(self.pixels[index], color, 255)
+                };
+            }
+        }
+    }
+
     pub fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect) {
         if dest.width <= 0.0 || dest.height <= 0.0 || bitmap.width == 0 || bitmap.height == 0 {
             return;
@@ -432,7 +465,9 @@ fn paint_box_with_opacity(
         paint_shadow(canvas, screen, shadow, clip);
     }
     let background = scale_alpha(box_.background, opacity);
-    if let Some((top, bottom)) = box_.gradient {
+    if box_.mask {
+        // The mask bitmap is painted below, tinted with this color.
+    } else if let Some((top, bottom)) = box_.gradient {
         let top = scale_alpha(top, opacity);
         let bottom = scale_alpha(bottom, opacity);
         if box_.border_radius > 0.0 {
@@ -503,16 +538,22 @@ fn paint_box_with_opacity(
         let right = box_.borders[1].max(0.0);
         let top = box_.borders[0].max(0.0);
         let bottom = box_.borders[2].max(0.0);
-        canvas.image(
-            Rect::new(
-                screen.x + left,
-                screen.y + top,
-                (screen.width - left - right).max(0.0),
-                (screen.height - top - bottom).max(0.0),
-            ),
-            bitmap,
-            clip,
+        let dest = Rect::new(
+            screen.x + left,
+            screen.y + top,
+            (screen.width - left - right).max(0.0),
+            (screen.height - top - bottom).max(0.0),
         );
+        if box_.mask {
+            let tint = if background.a > 0 {
+                background
+            } else {
+                scale_alpha(box_.color, opacity)
+            };
+            canvas.mask(dest, bitmap, tint, clip);
+        } else {
+            canvas.image(dest, bitmap, clip);
+        }
     }
     let border_color = scale_alpha(box_.border_color, opacity);
     if border_color.a > 0 {
@@ -787,6 +828,29 @@ fn blend(dst: u32, color: Color, coverage: u8) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mask_keeps_clear_pixels_unpainted() {
+        let mut pixels = vec![Color::WHITE.to_u32(); 4 * 2];
+        let mut canvas = Canvas {
+            pixels: &mut pixels,
+            width: 4,
+            height: 2,
+        };
+        let bitmap = mithu_image::Bitmap {
+            width: 2,
+            height: 1,
+            pixels: vec![0xFF00_0000, 0x0000_0000],
+        };
+        canvas.mask(
+            Rect::new(0.0, 0.0, 4.0, 2.0),
+            &bitmap,
+            Color::rgb(32, 33, 34),
+            Rect::new(0.0, 0.0, 4.0, 2.0),
+        );
+        assert_eq!(pixels[0], Color::rgb(32, 33, 34).to_u32());
+        assert_eq!(pixels[3], Color::WHITE.to_u32());
+    }
 
     #[test]
     fn glyph_paints_above_its_baseline() {

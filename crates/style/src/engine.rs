@@ -751,6 +751,7 @@ fn project(values: &ComputedValues) -> ComputedStyle {
     style.underline = text_underline(values);
     style.background = background_color(values);
     style.background_image = css_image_url(&css_of_prop(values, "background-image"));
+    style.mask_image = css_image_url(&css_of_prop(values, "mask-image"));
     style.fill = fill_color(values);
     style.width = length_of(&css_of_prop(values, "width"));
     style.height = length_of(&css_of_prop(values, "height"));

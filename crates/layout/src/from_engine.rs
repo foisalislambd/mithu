@@ -155,7 +155,7 @@ fn walk(
 }
 
 fn box_from(
-    _doc: &Document,
+    doc: &Document,
     id: NodeId,
     style: &ComputedStyle,
     placed: Option<&mithu_style::Placed>,
@@ -186,6 +186,10 @@ fn box_from(
         overflow_hidden: style.overflow_hidden,
         border_radius: style.border_radius,
         image: images.get(&id).cloned(),
+        mask: style.mask_image.is_some()
+            && images.contains_key(&id)
+            && doc.element_name(id) != Some("img")
+            && doc.element_name(id) != Some("video"),
         visible: style.visible,
         z_index: style.z_index,
         borders,
@@ -285,6 +289,7 @@ fn empty(id: NodeId) -> LayoutBox {
         overflow_hidden: false,
         border_radius: 0.0,
         image: None,
+        mask: false,
         visible: true,
         z_index: 0,
         borders: [0.0; 4],

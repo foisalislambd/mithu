@@ -49,6 +49,8 @@ pub struct LayoutBox {
     pub overflow_hidden: bool,
     pub border_radius: f32,
     pub image: Option<Arc<Bitmap>>,
+    /// The image is a CSS mask. Paint tints its alpha with the background.
+    pub mask: bool,
     pub visible: bool,
     pub z_index: i32,
     pub borders: [f32; 4],
@@ -1318,6 +1320,38 @@ mod tests {
             css.contains("x-card") && !css.contains(":host"),
             "{css}"
         );
+    }
+
+    #[test]
+    fn a_mask_image_is_applied_to_the_element_box() {
+        let doc = parse_html(r#"<span class="icon"></span>"#);
+        let styles = style_document(
+            &doc,
+            r#".icon{display:inline-block;width:8px;height:8px;background:#202122;mask-image:url(icon.svg)}"#,
+        );
+        let icon = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("span")).then_some(NodeId(index))
+            })
+            .unwrap();
+        let mask = styles[icon.0].mask_image.as_deref().unwrap_or("");
+        assert!(mask.ends_with("icon.svg"), "{mask}");
+        let mut images = HashMap::new();
+        images.insert(
+            icon,
+            Arc::new(mithu_image::Bitmap {
+                width: 2,
+                height: 1,
+                pixels: vec![0xFF00_0000, 0x0000_0000],
+            }),
+        );
+        let tree = layout_tree(&doc, &styles, 64.0, 32.0, &NaiveMetrics, &images);
+        let painted = find(&tree.root, icon).expect("icon box");
+        assert!(painted.mask, "mask bitmap should tint the background");
+        assert!(painted.rect.width >= 8.0 && painted.rect.height >= 8.0);
     }
 
     fn line_text(box_: &LayoutBox) -> String {

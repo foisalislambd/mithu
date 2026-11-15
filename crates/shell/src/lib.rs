@@ -3629,6 +3629,28 @@ fn load_images(
             images.insert(id, Arc::new(bitmap));
         }
     }
+    let mut masks = 0;
+    for (index, style) in styles.iter().enumerate() {
+        if masks >= 48 {
+            break;
+        }
+        let Some(url) = style.mask_image.as_deref() else {
+            continue;
+        };
+        let id = NodeId(index);
+        if images.contains_key(&id) {
+            continue;
+        }
+        let bitmap = if url.starts_with("data:") {
+            mithu_image::decode_data_url(url).or_else(|| rasterize_svg_url(url))
+        } else {
+            fetch_bytes(base, url).and_then(|bytes| decode_image_bytes(&bytes))
+        };
+        if let Some(bitmap) = bitmap {
+            images.insert(id, Arc::new(bitmap));
+            masks += 1;
+        }
+    }
     images
 }
 
@@ -4501,6 +4523,81 @@ mod tests {
                 .text_content(browser.page().document.root)
                 .contains("Appearance")
         );
+    }
+
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92, 0xef, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn fetch_then_updates_html_and_the_image_before_paint() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let request = String::from_utf8_lossy(&buf);
+                let (kind, body) = if request.contains("GET /words") {
+                    ("text/plain", b"Filled".to_vec())
+                } else if request.contains("GET /pic.png") {
+                    ("image/png", TINY_PNG.to_vec())
+                } else {
+                    let html = format!(
+                        r#"<!doctype html><div id="host"></div><img id="pic" alt="pic">
+                        <script type="module">document.body.dataset.mod="1"</script>
+                        <script>
+                          requestAnimationFrame(() => document.body.dataset.raf = "1");
+                          requestIdleCallback(() => document.body.dataset.idle = "1");
+                          new IntersectionObserver(entries => {{
+                            if (entries[0] && entries[0].isIntersecting) document.body.dataset.io = "1";
+                          }}).observe(document.getElementById("host"));
+                          fetch("/words").then(r => r.text()).then(text => {{
+                            document.getElementById("host").innerHTML = "<b id='filled'>" + text + "</b>";
+                            document.getElementById("pic").src = "/pic.png";
+                          }});
+                        </script>"#
+                    );
+                    ("text/html", html.into_bytes())
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
+                let _ = std::io::Write::write_all(&mut stream, &body);
+            }
+        });
+        let mut browser = Browser::new();
+        browser.navigate(&format!("http://127.0.0.1:{port}/"));
+        browser.advance_timers(16);
+        let page = browser.page();
+        let text = page.document.text_content(page.document.root);
+        assert!(text.contains("Filled"), "{text}");
+        let pic = page.document.get_element_by_id("pic").unwrap();
+        assert_eq!(page.document.attr(pic, "src"), Some("/pic.png"));
+        assert!(page.images.contains_key(&pic), "image should be decoded");
+        let body = page
+            .document
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (page.document.element_name(mithu_dom::NodeId(index)) == Some("body"))
+                    .then_some(mithu_dom::NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(page.document.attr(body, "data-io"), Some("1"));
+        assert_eq!(page.document.attr(body, "data-raf"), Some("1"));
+        assert_eq!(page.document.attr(body, "data-idle"), Some("1"));
+        assert_eq!(page.document.attr(body, "data-mod"), Some("1"));
     }
 
     fn click_id(browser: &mut Browser, id: &str) {
