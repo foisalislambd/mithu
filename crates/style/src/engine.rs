@@ -1,12 +1,14 @@
 //! Drive Servo's Stylo and Blitz's Taffy/Parley layout from a Mithu document.
 //!
-//! Blitz implements `TElement` / `TNode` / `TDocument` and the incremental
-//! restyle traversal. Each Mithu node is mirrored into that tree, so a Boa
-//! mutation is restyled by rebuilding the dirty mirror and calling
-//! `BaseDocument::resolve`, which runs Stylo's incremental cascade and then
-//! Taffy (block, flex, grid, floats) plus Parley for inline layout.
+//! Each Mithu node is mirrored into a Blitz document. `BaseDocument::resolve`
+//! runs Stylo and then Taffy (block, flex, grid, floats) plus Parley.
+//! An unchanged document, sheet, and viewport reuses the previous frame so a
+//! style read followed by layout does not build that tree twice.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, Mutex, Once};
 
 use blitz_dom::node::{ImageData, RasterImageData, SpecialElementData};
@@ -29,6 +31,10 @@ use crate::{
 static RESOLVE_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
+    static FRAME_CACHE: RefCell<Option<(u64, Frame)>> = const { RefCell::new(None) };
+}
+
+thread_local! {
     static REMEMBERED: std::cell::RefCell<(String, Option<NodeId>)> =
         std::cell::RefCell::new((String::new(), None));
 }
@@ -43,12 +49,14 @@ pub fn remembered() -> (String, Option<NodeId>) {
     REMEMBERED.with(|slot| slot.borrow().clone())
 }
 
+#[derive(Clone)]
 pub struct Frame {
     pub styles: Vec<ComputedStyle>,
     pub placed: Vec<Placed>,
     pub background: Color,
 }
 
+#[derive(Clone)]
 pub struct Placed {
     pub has_box: bool,
     pub rect: Rect,
@@ -57,6 +65,7 @@ pub struct Placed {
     pub lines: Vec<PlacedLine>,
 }
 
+#[derive(Clone)]
 pub struct PlacedLine {
     pub baseline: f32,
     pub ascent: f32,
@@ -64,6 +73,7 @@ pub struct PlacedLine {
     pub fragments: Vec<PlacedFragment>,
 }
 
+#[derive(Clone)]
 pub struct PlacedFragment {
     pub x: f32,
     pub text: String,
@@ -86,6 +96,15 @@ pub fn resolve(
     fonts: &[(String, Vec<u8>)],
 ) -> Frame {
     let _guard = RESOLVE_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let key = frame_key(doc, author_css, state, viewport_height, images, fonts);
+    if let Some(frame) = FRAME_CACHE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|(cached, _)| *cached == key)
+            .map(|(_, frame)| frame.clone())
+    }) {
+        return frame;
+    }
     init_prefs();
 
     let width = state.viewport_width.max(1.0);
@@ -251,11 +270,65 @@ pub fn resolve(
     paint_fragments(doc, &styles, &mut placed);
 
     let background = page_background(doc, &styles);
-    Frame {
+    let frame = Frame {
         styles,
         placed,
         background,
+    };
+    FRAME_CACHE.with(|slot| *slot.borrow_mut() = Some((key, frame.clone())));
+    frame
+}
+
+fn frame_key(
+    doc: &Document,
+    author_css: &str,
+    state: crate::StyleState,
+    viewport_height: f32,
+    images: &[(NodeId, u32, u32)],
+    fonts: &[(String, Vec<u8>)],
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    doc.nodes.len().hash(&mut hasher);
+    for node in &doc.nodes {
+        node.parent.map(|id| id.0).hash(&mut hasher);
+        for child in &node.children {
+            child.0.hash(&mut hasher);
+        }
+        match &node.data {
+            NodeData::Document => 0u8.hash(&mut hasher),
+            NodeData::Element(element) => {
+                1u8.hash(&mut hasher);
+                element.name.hash(&mut hasher);
+                element.id.hash(&mut hasher);
+                element.classes.hash(&mut hasher);
+                element.attrs.hash(&mut hasher);
+            }
+            NodeData::Text(text) => {
+                2u8.hash(&mut hasher);
+                text.hash(&mut hasher);
+            }
+            NodeData::Comment(text) => {
+                3u8.hash(&mut hasher);
+                text.hash(&mut hasher);
+            }
+        }
     }
+    author_css.hash(&mut hasher);
+    state.hover.map(|id| id.0).hash(&mut hasher);
+    state.viewport_width.to_bits().hash(&mut hasher);
+    viewport_height.to_bits().hash(&mut hasher);
+    for (id, width, height) in images {
+        id.0.hash(&mut hasher);
+        width.hash(&mut hasher);
+        height.hash(&mut hasher);
+    }
+    for (family, bytes) in fonts {
+        family.hash(&mut hasher);
+        bytes.len().hash(&mut hasher);
+        bytes.first().hash(&mut hasher);
+        bytes.last().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn form_controls_sheet() -> UserAgentStylesheet {
