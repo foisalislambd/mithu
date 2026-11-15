@@ -59,9 +59,19 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
     let mut browser = Browser::new();
     if let Some(url) = url {
         browser.navigate(url);
-        // Let a short timer (Google's own fallback, for example) run before
-        // the still is taken.
-        browser.advance_timers(8_000);
+        // Scripts, fetches, and animation frames can fill the page after the
+        // first layout. Stop when nothing is queued, or after 15 seconds.
+        let started = Instant::now();
+        browser.advance_timers(0);
+        while started.elapsed() < Duration::from_secs(15) {
+            let Some(wait) = browser.next_timer_ms() else {
+                break;
+            };
+            if wait > 1_000 && started.elapsed() > Duration::from_secs(2) {
+                break;
+            }
+            browser.advance_timers(wait.clamp(1, 250));
+        }
     }
     let width = 1280u32;
     let height = 800u32;
