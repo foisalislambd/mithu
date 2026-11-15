@@ -374,6 +374,20 @@ impl Browser {
         &self.page().status
     }
 
+    /// Text of the element with this id, from the live document when a session
+    /// is open. The measurement harness reads the testharness completion record
+    /// from a node it inserted.
+    pub fn element_text(&self, id: &str) -> Option<String> {
+        if let Some(session) = self.page().session.as_ref() {
+            let doc = session.document();
+            let node = doc.get_element_by_id(id)?;
+            return Some(doc.text_content(node));
+        }
+        let doc = &self.page().document;
+        let node = doc.get_element_by_id(id)?;
+        Some(doc.text_content(node))
+    }
+
     pub fn script_logs(&self) -> Vec<String> {
         self.page()
             .session

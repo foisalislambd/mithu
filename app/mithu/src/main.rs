@@ -33,6 +33,19 @@ fn run() {
             bench_paint();
             return;
         }
+        if first == "--hold" {
+            let seconds: u64 = args
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(12);
+            let url = args.next().unwrap_or_else(|| "about:blank".to_string());
+            let extra_tabs: usize = args.next().and_then(|value| value.parse().ok()).unwrap_or(0);
+            if let Err(error) = hold_page(seconds, &url, extra_tabs) {
+                eprintln!("mithu: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if first == "--screenshot" {
             let path = args.next().unwrap_or_else(|| "mithu.png".to_string());
             let url = args.next();
@@ -134,6 +147,60 @@ fn event_loop() -> EventLoop<()> {
     builder.build().expect("create the event loop")
 }
 
+fn hold_page(seconds: u64, url: &str, extra_tabs: usize) -> Result<(), String> {
+    let mut browser = Browser::new();
+    browser.resize(1280.0, 800.0);
+    browser.set_cooperative_scripts(true);
+    let started = Instant::now();
+    browser.navigate(url);
+    pump_quiet(&mut browser, started);
+    for _ in 0..extra_tabs.saturating_sub(1) {
+        browser.new_tab();
+        browser.navigate("about:blank");
+    }
+    eprintln!("loaded {}ms tabs {}", started.elapsed().as_millis(), browser.tab_count());
+    std::thread::sleep(Duration::from_secs(seconds));
+    eprintln!("hold done {}ms", started.elapsed().as_millis());
+    Ok(())
+}
+
+fn pump_quiet(browser: &mut Browser, budget: Instant) {
+    let started = Instant::now();
+    let mut seen = browser.content_revision();
+    let mut stable_since = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) && budget.elapsed() < Duration::from_secs(8) {
+        let pending = browser.pump_scripts(Duration::from_millis(200));
+        let revision = browser.content_revision();
+        if revision != seen {
+            seen = revision;
+            stable_since = Instant::now();
+        }
+        if pending {
+            continue;
+        }
+        browser.advance_timers(0);
+        let frames = browser.animation_frames_pending();
+        let quiet = stable_since.elapsed() > Duration::from_millis(800)
+            && started.elapsed() > Duration::from_secs(1);
+        if quiet && !frames {
+            break;
+        }
+        if started.elapsed() > Duration::from_millis(3500) {
+            break;
+        }
+        if frames {
+            continue;
+        }
+        let Some(wait) = browser.next_timer_ms() else {
+            break;
+        };
+        if wait > 1_000 {
+            break;
+        }
+        browser.advance_timers(wait.clamp(1, 250));
+    }
+}
+
 fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
     let mut browser = Browser::new();
     if let Some(url) = url {
@@ -147,49 +214,10 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
         if std::env::var_os("MITHU_TIMING").is_some() {
             eprintln!("timing navigate {}ms", nav.elapsed().as_millis());
         }
-        let started = Instant::now();
-        let mut seen = browser.content_revision();
-        let mut stable_since = Instant::now();
-        // Leave time to paint and encode. The whole shot, including navigate,
-        // stays inside 9s so the harness finishes under 10s.
-        while started.elapsed() < Duration::from_secs(5)
-            && budget.elapsed() < Duration::from_secs(8)
-        {
-            let pending = browser.pump_scripts(Duration::from_millis(200));
-            let revision = browser.content_revision();
-            if revision != seen {
-                seen = revision;
-                stable_since = Instant::now();
-            }
-            if pending {
-                continue;
-            }
-            browser.advance_timers(0);
-            let frames = browser.animation_frames_pending();
-            let quiet = stable_since.elapsed() > Duration::from_millis(800)
-                && started.elapsed() > Duration::from_secs(1);
-            // Keep scheduling animation frames while a timeline (GSAP fromTo)
-            // is still queued. A ticker that never clears still stops after a
-            // few seconds so the shot stays inside its budget.
-            if quiet && !frames {
-                break;
-            }
-            if started.elapsed() > Duration::from_millis(3500) {
-                break;
-            }
-            if frames {
-                continue;
-            }
-            let Some(wait) = browser.next_timer_ms() else {
-                break;
-            };
-            if wait > 1_000 {
-                break;
-            }
-            browser.advance_timers(wait.clamp(1, 250));
-        }
+        let pump = Instant::now();
+        pump_quiet(&mut browser, budget);
         if std::env::var_os("MITHU_TIMING").is_some() {
-            eprintln!("timing pump {}ms", started.elapsed().as_millis());
+            eprintln!("timing pump {}ms", pump.elapsed().as_millis());
         }
     }
     let width = 1280u32;

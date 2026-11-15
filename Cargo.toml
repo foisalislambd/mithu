@@ -15,6 +15,7 @@ members = [
     "crates/paint",
     "crates/shell",
     "app/mithu",
+    "tools/measure",
 ]
 
 [workspace.package]
