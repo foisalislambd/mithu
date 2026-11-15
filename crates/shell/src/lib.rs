@@ -3,8 +3,8 @@
 //! The window crate only forwards input. Loading, layout, and painting live here
 //! so the engine can be tested without a display server.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mithu_base::{Color, Rect};
@@ -14,7 +14,7 @@ use mithu_image::Bitmap;
 use mithu_js::{Session, Submission};
 use mithu_layout::{LayoutBox, LayoutTree, hit_test, layout_tree};
 use mithu_net::{get, post};
-use mithu_paint::{Canvas, paint_layout};
+use mithu_paint::{Canvas, Draw, paint_layout};
 use mithu_style::{ComputedStyle, StyleState, font_faces, style_with};
 use mithu_text::{FontBook, MeasureText};
 use mithu_url::{Url, UrlError};
@@ -84,6 +84,7 @@ struct Page {
     styles: Vec<ComputedStyle>,
     layout: LayoutTree,
     images: HashMap<NodeId, Arc<Bitmap>>,
+    announced_images: HashSet<usize>,
     session: Option<Session>,
     focused: Option<NodeId>,
     find_query: String,
@@ -92,6 +93,8 @@ struct Page {
     zoom: f32,
     author_css: String,
     hover: Option<NodeId>,
+    /// Last document generation that was styled. `None` until the first paint.
+    painted_revision: Option<u64>,
     pinned: bool,
     group: Option<u8>,
 }
@@ -136,6 +139,7 @@ impl Page {
                 &HashMap::new(),
             ),
             images: HashMap::new(),
+            announced_images: HashSet::new(),
             session: None,
             focused: None,
             find_query: String::new(),
@@ -144,6 +148,7 @@ impl Page {
             zoom: 1.0,
             author_css: String::new(),
             hover: None,
+            painted_revision: None,
             pinned: false,
             group: None,
         }
@@ -433,6 +438,10 @@ impl Browser {
 
     /// Run pending script tasks for `budget`, then refresh the page.
     /// Returns true while scripts remain, so the window keeps painting.
+    pub fn content_revision(&self) -> Option<u64> {
+        self.page().session.as_ref().map(Session::revision)
+    }
+
     pub fn pump_scripts(&mut self, budget: Duration) -> bool {
         let pending = {
             let Some(session) = self.page_mut().session.as_mut() else {
@@ -1461,6 +1470,9 @@ impl Browser {
     }
 
     fn install(&mut self, mut fetched: Fetched) {
+        // SpiderMonkey keeps one context per thread. The previous page's
+        // context has to be destroyed before this page creates its own.
+        self.page_mut().session = None;
         if let Some(name) = fetched.download_name.clone() {
             self.downloads.push((name, fetched.url.to_display()));
             if self.downloads.len() > 100 {
@@ -1482,6 +1494,12 @@ impl Browser {
                 .unwrap_or_else(|_| fetched.url.clone()),
             None => fetched.url.clone(),
         };
+        let timed = std::env::var_os("MITHU_TIMING").is_some();
+        let mark = Instant::now();
+        prefetch_page(&document, &base);
+        if timed {
+            eprintln!("timing prefetch {}ms", mark.elapsed().as_millis());
+        }
         let module_base = base.clone();
         let origin = origin_key(&fetched.url);
         let local = self.local_data.get(&origin).cloned().unwrap_or_default();
@@ -1493,28 +1511,8 @@ impl Browser {
             local,
             session_store,
         );
-        {
-            let document = session.document();
-            let author = author_css(&document, &base);
-            let styles = style_with(
-                &document,
-                &author,
-                StyleState {
-                    hover: None,
-                    viewport_width: layout_width,
-                    ..StyleState::default()
-                },
-            );
-            let images = load_images(&document, &base);
-            let layout = layout_tree(
-                &document,
-                &styles,
-                layout_width,
-                self.layout_height(),
-                &self.fonts,
-                &images,
-            );
-            session.set_geometry(Self::metrics_from(&layout.root), 0.0);
+        if timed {
+            eprintln!("timing session {}ms", mark.elapsed().as_millis());
         }
         if !self.cooperative {
             while session.scripts_pending() {
@@ -1546,6 +1544,9 @@ impl Browser {
             author.push('\n');
         }
         let mut seen = Vec::new();
+        if timed {
+            eprintln!("timing css-start {}ms", mark.elapsed().as_millis());
+        }
         for href in document.stylesheet_links.iter().take(40) {
             if let Some(css) = fetch_text(&base, href)
                 && css.len() <= 1_500_000
@@ -1555,7 +1556,17 @@ impl Browser {
             }
         }
         author = expand_imports(&author, &base, 0, &mut seen);
+        if timed {
+            eprintln!(
+                "timing css {}ms bytes={}",
+                mark.elapsed().as_millis(),
+                author.len()
+            );
+        }
         self.install_web_fonts(&author, &base);
+        if timed {
+            eprintln!("timing fonts {}ms", mark.elapsed().as_millis());
+        }
         let styles = style_with(
             &document,
             &author,
@@ -1565,7 +1576,13 @@ impl Browser {
                 ..StyleState::default()
             },
         );
-        let images = load_images(&document, &base);
+        if timed {
+            eprintln!("timing style {}ms nodes={}", mark.elapsed().as_millis(), document.nodes.len());
+        }
+        let images = load_images(&document, &base, &styles);
+        if timed {
+            eprintln!("timing images {}ms", mark.elapsed().as_millis());
+        }
         let layout_height = self.layout_height();
         let layout = layout_tree(
             &document,
@@ -1575,6 +1592,11 @@ impl Browser {
             &self.fonts,
             &images,
         );
+        session.set_geometry(Self::metrics_from(&layout.root), 0.0);
+        if timed {
+            eprintln!("timing layout {}ms", mark.elapsed().as_millis());
+        }
+        let painted_revision = Some(session.revision());
         self.omnibox_focused = false;
         let page = self.page_mut();
         let committed = process::RendererToBrowser::Committed {
@@ -1608,12 +1630,18 @@ impl Browser {
         page.layout = layout;
         page.session = Some(session);
         page.focused = None;
+        // React and Polymer schedule paints on MessageChannel. Those tasks are
+        // due immediately, so drain them before the first painted frame.
+        self.advance_timers(0);
+        self.signal_image_loads();
+        let page = self.page_mut();
         page.find_query = find_query;
         page.find_open = find_open;
         page.find_at = 0;
         page.zoom = zoom;
         page.author_css = author;
         page.hover = None;
+        page.painted_revision = painted_revision;
         let reopen = page.find_open && !page.find_query.is_empty();
         let _ = page;
         self.publish_geometry();
@@ -1650,6 +1678,66 @@ impl Browser {
             return true;
         }
         ran
+    }
+
+    /// Runs due timers, but at most `max_frames` animation callbacks.
+    /// `kind` limits the pass to one timer kind when it is set.
+    pub fn advance_limited(&mut self, ms: u64, kind: Option<u8>, max_frames: u32) -> bool {
+        let (ran, next) = {
+            let Some(session) = self.page_mut().session.as_mut() else {
+                return false;
+            };
+            (
+                session.advance_limited(ms, kind, max_frames),
+                session.take_navigation(),
+            )
+        };
+        if ran
+            || self
+                .page()
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.logs().is_empty())
+        {
+            self.pull_page();
+        }
+        if let Some(next) = next {
+            self.navigate(&next);
+            return true;
+        }
+        ran
+    }
+
+    /// One animation frame at the real elapsed time. The live window calls
+    /// this about every 16ms while a frame is scheduled.
+    pub fn advance_frame(&mut self, ms: u64) -> bool {
+        let (ran, next) = {
+            let Some(session) = self.page_mut().session.as_mut() else {
+                return false;
+            };
+            (session.advance_frame(ms), session.take_navigation())
+        };
+        if ran
+            || self
+                .page()
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.logs().is_empty())
+        {
+            self.pull_page();
+        }
+        if let Some(next) = next {
+            self.navigate(&next);
+            return true;
+        }
+        ran
+    }
+
+    pub fn animation_frames_pending(&self) -> bool {
+        self.page()
+            .session
+            .as_ref()
+            .is_some_and(mithu_js::Session::animation_frames_pending)
     }
 
     pub fn next_timer_ms(&self) -> Option<u64> {
@@ -1717,21 +1805,32 @@ impl Browser {
         boxes
     }
 
-    /// A frame document gets its own Boa realm. Scripts there cannot see the parent window.
+    /// A frame document gets its own realm. SpiderMonkey allows one context
+    /// per thread, and the parent page already owns the UI thread's context,
+    /// so the frame realm is created and destroyed on a worker thread.
     fn run_frame_scripts(doc: Document, base: &Url) -> Document {
         let module_base = base.clone();
-        let mut session = Session::open_cooperative(
-            doc,
-            &base.to_display(),
-            move |src| fetch_text(&module_base, src),
-            HashMap::new(),
-            HashMap::new(),
-        );
-        let start = Instant::now();
-        while session.scripts_pending() && start.elapsed() < Duration::from_millis(800) {
-            session.pump(Duration::from_millis(80));
-        }
-        session.document()
+        let display = base.to_display();
+        std::thread::Builder::new()
+            .name("mithu-frame".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let mut session = Session::open_cooperative(
+                    doc,
+                    &display,
+                    move |src| fetch_text(&module_base, src),
+                    HashMap::new(),
+                    HashMap::new(),
+                );
+                let start = Instant::now();
+                while session.scripts_pending() && start.elapsed() < Duration::from_millis(800) {
+                    session.pump(Duration::from_millis(80));
+                }
+                session.document()
+            })
+            .expect("frame script thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 
     /// Load each iframe `src` into a nested document and paint it in the frame.
@@ -1790,7 +1889,7 @@ impl Browser {
                     ..StyleState::default()
                 },
             );
-            let images = load_images(&doc, &nested_base);
+            let images = load_images(&doc, &nested_base, &styles);
             let nested = layout_tree(&doc, &styles, width, height, &self.fonts, &images);
             if let Some(slot) = find_box_mut(&mut layout.root, id) {
                 slot.frame = Some(Box::new(nested));
@@ -1887,17 +1986,25 @@ impl Browser {
     }
 
     fn install_web_fonts(&mut self, css: &str, base: &Url) {
-        for (family, url) in font_faces(css).into_iter().take(8) {
-            if self.fonts.has_family(&family) {
-                continue;
-            }
-            if let Some(bytes) = fetch_bytes(base, &url) {
-                self.fonts.add_family(&family, &bytes);
+        let wanted: Vec<(String, String)> = font_faces(css)
+            .into_iter()
+            .filter(|(family, _)| !self.fonts.has_family(family))
+            .take(24)
+            .collect();
+        let hrefs = wanted.iter().map(|(_, url)| url.clone()).collect();
+        let fetched = fetch_parallel(base, hrefs);
+        for (family, url) in wanted {
+            if let Some(bytes) = fetched.get(&url) {
+                self.fonts.add_family(&family, bytes);
             }
         }
     }
 
     fn pull_page(&mut self) {
+        let revision = self.page().session.as_ref().map(Session::revision);
+        if revision.is_some() && revision == self.page().painted_revision {
+            return;
+        }
         let base = self.page().base.clone();
         let (document, logs) = {
             let Some(session) = self.page_mut().session.as_mut() else {
@@ -1919,7 +2026,7 @@ impl Browser {
                 ..StyleState::default()
             },
         );
-        let images = load_images(&document, &base);
+        let images = load_images(&document, &base, &styles);
         {
             let page = self.page_mut();
             if let Some(log) = logs.last() {
@@ -1932,8 +2039,33 @@ impl Browser {
             page.images = images;
             page.document = document;
             page.author_css = author;
+            page.painted_revision = revision;
         }
         self.relayout();
+        self.signal_image_loads();
+    }
+
+    /// Fire `load` once on each image that has a decoded bitmap. Pages that
+    /// fade a hero in from `opacity: 0` wait for this event before calling
+    /// `animation.play()`.
+    fn signal_image_loads(&mut self) {
+        let fresh: Vec<NodeId> = {
+            let page = self.page();
+            page.images
+                .keys()
+                .copied()
+                .filter(|id| {
+                    matches!(page.document.element_name(*id), Some("img" | "video"))
+                        && !page.announced_images.contains(&id.0)
+                })
+                .collect()
+        };
+        for id in fresh {
+            self.page_mut().announced_images.insert(id.0);
+            if let Some(session) = self.page_mut().session.as_mut() {
+                session.dispatch(id, "load");
+            }
+        }
     }
 
     fn send_form(&mut self, submission: Submission) {
@@ -2025,22 +2157,31 @@ impl Browser {
     fn paint(&self, width: u32, height: u32) -> Vec<u32> {
         let background = self.page().layout.background;
         let mut pixels = vec![background.to_u32(); width as usize * height as usize];
-        let zoom = self.page().zoom;
-        if (zoom - 1.0).abs() < 0.001 {
-            self.paint_page(&mut pixels, width, height, CONTENT_TOP);
-        } else {
-            self.paint_zoomed_page(&mut pixels, width, height, zoom);
-        }
         let mut canvas = Canvas {
             pixels: &mut pixels,
             width: width as i32,
             height: height as i32,
         };
-        self.paint_chrome(&mut canvas);
+        self.record(&mut canvas, width, height);
         pixels
     }
 
-    fn paint_page(&self, pixels: &mut [u32], width: u32, height: u32, origin_y: f32) {
+    /// Paint chrome and the page into any backend. The window records a Vello
+    /// scene here. Screenshots keep using the software canvas.
+    pub fn record(&self, canvas: &mut dyn Draw, width: u32, height: u32) {
+        let background = self.page().layout.background;
+        let full = Rect::new(0.0, 0.0, width as f32, height as f32);
+        canvas.fill(full, background, full);
+        let zoom = self.page().zoom;
+        if (zoom - 1.0).abs() < 0.001 {
+            self.paint_page(canvas, width, height, CONTENT_TOP);
+        } else {
+            self.paint_zoomed_page(canvas, width, height, zoom);
+        }
+        self.paint_chrome(canvas);
+    }
+
+    fn paint_page(&self, canvas: &mut dyn Draw, width: u32, height: u32, origin_y: f32) {
         let scroll = self.page().scroll;
         let find = if self.page().find_open { FIND_H } else { 0.0 };
         let clip = Rect::new(
@@ -2049,14 +2190,9 @@ impl Browser {
             width as f32,
             (height as f32 - origin_y - STATUS_H - PAGE_GAP - find).max(1.0),
         );
-        let mut canvas = Canvas {
-            pixels,
-            width: width as i32,
-            height: height as i32,
-        };
-        self.paint_find_hits(&mut canvas, scroll, clip, origin_y);
+        self.paint_find_hits(canvas, scroll, clip, origin_y);
         paint_layout(
-            &mut canvas,
+            canvas,
             &self.tabs.page().layout,
             &self.fonts,
             clip,
@@ -2065,7 +2201,7 @@ impl Browser {
         );
     }
 
-    fn paint_zoomed_page(&self, pixels: &mut [u32], width: u32, height: u32, zoom: f32) {
+    fn paint_zoomed_page(&self, target: &mut dyn Draw, width: u32, height: u32, zoom: f32) {
         let scroll = self.page().scroll;
         let find = if self.page().find_open { FIND_H } else { 0.0 };
         let device_h = (height as f32 - CONTENT_TOP - STATUS_H - PAGE_GAP - find).max(1.0);
@@ -2090,19 +2226,24 @@ impl Browser {
                 0.0,
             );
         }
-        blit_nearest(
-            pixels,
-            width as i32,
-            &page_pixels,
-            css_w,
-            css_h,
+        let bitmap = Bitmap {
+            width: css_w as u32,
+            height: css_h as u32,
+            pixels: page_pixels
+                .into_iter()
+                .map(|pixel| pixel | 0xFF00_0000)
+                .collect(),
+        };
+        target.image(
             Rect::new(0.0, CONTENT_TOP, width as f32, device_h),
+            &bitmap,
+            Rect::new(0.0, 0.0, width as f32, height as f32),
         );
     }
 
-    fn paint_chrome(&self, canvas: &mut Canvas<'_>) {
-        let width = canvas.width as f32;
-        let height = canvas.height as f32;
+    fn paint_chrome(&self, canvas: &mut dyn Draw) {
+        let width = canvas.width() as f32;
+        let height = canvas.height() as f32;
         let colors = chrome_colors(self.dark);
         let full = Rect::new(0.0, 0.0, width, height);
         canvas.fill(Rect::new(0.0, 0.0, width, TAB_H), colors.strip, full);
@@ -2292,9 +2433,9 @@ impl Browser {
         }
     }
 
-    fn paint_menu(&self, canvas: &mut Canvas<'_>, menu: &Menu) {
-        let bounds = menu_bounds(menu, canvas.width as f32, canvas.height as f32);
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_menu(&self, canvas: &mut dyn Draw, menu: &Menu) {
+        let bounds = menu_bounds(menu, canvas.width() as f32, canvas.height() as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         canvas.fill(bounds, SEPARATOR, full);
         for (index, (label, action)) in menu.items.iter().enumerate() {
             let row = Rect::new(
@@ -2328,13 +2469,13 @@ impl Browser {
         }
     }
 
-    fn paint_suggestions(&self, canvas: &mut Canvas<'_>) {
+    fn paint_suggestions(&self, canvas: &mut dyn Draw) {
         let items = self.suggestions();
         if items.is_empty() {
             return;
         }
-        let panel = suggestion_panel(canvas.width as f32, items.len());
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let panel = suggestion_panel(canvas.width() as f32, items.len());
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         canvas.fill(panel, SEPARATOR, full);
         for (index, item) in items.iter().enumerate() {
             let row = Rect::new(
@@ -2371,10 +2512,10 @@ impl Browser {
         }
     }
 
-    fn paint_bookmarks(&self, canvas: &mut Canvas<'_>) {
-        let width = canvas.width as f32;
+    fn paint_bookmarks(&self, canvas: &mut dyn Draw) {
+        let width = canvas.width() as f32;
         let panel = bookmark_panel(width, self.bookmarks.len());
-        let full = Rect::new(0.0, 0.0, width, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, width, canvas.height() as f32);
         canvas.fill(panel, SEPARATOR, full);
         if self.bookmarks.is_empty() {
             canvas.text(
@@ -2414,7 +2555,7 @@ impl Browser {
         }
     }
 
-    fn paint_find_hits(&self, canvas: &mut Canvas<'_>, scroll: f32, clip: Rect, origin_y: f32) {
+    fn paint_find_hits(&self, canvas: &mut dyn Draw, scroll: f32, clip: Rect, origin_y: f32) {
         let hits = self.find_hits();
         let active = self.page().find_at;
         for (index, hit) in hits.iter().enumerate() {
@@ -2433,9 +2574,9 @@ impl Browser {
         }
     }
 
-    fn paint_find_bar(&self, canvas: &mut Canvas<'_>) {
-        let width = canvas.width as f32;
-        let height = canvas.height as f32;
+    fn paint_find_bar(&self, canvas: &mut dyn Draw) {
+        let width = canvas.width() as f32;
+        let height = canvas.height() as f32;
         let bar = find_bar_rect(width, height);
         let full = Rect::new(0.0, 0.0, width, height);
         let border = if self.find_focused {
@@ -2475,10 +2616,10 @@ impl Browser {
         );
     }
 
-    fn paint_bookmarks_bar(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
-        let width = canvas.width as f32;
+    fn paint_bookmarks_bar(&self, canvas: &mut dyn Draw, colors: &ChromeColors) {
+        let width = canvas.width() as f32;
         let y = TAB_H + TOOLBAR_H;
-        let full = Rect::new(0.0, 0.0, width, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, width, canvas.height() as f32);
         canvas.fill(
             Rect::new(0.0, y + BOOKMARK_BAR_H - 1.0, width, 1.0),
             colors.chip,
@@ -2522,9 +2663,9 @@ impl Browser {
         }
     }
 
-    fn paint_tabs(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
+    fn paint_tabs(&self, canvas: &mut dyn Draw, colors: &ChromeColors) {
         let strip = self.tab_strip();
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         for (index, rect) in strip.tabs.iter().enumerate() {
             let page = &self.tabs.pages[index];
             let active = index == self.tabs.active;
@@ -2533,7 +2674,7 @@ impl Browser {
                 // HorizontalTabStyleViews::GetPath for the active tab: top
                 // corners curve in, and the bottom corners scoop out to the
                 // toolbar so the tab and the toolbar are one shape.
-                canvas.fill_contours(&[active_tab_contour(*rect)], colors.active, full);
+                canvas.fill_contours(&[active_tab_contour(*rect)], colors.active, full, false);
             } else if hovered {
                 canvas.fill_round(*rect, colors.hover, 10.0, full);
             } else if index > 0 && index != self.tabs.active && index - 1 != self.tabs.active {
@@ -2627,9 +2768,9 @@ impl Browser {
         self.paint_caption(canvas, colors);
     }
 
-    fn paint_caption(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
-        let [minimize, maximize, close] = caption_rects(canvas.width as f32);
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_caption(&self, canvas: &mut dyn Draw, colors: &ChromeColors) {
+        let [minimize, maximize, close] = caption_rects(canvas.width() as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         for (rect, kind) in [
             (minimize, icons::Kind::Minimize),
             (maximize, icons::Kind::Maximize),
@@ -2661,12 +2802,12 @@ impl Browser {
 
     fn paint_round_icon(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut dyn Draw,
         rect: Rect,
         kind: icons::Kind,
         colors: &ChromeColors,
     ) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
         canvas.fill_round(
             rect,
@@ -2685,13 +2826,13 @@ impl Browser {
 
     fn paint_toolbar_button(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut dyn Draw,
         rect: Rect,
         kind: icons::Kind,
         enabled: bool,
         colors: &ChromeColors,
     ) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let hovered = enabled && self.hovering && rect.contains(self.cursor.0, self.cursor.1);
         let pressed = self.ripple.is_some_and(|(x, y, started)| {
             rect.contains(x, y) && started.elapsed().as_millis() < 280
@@ -2725,8 +2866,8 @@ impl Browser {
         icons::draw(canvas, kind, glyph, color, full);
     }
 
-    fn paint_more(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_more(&self, canvas: &mut dyn Draw, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
         if hovered {
             canvas.fill_circle(
@@ -2744,8 +2885,8 @@ impl Browser {
         }
     }
 
-    fn paint_extensions(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_extensions(&self, canvas: &mut dyn Draw, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
         if hovered {
             canvas.fill_circle(
@@ -2781,8 +2922,8 @@ impl Browser {
         );
     }
 
-    fn paint_profile(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_profile(&self, canvas: &mut dyn Draw, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let cx = rect.x + rect.width / 2.0;
         let cy = rect.y + rect.height / 2.0;
         canvas.fill_circle(cx, cy, 12.0, colors.chip, full);
@@ -2802,11 +2943,11 @@ impl Browser {
         );
     }
 
-    fn paint_chip(&self, canvas: &mut Canvas<'_>, rect: Rect, chip: &Chip, colors: &ChromeColors) {
+    fn paint_chip(&self, canvas: &mut dyn Draw, rect: Rect, chip: &Chip, colors: &ChromeColors) {
         if rect.width <= 0.0 {
             return;
         }
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         match chip {
             Chip::Hidden => {}
             Chip::Lock => {
@@ -2843,8 +2984,8 @@ impl Browser {
         }
     }
 
-    fn paint_throbber(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_throbber(&self, canvas: &mut dyn Draw, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let cx = rect.x + rect.width / 2.0;
         let cy = rect.y + rect.height / 2.0;
         let shift = (self.opened.elapsed().as_millis() / 80) as usize;
@@ -2865,8 +3006,8 @@ impl Browser {
         }
     }
 
-    fn paint_shelf(&self, canvas: &mut Canvas<'_>, shelf: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_shelf(&self, canvas: &mut dyn Draw, shelf: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         canvas.fill_round(shelf, colors.menu, 12.0, full);
         canvas.fill(
             Rect::new(shelf.x, shelf.y, shelf.width, 1.0),
@@ -2907,7 +3048,7 @@ impl Browser {
         );
     }
 
-    fn paint_tooltip(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
+    fn paint_tooltip(&self, canvas: &mut dyn Draw, colors: &ChromeColors) {
         if !self.hovering || self.menu.is_some() {
             return;
         }
@@ -2918,13 +3059,13 @@ impl Browser {
         let height = 24.0;
         let mut x = self.cursor.0 - width / 2.0;
         let mut y = self.cursor.1 + 18.0;
-        let limit = canvas.width as f32;
+        let limit = canvas.width() as f32;
         x = x.clamp(4.0, (limit - width - 4.0).max(4.0));
-        if y + height > canvas.height as f32 - 4.0 {
+        if y + height > canvas.height() as f32 - 4.0 {
             y = self.cursor.1 - height - 8.0;
         }
         let rect = Rect::new(x, y, width, height);
-        let full = Rect::new(0.0, 0.0, limit, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, limit, canvas.height() as f32);
         canvas.fill_round(rect, colors.tooltip_bg, 4.0, full);
         canvas.text(
             &self.fonts,
@@ -2998,27 +3139,6 @@ impl Browser {
 impl Default for Browser {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn blit_nearest(dst: &mut [u32], dst_w: i32, src: &[u32], src_w: i32, src_h: i32, dest: Rect) {
-    if src_w <= 0 || src_h <= 0 || dest.width <= 0.0 || dest.height <= 0.0 || dst_w <= 0 {
-        return;
-    }
-    let x0 = dest.x.floor().max(0.0) as i32;
-    let y0 = dest.y.floor().max(0.0) as i32;
-    let dst_h = dst.len() as i32 / dst_w;
-    let x1 = dest.right().ceil().min(dst_w as f32) as i32;
-    let y1 = dest.bottom().ceil().min(dst_h as f32) as i32;
-    for y in y0..y1 {
-        let v = (((y as f32 + 0.5 - dest.y) / dest.height) * src_h as f32).floor() as i32;
-        let v = v.clamp(0, src_h - 1) as usize;
-        let row = y as usize * dst_w as usize;
-        for x in x0..x1 {
-            let u = (((x as f32 + 0.5 - dest.x) / dest.width) * src_w as f32).floor() as i32;
-            let u = u.clamp(0, src_w - 1) as usize;
-            dst[row + x as usize] = src[v * src_w as usize + u];
-        }
     }
 }
 
@@ -3495,6 +3615,75 @@ fn find_box_mut(box_: &mut LayoutBox, id: NodeId) -> Option<&mut LayoutBox> {
     None
 }
 
+/// Warm the disk cache for scripts, stylesheets, images, and preload links.
+/// Eight connections run at once. Later loads of the same URL reuse the cache
+/// instead of opening another TLS session.
+fn prefetch_page(document: &Document, base: &Url) {
+    let mut hrefs = Vec::new();
+    for script in &document.scripts {
+        if let Some(src) = &script.src {
+            hrefs.push(src.clone());
+        }
+    }
+    for href in &document.stylesheet_links {
+        hrefs.push(href.clone());
+    }
+    for index in 0..document.nodes.len() {
+        let id = NodeId(index);
+        let Some(name) = document.element_name(id) else {
+            continue;
+        };
+        if name == "link" {
+            let rel = document.attr(id, "rel").unwrap_or("").to_ascii_lowercase();
+            let preload = rel.split_whitespace().any(|part| {
+                part == "preload" || part == "modulepreload" || part == "prefetch"
+            });
+            if preload && let Some(href) = document.attr(id, "href") {
+                hrefs.push(href.to_string());
+            }
+        } else if name == "img"
+            && hrefs.len() < 160
+            && let Some(src) = document.attr(id, "src")
+        {
+            hrefs.push(src.to_string());
+        }
+    }
+    let mut urls = Vec::new();
+    for href in hrefs {
+        if href.starts_with("data:") {
+            continue;
+        }
+        let Ok(url) = base.resolve(&href) else {
+            continue;
+        };
+        if url.scheme != "http" && url.scheme != "https" {
+            continue;
+        }
+        if urls.iter().any(|seen: &Url| seen.to_display() == url.to_display()) {
+            continue;
+        }
+        urls.push(url);
+    }
+    if urls.is_empty() {
+        return;
+    }
+    let queue = std::sync::Mutex::new(urls);
+    let workers = 8.min(queue.lock().map(|guard| guard.len()).unwrap_or(1)).max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut guard| guard.pop());
+                    let Some(url) = next else {
+                        break;
+                    };
+                    let _ = get(&url);
+                }
+            });
+        }
+    });
+}
+
 fn author_css(document: &Document, base: &Url) -> String {
     let mut author = String::new();
     for sheet in &document.stylesheets {
@@ -3575,26 +3764,152 @@ fn import_target(input: &str) -> Option<(String, usize)> {
     Some((raw, lead + close + semi))
 }
 
-fn load_images(document: &Document, base: &Url) -> HashMap<NodeId, Arc<Bitmap>> {
-    let mut images = HashMap::new();
+fn load_images(
+    document: &Document,
+    base: &Url,
+    styles: &[mithu_style::ComputedStyle],
+) -> HashMap<NodeId, Arc<Bitmap>> {
+    let mut wanted: Vec<(NodeId, String)> = Vec::new();
     for id in (0..document.nodes.len()).map(NodeId) {
-        if images.len() >= 40 || document.element_name(id) != Some("img") {
+        if wanted.len() >= 80 {
+            break;
+        }
+        let name = document.element_name(id);
+        if name != Some("img") && name != Some("video") {
             continue;
         }
-        let src = image_source(document, id);
+        let src = if name == Some("video") {
+            document.attr(id, "poster").map(str::to_string)
+        } else {
+            image_source(document, id)
+        };
         let Some(src) = src else {
             continue;
         };
-        let bitmap = if src.starts_with("data:") {
-            mithu_image::decode_data_url(&src)
-        } else {
-            fetch_bytes(base, &src).and_then(|bytes| mithu_image::decode(&bytes))
+        wanted.push((id, src));
+    }
+    for (index, style) in styles.iter().enumerate() {
+        if wanted.len() >= 80 {
+            break;
+        }
+        let Some(url) = style.background_image.as_deref() else {
+            continue;
         };
-        if let Some(bitmap) = bitmap {
-            images.insert(id, Arc::new(bitmap));
+        if url.contains("placeholder") {
+            continue;
+        }
+        let id = NodeId(index);
+        if wanted.iter().any(|(seen, _)| *seen == id) {
+            continue;
+        }
+        wanted.push((id, url.to_string()));
+    }
+    let mut masks = 0;
+    for (index, style) in styles.iter().enumerate() {
+        if masks >= 48 {
+            break;
+        }
+        let Some(url) = style.mask_image.as_deref() else {
+            continue;
+        };
+        let id = NodeId(index);
+        if wanted.iter().any(|(seen, _)| *seen == id) {
+            continue;
+        }
+        wanted.push((id, url.to_string()));
+        masks += 1;
+    }
+    // Fetch and decode away from the calling thread. Layout still waits for
+    // the batch, because intrinsic image sizes are needed before paint.
+    let pending = std::sync::Mutex::new(wanted);
+    let images = std::sync::Mutex::new(HashMap::new());
+    let base = base.clone();
+    let workers = 8
+        .min(pending.lock().map(|guard| guard.len()).unwrap_or(1))
+        .max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let pending = &pending;
+            let images = &images;
+            let base = &base;
+            scope.spawn(move || {
+                loop {
+                    let next = pending.lock().ok().and_then(|mut guard| guard.pop());
+                    let Some((id, src)) = next else {
+                        break;
+                    };
+                    let bitmap = cached_bitmap(&src, || {
+                        if src.starts_with("data:") {
+                            mithu_image::decode_data_url(&src).or_else(|| rasterize_svg_url(&src))
+                        } else {
+                            fetch_bytes(base, &src).and_then(|bytes| decode_image_bytes(&bytes))
+                        }
+                    });
+                    if let Some(bitmap) = bitmap
+                        && let Ok(mut map) = images.lock()
+                    {
+                        map.insert(id, bitmap);
+                    }
+                }
+            });
+        }
+    });
+    images.into_inner().unwrap_or_default()
+}
+
+fn bitmap_cache() -> &'static Mutex<HashMap<String, Arc<Bitmap>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Bitmap>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_bitmap(src: &str, decode: impl FnOnce() -> Option<Bitmap>) -> Option<Arc<Bitmap>> {
+    if let Some(hit) = bitmap_cache().lock().ok().and_then(|map| map.get(src).cloned()) {
+        return Some(hit);
+    }
+    let bitmap = Arc::new(decode()?);
+    if let Ok(mut map) = bitmap_cache().lock() {
+        if map.len() > 400 {
+            map.clear();
+        }
+        map.insert(src.to_string(), Arc::clone(&bitmap));
+    }
+    Some(bitmap)
+}
+
+fn fetch_parallel(base: &Url, hrefs: Vec<String>) -> HashMap<String, Vec<u8>> {
+    let mut unique = Vec::new();
+    for href in hrefs {
+        if !unique.iter().any(|seen: &String| seen == &href) {
+            unique.push(href);
         }
     }
-    images
+    if unique.is_empty() {
+        return HashMap::new();
+    }
+    let queue = std::sync::Mutex::new(unique);
+    let out = std::sync::Mutex::new(HashMap::new());
+    let workers = 8
+        .min(queue.lock().map(|guard| guard.len()).unwrap_or(1))
+        .max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut guard| guard.pop());
+                    let Some(href) = next else {
+                        break;
+                    };
+                    let Some(bytes) = fetch_bytes(base, &href) else {
+                        continue;
+                    };
+                    if let Ok(mut map) = out.lock() {
+                        map.insert(href, bytes);
+                    }
+                }
+            });
+        }
+    });
+    out.into_inner().unwrap_or_default()
 }
 
 fn nearest(
@@ -3678,12 +3993,67 @@ fn set_field_text(document: &mut Document, id: NodeId, text: &str) {
 }
 
 fn image_source(document: &Document, id: NodeId) -> Option<String> {
-    if let Some(srcset) = document.attr(id, "srcset")
+    let src = document.attr(id, "src").map(str::to_string);
+    let lazy = [
+        "data-src",
+        "data-original",
+        "data-lazy-src",
+        "data-bg",
+        "data-image",
+    ]
+    .iter()
+    .find_map(|name| document.attr(id, name).map(str::to_string));
+    if let Some(lazy) = lazy.filter(|value| !value.is_empty()) {
+        let placeholder = src.as_deref().is_none_or(|value| {
+            value.contains("placeholder")
+                || value.starts_with("data:image/gif")
+                || value.starts_with("data:image/svg")
+        });
+        if placeholder {
+            return Some(lazy);
+        }
+    }
+    if let Some(srcset) = document.attr(id, "srcset").or_else(|| document.attr(id, "data-srcset"))
         && let Some(picked) = pick_srcset(srcset)
     {
         return Some(picked);
     }
-    document.attr(id, "src").map(str::to_string)
+    if src.as_deref().is_none_or(|value| {
+        value.is_empty()
+            || value.starts_with("data:image/gif")
+            || value.starts_with("data:image/svg")
+            || value.contains("placeholder")
+    }) && let Some(picked) = picture_source(document, id)
+    {
+        return Some(picked);
+    }
+    src
+}
+
+fn picture_source(document: &Document, id: NodeId) -> Option<String> {
+    let parent = document.parent_element(id)?;
+    if document.element_name(parent) != Some("picture") {
+        return None;
+    }
+    for child in document.rendered_children(parent) {
+        if document.element_name(child) != Some("source") {
+            continue;
+        }
+        let kind = document.attr(child, "type").unwrap_or("");
+        if kind.contains("avif") {
+            continue;
+        }
+        let srcset = document
+            .attr(child, "srcset")
+            .or_else(|| document.attr(child, "data-srcset"))?;
+        if let Some(picked) = pick_srcset(srcset) {
+            if picked.contains(".avif") {
+                continue;
+            }
+            return Some(picked);
+        }
+    }
+    None
 }
 
 fn pick_srcset(value: &str) -> Option<String> {
@@ -3711,6 +4081,39 @@ fn pick_srcset(value: &str) -> Option<String> {
         }
     }
     best.map(|(_, url)| url)
+}
+
+fn decode_image_bytes(bytes: &[u8]) -> Option<Bitmap> {
+    mithu_image::decode(bytes).or_else(|| mithu_image::decode_svg(bytes))
+}
+
+fn rasterize_svg_url(url: &str) -> Option<Bitmap> {
+    let rest = url.trim().strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    if !meta.to_ascii_lowercase().contains("svg") {
+        return None;
+    }
+    let text = percent_decode(data);
+    mithu_image::decode_svg(text.as_bytes())
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(value) = u8::from_str_radix(hex, 16) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn fetch_bytes(base: &Url, href: &str) -> Option<Vec<u8>> {
@@ -3752,11 +4155,23 @@ fn fetch_text(base: &Url, href: &str) -> Option<String> {
     match url.scheme.as_str() {
         "http" | "https" => {
             let response = if base.host.is_empty() {
-                get(&url).ok()?
+                get(&url)
             } else {
-                mithu_net::get_from(&url, &base.host).ok()?
+                mithu_net::get_from(&url, &base.host)
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    if std::env::var_os("MITHU_LOGS").is_some() {
+                        eprintln!("fetch text {error} {}", url.to_display());
+                    }
+                    return None;
+                }
             };
             if response.status >= 400 {
+                if std::env::var_os("MITHU_LOGS").is_some() {
+                    eprintln!("fetch text {} {}", response.status, url.to_display());
+                }
                 return None;
             }
             Some(response.text())
@@ -4413,6 +4828,81 @@ mod tests {
                 .text_content(browser.page().document.root)
                 .contains("Appearance")
         );
+    }
+
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92, 0xef, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn fetch_then_updates_html_and_the_image_before_paint() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let request = String::from_utf8_lossy(&buf);
+                let (kind, body) = if request.contains("GET /words") {
+                    ("text/plain", b"Filled".to_vec())
+                } else if request.contains("GET /pic.png") {
+                    ("image/png", TINY_PNG.to_vec())
+                } else {
+                    let html = format!(
+                        r#"<!doctype html><div id="host"></div><img id="pic" alt="pic">
+                        <script type="module">document.body.dataset.mod="1"</script>
+                        <script>
+                          requestAnimationFrame(() => document.body.dataset.raf = "1");
+                          requestIdleCallback(() => document.body.dataset.idle = "1");
+                          new IntersectionObserver(entries => {{
+                            if (entries[0] && entries[0].isIntersecting) document.body.dataset.io = "1";
+                          }}).observe(document.getElementById("host"));
+                          fetch("/words").then(r => r.text()).then(text => {{
+                            document.getElementById("host").innerHTML = "<b id='filled'>" + text + "</b>";
+                            document.getElementById("pic").src = "/pic.png";
+                          }});
+                        </script>"#
+                    );
+                    ("text/html", html.into_bytes())
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
+                let _ = std::io::Write::write_all(&mut stream, &body);
+            }
+        });
+        let mut browser = Browser::new();
+        browser.navigate(&format!("http://127.0.0.1:{port}/"));
+        browser.advance_timers(16);
+        let page = browser.page();
+        let text = page.document.text_content(page.document.root);
+        assert!(text.contains("Filled"), "{text}");
+        let pic = page.document.get_element_by_id("pic").unwrap();
+        assert_eq!(page.document.attr(pic, "src"), Some("/pic.png"));
+        assert!(page.images.contains_key(&pic), "image should be decoded");
+        let body = page
+            .document
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (page.document.element_name(mithu_dom::NodeId(index)) == Some("body"))
+                    .then_some(mithu_dom::NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(page.document.attr(body, "data-io"), Some("1"));
+        assert_eq!(page.document.attr(body, "data-raf"), Some("1"));
+        assert_eq!(page.document.attr(body, "data-idle"), Some("1"));
+        assert_eq!(page.document.attr(body, "data-mod"), Some("1"));
     }
 
     fn click_id(browser: &mut Browser, id: &str) {

@@ -14,6 +14,8 @@ mithu-image = { path = "../image" }
 mithu-layout = { path = "../layout" }
 mithu-style = { path = "../style" }
 mithu-text = { path = "../text" }
+vello = { version = "0.12", default-features = true }
+vello_cpu = "0.4"
 
 [lints]
 workspace = true

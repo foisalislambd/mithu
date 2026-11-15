@@ -1,4 +1,7 @@
-//! Software rasterizer. Pixels are packed `0x00RRGGBB`.
+//! Page painter. The software rasterizer packs pixels as `0x00RRGGBB`.
+//! The same draw calls can be recorded into a Vello scene for wgpu, or into
+//! vello_cpu when no GPU is available.
+mod vello_scene;
 
 use mithu_base::{Color, Rect};
 use mithu_image::Bitmap;
@@ -88,7 +91,13 @@ impl Canvas<'_> {
     }
 
     /// Nonzero-winding fill. Each contour is closed from its last point to its first.
-    pub fn fill_contours(&mut self, contours: &[Vec<(f32, f32)>], color: Color, clip: Rect) {
+    pub fn fill_contours(
+        &mut self,
+        contours: &[Vec<(f32, f32)>],
+        color: Color,
+        clip: Rect,
+        even_odd: bool,
+    ) {
         if color.a == 0 || contours.is_empty() {
             return;
         }
@@ -121,7 +130,9 @@ impl Canvas<'_> {
             for x in x0..x1 {
                 let mut hits = 0;
                 for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
-                    if winding(x as f32 + ox, y as f32 + oy, contours) != 0 {
+                    let wind = winding(x as f32 + ox, y as f32 + oy, contours);
+                    let inside = if even_odd { wind.abs() % 2 == 1 } else { wind != 0 };
+                    if inside {
                         hits += 1;
                     }
                 }
@@ -145,6 +156,39 @@ impl Canvas<'_> {
             radius,
             clip,
         );
+    }
+
+    pub fn mask(&mut self, dest: Rect, bitmap: &Bitmap, tint: Color, clip: Rect) {
+        if dest.width <= 0.0 || dest.height <= 0.0 || bitmap.width == 0 || bitmap.height == 0 {
+            return;
+        }
+        let Some(visible) = intersect(dest, clip) else {
+            return;
+        };
+        let x0 = visible.x.floor().max(0.0) as i32;
+        let y0 = visible.y.floor().max(0.0) as i32;
+        let x1 = visible.right().ceil().min(self.width as f32) as i32;
+        let y1 = visible.bottom().ceil().min(self.height as f32) as i32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let u = ((x as f32 + 0.5 - dest.x) / dest.width * bitmap.width as f32).floor();
+                let v = ((y as f32 + 0.5 - dest.y) / dest.height * bitmap.height as f32).floor();
+                let u = (u as i64).clamp(0, bitmap.width as i64 - 1) as u32;
+                let v = (v as i64).clamp(0, bitmap.height as i64 - 1) as u32;
+                let packed = bitmap.pixels[(v * bitmap.width + u) as usize];
+                let alpha = ((packed >> 24) as u32 * u32::from(tint.a) / 255) as u8;
+                if alpha == 0 {
+                    continue;
+                }
+                let color = Color::rgba(tint.r, tint.g, tint.b, alpha);
+                let index = y as usize * self.width as usize + x as usize;
+                self.pixels[index] = if alpha == 255 {
+                    color.to_u32()
+                } else {
+                    blend(self.pixels[index], color, 255)
+                };
+            }
+        }
     }
 
     pub fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect) {
@@ -219,14 +263,76 @@ impl Canvas<'_> {
         if text.is_empty() || color.a == 0 || size <= 0.0 {
             return;
         }
+        self.draw_glyphs(
+            fonts, x, baseline, text, size, color, bold, mono, underline, family, None, clip,
+        );
+    }
+
+    /// Draw `text` in the layout slot `slot_width`. A wider shaping is compressed
+    /// so it stays inside the width Parley already measured.
+    pub fn text_fitted(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        slot_width: f32,
+        clip: Rect,
+    ) {
+        self.draw_glyphs(
+            fonts,
+            x,
+            baseline,
+            text,
+            size,
+            color,
+            bold,
+            mono,
+            underline,
+            family,
+            Some(slot_width),
+            clip,
+        );
+    }
+
+    fn draw_glyphs(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        slot_width: Option<f32>,
+        clip: Rect,
+    ) {
+        if text.is_empty() || color.a == 0 || size <= 0.0 {
+            return;
+        }
+        let glyphs = fonts.shape(text, size, bold, mono, family);
+        let shaped: f32 = glyphs.iter().map(|glyph| glyph.advance).sum();
+        let fit = match slot_width {
+            Some(slot) if shaped > slot + 0.5 && slot > 0.0 => slot / shaped,
+            _ => 1.0,
+        };
         let mut pen = x;
-        for glyph in fonts.shape(text, size, bold, mono, family) {
+        for glyph in glyphs {
             if !pen.is_finite() || pen < -100_000.0 || pen > 100_000.0 {
                 break;
             }
             let left = (pen.round() as i32)
-                .saturating_add(glyph.xmin)
-                .saturating_add(glyph.x_offset.round() as i32);
+                .saturating_add((glyph.xmin as f32 * fit).round() as i32)
+                .saturating_add((glyph.x_offset * fit).round() as i32);
             let top = glyph_top(baseline - glyph.y_offset, &glyph);
             for row in 0..glyph.height {
                 for col in 0..glyph.width {
@@ -246,10 +352,13 @@ impl Canvas<'_> {
                     self.pixels[index] = blend(self.pixels[index], color, coverage);
                 }
             }
-            pen += glyph.advance;
+            pen += glyph.advance * fit;
         }
         if underline {
-            let width = fonts.width_family(text, size, bold, mono, family);
+            let width = match slot_width {
+                Some(slot) if slot > 0.0 => slot,
+                _ => fonts.width_family(text, size, bold, mono, family),
+            };
             let y = baseline + (size * 0.12).max(1.0);
             self.fill(Rect::new(x, y, width, (size * 0.06).max(1.0)), color, clip);
         }
@@ -257,7 +366,7 @@ impl Canvas<'_> {
 }
 
 fn stroke_polyline(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut dyn Draw,
     points: &[(f32, f32)],
     width: f32,
     color: Color,
@@ -281,8 +390,162 @@ fn stroke_polyline(
     }
 }
 
+pub use vello_scene::{VelloTarget, render_vello_cpu};
+
+/// Draw commands shared by the software rasterizer and the Vello backends.
+pub trait Draw {
+    fn width(&self) -> i32;
+    fn height(&self) -> i32;
+    fn fill(&mut self, rect: Rect, color: Color, clip: Rect);
+    fn fill_vertical(&mut self, rect: Rect, top: Color, bottom: Color, clip: Rect);
+    fn fill_round(&mut self, rect: Rect, color: Color, radius: f32, clip: Rect);
+    fn fill_contours(
+        &mut self,
+        contours: &[Vec<(f32, f32)>],
+        color: Color,
+        clip: Rect,
+        even_odd: bool,
+    );
+    fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color, clip: Rect);
+    fn mask(&mut self, dest: Rect, bitmap: &Bitmap, tint: Color, clip: Rect);
+    fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect);
+    fn text(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        clip: Rect,
+    );
+    fn text_family(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        clip: Rect,
+    );
+    fn text_fitted(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        slot_width: f32,
+        clip: Rect,
+    );
+}
+
+impl Draw for Canvas<'_> {
+    fn width(&self) -> i32 {
+        self.width
+    }
+    fn height(&self) -> i32 {
+        self.height
+    }
+    fn fill(&mut self, rect: Rect, color: Color, clip: Rect) {
+        Canvas::fill(self, rect, color, clip);
+    }
+    fn fill_vertical(&mut self, rect: Rect, top: Color, bottom: Color, clip: Rect) {
+        Canvas::fill_vertical(self, rect, top, bottom, clip);
+    }
+    fn fill_round(&mut self, rect: Rect, color: Color, radius: f32, clip: Rect) {
+        Canvas::fill_round(self, rect, color, radius, clip);
+    }
+    fn fill_contours(
+        &mut self,
+        contours: &[Vec<(f32, f32)>],
+        color: Color,
+        clip: Rect,
+        even_odd: bool,
+    ) {
+        Canvas::fill_contours(self, contours, color, clip, even_odd);
+    }
+    fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color, clip: Rect) {
+        Canvas::fill_circle(self, cx, cy, radius, color, clip);
+    }
+    fn mask(&mut self, dest: Rect, bitmap: &Bitmap, tint: Color, clip: Rect) {
+        Canvas::mask(self, dest, bitmap, tint, clip);
+    }
+    fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect) {
+        Canvas::image(self, dest, bitmap, clip);
+    }
+    fn text(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        clip: Rect,
+    ) {
+        Canvas::text(
+            self, fonts, x, baseline, text, size, color, bold, mono, underline, clip,
+        );
+    }
+    fn text_family(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        clip: Rect,
+    ) {
+        Canvas::text_family(
+            self, fonts, x, baseline, text, size, color, bold, mono, underline, family, clip,
+        );
+    }
+    fn text_fitted(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        slot_width: f32,
+        clip: Rect,
+    ) {
+        Canvas::text_fitted(
+            self, fonts, x, baseline, text, size, color, bold, mono, underline, family,
+            slot_width, clip,
+        );
+    }
+}
+
 pub fn paint_layout(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut dyn Draw,
     tree: &LayoutTree,
     fonts: &FontBook,
     clip: Rect,
@@ -293,7 +556,7 @@ pub fn paint_layout(
 }
 
 fn paint_box(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut dyn Draw,
     box_: &LayoutBox,
     fonts: &FontBook,
     clip: Rect,
@@ -315,7 +578,7 @@ fn paint_box(
 }
 
 fn paint_box_with_opacity(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut dyn Draw,
     box_: &LayoutBox,
     fonts: &FontBook,
     clip: Rect,
@@ -359,7 +622,9 @@ fn paint_box_with_opacity(
         paint_shadow(canvas, screen, shadow, clip);
     }
     let background = scale_alpha(box_.background, opacity);
-    if let Some((top, bottom)) = box_.gradient {
+    if box_.mask {
+        // The mask bitmap is painted below, tinted with this color.
+    } else if let Some((top, bottom)) = box_.gradient {
         let top = scale_alpha(top, opacity);
         let bottom = scale_alpha(bottom, opacity);
         if box_.border_radius > 0.0 {
@@ -378,16 +643,51 @@ fn paint_box_with_opacity(
             .map(|(x, y)| (screen.x + x, screen.y + y))
             .collect();
         if let Some(fill) = shape.fill {
-            canvas.fill_contours(&[moved.clone()], scale_alpha(fill, opacity), shape_clip);
+            let contours = if shape.contours.is_empty() {
+                vec![moved.clone()]
+            } else {
+                shape
+                    .contours
+                    .iter()
+                    .map(|contour| {
+                        contour
+                            .iter()
+                            .map(|(x, y)| (screen.x + x, screen.y + y))
+                            .collect()
+                    })
+                    .collect()
+            };
+            canvas.fill_contours(
+                &contours,
+                scale_alpha(fill, opacity),
+                shape_clip,
+                shape.even_odd,
+            );
         }
         if let Some(stroke) = shape.stroke {
-            stroke_polyline(
-                canvas,
-                &moved,
-                shape.stroke_width,
-                scale_alpha(stroke, opacity),
-                shape_clip,
-            );
+            let stroked = if shape.contours.is_empty() {
+                vec![moved]
+            } else {
+                shape
+                    .contours
+                    .iter()
+                    .map(|contour| {
+                        contour
+                            .iter()
+                            .map(|(x, y)| (screen.x + x, screen.y + y))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            for contour in &stroked {
+                stroke_polyline(
+                    canvas,
+                    contour,
+                    shape.stroke_width,
+                    scale_alpha(stroke, opacity),
+                    shape_clip,
+                );
+            }
         }
     }
     if let Some(bitmap) = &box_.image {
@@ -395,16 +695,22 @@ fn paint_box_with_opacity(
         let right = box_.borders[1].max(0.0);
         let top = box_.borders[0].max(0.0);
         let bottom = box_.borders[2].max(0.0);
-        canvas.image(
-            Rect::new(
-                screen.x + left,
-                screen.y + top,
-                (screen.width - left - right).max(0.0),
-                (screen.height - top - bottom).max(0.0),
-            ),
-            bitmap,
-            clip,
+        let dest = Rect::new(
+            screen.x + left,
+            screen.y + top,
+            (screen.width - left - right).max(0.0),
+            (screen.height - top - bottom).max(0.0),
         );
+        if box_.mask {
+            let tint = if background.a > 0 {
+                background
+            } else {
+                scale_alpha(box_.color, opacity)
+            };
+            canvas.mask(dest, bitmap, tint, clip);
+        } else {
+            canvas.image(dest, bitmap, clip);
+        }
     }
     let border_color = scale_alpha(box_.border_color, opacity);
     if border_color.a > 0 {
@@ -482,7 +788,7 @@ fn paint_box_with_opacity(
             line.baseline - scroll + origin_y
         } + shift;
         for fragment in &line.fragments {
-            canvas.text_family(
+            canvas.text_fitted(
                 fonts,
                 fragment.x,
                 baseline,
@@ -493,6 +799,7 @@ fn paint_box_with_opacity(
                 fragment.mono,
                 fragment.underline,
                 &fragment.family,
+                fragment.width,
                 child_clip,
             );
         }
@@ -548,7 +855,7 @@ fn shift_box(box_: &mut LayoutBox, dx: f32, dy: f32) {
     }
 }
 
-fn paint_shadow(canvas: &mut Canvas<'_>, screen: Rect, shadow: mithu_style::BoxShadow, clip: Rect) {
+fn paint_shadow(canvas: &mut dyn Draw, screen: Rect, shadow: mithu_style::BoxShadow, clip: Rect) {
     let layers = 4;
     for layer in 1..=layers {
         let t = layer as f32 / layers as f32;
@@ -642,7 +949,7 @@ fn winding(px: f32, py: f32, contours: &[Vec<(f32, f32)>]) -> i32 {
     wind
 }
 
-fn intersect(rect: Rect, clip: Rect) -> Option<Rect> {
+pub(crate) fn intersect(rect: Rect, clip: Rect) -> Option<Rect> {
     let x0 = rect.x.max(clip.x);
     let y0 = rect.y.max(clip.y);
     let x1 = rect.right().min(clip.right());
@@ -678,6 +985,29 @@ fn blend(dst: u32, color: Color, coverage: u8) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mask_keeps_clear_pixels_unpainted() {
+        let mut pixels = vec![Color::WHITE.to_u32(); 4 * 2];
+        let mut canvas = Canvas {
+            pixels: &mut pixels,
+            width: 4,
+            height: 2,
+        };
+        let bitmap = mithu_image::Bitmap {
+            width: 2,
+            height: 1,
+            pixels: vec![0xFF00_0000, 0x0000_0000],
+        };
+        canvas.mask(
+            Rect::new(0.0, 0.0, 4.0, 2.0),
+            &bitmap,
+            Color::rgb(32, 33, 34),
+            Rect::new(0.0, 0.0, 4.0, 2.0),
+        );
+        assert_eq!(pixels[0], Color::rgb(32, 33, 34).to_u32());
+        assert_eq!(pixels[3], Color::WHITE.to_u32());
+    }
 
     #[test]
     fn glyph_paints_above_its_baseline() {

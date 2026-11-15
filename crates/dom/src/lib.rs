@@ -24,6 +24,8 @@ pub struct Document {
     /// `<template>` elements keep their contents in a detached fragment, the
     /// way the HTML parser does, so the template itself has no child nodes.
     pub template_contents: Vec<(NodeId, NodeId)>,
+    /// Bumps on a tree or attribute change so layout can skip an unchanged page.
+    pub revision: u64,
 }
 
 /// One DOM change a `MutationObserver` can report.
@@ -32,6 +34,8 @@ pub struct DomMutation {
     pub target: NodeId,
     pub kind: String,
     pub attribute: Option<String>,
+    pub added: Vec<NodeId>,
+    pub removed: Vec<NodeId>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,7 +100,12 @@ impl Document {
             import_maps: Vec::new(),
             mutations: Vec::new(),
             template_contents: Vec::new(),
+            revision: 0,
         }
+    }
+
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn template_content(&self, template: NodeId) -> Option<NodeId> {
@@ -107,14 +116,30 @@ impl Document {
     }
 
     /// True when `id` is in the document tree. Template contents and other
-    /// detached nodes are not.
+    /// detached nodes are not. A shadow tree is connected when its host is:
+    /// the shadow root has no parent, and `mithu-host` points at the host.
     pub fn is_connected(&self, id: NodeId) -> bool {
         let mut current = Some(id);
+        let mut guard = 0u32;
         while let Some(node) = current {
             if node == self.root {
                 return true;
             }
-            current = self.nodes.get(node.0).and_then(|item| item.parent);
+            guard += 1;
+            if guard > 10_000 {
+                return false;
+            }
+            if let Some(parent) = self.nodes.get(node.0).and_then(|item| item.parent) {
+                current = Some(parent);
+                continue;
+            }
+            current = self
+                .attr(node, "mithu-host")
+                .and_then(|host| host.parse().ok())
+                .map(NodeId);
+            if current.is_none() {
+                return false;
+            }
         }
         false
     }
@@ -205,9 +230,12 @@ impl Document {
             return None;
         }
         if let Some(last) = self.nodes[parent.0].children.last().copied()
-            && let NodeData::Text(existing) = &mut self.nodes[last.0].data
+            && matches!(self.nodes[last.0].data, NodeData::Text(_))
         {
-            existing.push_str(text);
+            if let NodeData::Text(existing) = &mut self.nodes[last.0].data {
+                existing.push_str(text);
+            }
+            self.touch();
             return Some(last);
         }
         let id = NodeId(self.nodes.len());
@@ -217,7 +245,22 @@ impl Document {
             data: NodeData::Text(text.to_string()),
         });
         self.nodes[parent.0].children.push(id);
+        self.note_children(parent, vec![id], Vec::new());
         Some(id)
+    }
+
+    fn note_children(&mut self, target: NodeId, added: Vec<NodeId>, removed: Vec<NodeId>) {
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+        self.touch();
+        self.mutations.push(DomMutation {
+            target,
+            kind: "childList".to_string(),
+            attribute: None,
+            added,
+            removed,
+        });
     }
 
     pub fn set_attr(&mut self, id: NodeId, name: &str, value: &str) {
@@ -240,6 +283,7 @@ impl Document {
         if name == "class" {
             element.classes = value.split_whitespace().map(str::to_string).collect();
         }
+        self.touch();
     }
 
     pub fn remove_attr(&mut self, id: NodeId, name: &str) {
@@ -254,6 +298,7 @@ impl Document {
         if name == "class" {
             element.classes.clear();
         }
+        self.touch();
     }
 
     pub fn append_comment(&mut self, parent: NodeId, text: &str) -> NodeId {
@@ -279,6 +324,16 @@ impl Document {
         id
     }
 
+    pub fn create_comment_detached(&mut self, text: &str) -> NodeId {
+        let id = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            parent: None,
+            children: Vec::new(),
+            data: NodeData::Comment(text.to_string()),
+        });
+        id
+    }
+
     pub fn create_element_detached(&mut self, name: &str) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node {
@@ -299,19 +354,28 @@ impl Document {
             return;
         }
         let children = std::mem::take(&mut self.nodes[id.0].children);
-        for child in children {
+        for child in &children {
             if let Some(node) = self.nodes.get_mut(child.0) {
                 node.parent = None;
             }
         }
+        self.note_children(id, Vec::new(), children);
     }
 
     pub fn set_text_content(&mut self, id: NodeId, text: &str) {
         if self.nodes.get(id.0).is_none() {
             return;
         }
-        if let NodeData::Text(existing) | NodeData::Comment(existing) = &mut self.nodes[id.0].data {
-            *existing = text.to_string();
+        if matches!(
+            self.nodes[id.0].data,
+            NodeData::Text(_) | NodeData::Comment(_)
+        ) {
+            if let NodeData::Text(existing) | NodeData::Comment(existing) =
+                &mut self.nodes[id.0].data
+            {
+                *existing = text.to_string();
+            }
+            self.touch();
             return;
         }
         self.clear_children(id);
@@ -324,13 +388,17 @@ impl Document {
         let Some(node) = self.nodes.get(id.0) else {
             return;
         };
-        if let Some(parent) = node.parent
+        let parent = node.parent;
+        if let Some(parent) = parent
             && let Some(parent_node) = self.nodes.get_mut(parent.0)
         {
             parent_node.children.retain(|child| *child != id);
         }
         if let Some(node) = self.nodes.get_mut(id.0) {
             node.parent = None;
+        }
+        if let Some(parent) = parent {
+            self.note_children(parent, Vec::new(), vec![id]);
         }
     }
 
@@ -420,6 +488,7 @@ impl Document {
         self.detach(child);
         self.nodes[child.0].parent = Some(parent);
         self.nodes[parent.0].children.push(child);
+        self.note_children(parent, vec![child], Vec::new());
         true
     }
 
@@ -445,9 +514,11 @@ impl Document {
                 .position(|id| *id == before)
         {
             self.nodes[parent.0].children.insert(index, child);
+            self.note_children(parent, vec![child], Vec::new());
             return true;
         }
         self.nodes[parent.0].children.push(child);
+        self.note_children(parent, vec![child], Vec::new());
         true
     }
 
@@ -521,6 +592,91 @@ impl Document {
             .find(|child| self.element_name(*child).is_some())
     }
 
+    pub fn shadow_root(&self, id: NodeId) -> Option<NodeId> {
+        self.attr(id, "mithu-shadow")
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .filter(|index| *index < self.nodes.len())
+            .map(NodeId)
+    }
+
+    /// Children that participate in layout. A shadow host contributes its
+    /// shadow tree. A `<slot>` contributes its assigned light-DOM nodes, or
+    /// its fallback children when nothing is assigned.
+    pub fn rendered_children(&self, id: NodeId) -> Vec<NodeId> {
+        let host = if self.shadow_root(id).is_some() {
+            Some(id)
+        } else {
+            self.shadow_host_for_node(id)
+        };
+        let source = self.shadow_root(id).unwrap_or(id);
+        let mut out = Vec::new();
+        for child in self
+            .nodes
+            .get(source.0)
+            .map(|node| node.children.clone())
+            .unwrap_or_default()
+        {
+            out.extend(self.expand_slot(child, host));
+        }
+        out
+    }
+
+    fn expand_slot(&self, id: NodeId, host: Option<NodeId>) -> Vec<NodeId> {
+        if self.element_name(id) != Some("slot") {
+            return vec![id];
+        }
+        let Some(host) = host else {
+            return self
+                .nodes
+                .get(id.0)
+                .map(|node| node.children.clone())
+                .unwrap_or_default();
+        };
+        let name = self.attr(id, "name").unwrap_or("");
+        let assigned = self
+            .nodes
+            .get(host.0)
+            .map(|node| node.children.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|child| self.assigned_to_slot(*child, name))
+            .collect::<Vec<_>>();
+        if assigned.is_empty() {
+            return self
+                .nodes
+                .get(id.0)
+                .map(|node| node.children.clone())
+                .unwrap_or_default();
+        }
+        assigned
+    }
+
+    fn assigned_to_slot(&self, id: NodeId, slot_name: &str) -> bool {
+        if self.element_name(id) == Some("template") {
+            return false;
+        }
+        let name = self.attr(id, "slot").unwrap_or("");
+        if slot_name.is_empty() {
+            name.is_empty()
+        } else {
+            name == slot_name
+        }
+    }
+
+    fn shadow_host_for_node(&self, id: NodeId) -> Option<NodeId> {
+        let mut current = Some(id);
+        while let Some(node) = current {
+            if let Some(raw) = self.attr(node, "mithu-host")
+                && let Ok(index) = raw.parse::<usize>()
+                && index < self.nodes.len()
+            {
+                return Some(NodeId(index));
+            }
+            current = self.nodes.get(node.0).and_then(|item| item.parent);
+        }
+        None
+    }
+
     pub fn refresh_metadata(&mut self) {
         self.stylesheets.clear();
         self.stylesheet_links.clear();
@@ -537,7 +693,11 @@ impl Document {
                     );
                 }
                 Some("style") => {
-                    let text = self.text_content(id);
+                    let mut text = self.text_content(id);
+                    if let Some(host) = self.shadow_host_for_node(id) {
+                        let name = self.element_name(host).unwrap_or("*");
+                        text = scope_shadow_css(&text, name);
+                    }
                     if !text.trim().is_empty() {
                         self.stylesheets.push(text);
                     }
@@ -578,6 +738,66 @@ impl Document {
         }
         Ok(())
     }
+}
+
+/// `:host` and `::slotted()` only match inside a shadow tree. The flattened
+/// tree is one document, so those selectors become the host tag and the
+/// slotted selector.
+pub fn scope_shadow_css(css: &str, host: &str) -> String {
+    let mut rest = css;
+    let mut out = String::new();
+    while let Some(index) = next_shadow_selector(rest) {
+        out.push_str(&rest[..index]);
+        let tail = &rest[index..];
+        if let Some(inner) = tail.strip_prefix("::slotted(") {
+            let Some((body, after)) = split_group(inner) else {
+                out.push_str("::slotted(");
+                rest = inner;
+                continue;
+            };
+            out.push_str(body);
+            rest = after;
+        } else if let Some(inner) = tail.strip_prefix(":host(") {
+            out.push_str(host);
+            out.push_str(":is(");
+            rest = inner;
+        } else if let Some(inner) = tail.strip_prefix(":host") {
+            out.push_str(host);
+            rest = inner;
+        } else {
+            out.push_str(&tail[..1]);
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn next_shadow_selector(css: &str) -> Option<usize> {
+    let host = css.find(":host");
+    let slotted = css.find("::slotted(");
+    match (host, slotted) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(index), None) | (None, Some(index)) => Some(index),
+        (None, None) => None,
+    }
+}
+
+fn split_group(input: &str) -> Option<(&str, &str)> {
+    let mut depth = 1i32;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&input[..index], &input[index + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 impl Default for Document {

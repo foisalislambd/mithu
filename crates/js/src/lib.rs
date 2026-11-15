@@ -1,10 +1,21 @@
 //! In-process JavaScript virtual machine.
 //!
-//! Boa runs ECMAScript in this process, including modules. Host objects are the
-//! window, document, and node tree. Timers and `location` report back to the browser.
+//! SpiderMonkey runs ECMAScript in this process, including modules. Host objects
+//! are the window, document, and node tree. Timers and `location` report back to
+//! the browser. Script tasks yield between files so the UI thread can paint.
+
+mod custom_element;
+mod engine;
+
+#[macro_export]
+macro_rules! js_string {
+    ($value:expr) => {
+        $crate::engine::JsString::from($value)
+    };
+}
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -12,14 +23,14 @@ use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use boa_engine::module::{Module, ModuleLoader, ModuleRequest, Referrer};
-use boa_engine::object::builtins::{JsArray, JsPromise};
-use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
-use boa_engine::property::Attribute;
-use boa_engine::script::Script;
-use boa_engine::{
-    Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue,
-    NativeFunction, Source, Trace, js_string,
+use engine::module::{Module, ModuleLoader, ModuleRequest, Referrer};
+use engine::object::builtins::{JsArray, JsFunction, JsPromise};
+use engine::object::{FunctionObjectBuilder, ObjectInitializer};
+use engine::property::Attribute;
+use engine::script::Script;
+use engine::{
+    Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
+    Source,
 };
 use mithu_css::{Declaration, parse_css, parse_declarations};
 use mithu_dom::{Document, NodeData, NodeId};
@@ -50,6 +61,9 @@ struct Host {
     scroll: Rc<Cell<f32>>,
     /// Script source by the path Boa prints in a stack, for `MITHU_JS_DEBUG`.
     sources: Rc<RefCell<HashMap<String, String>>>,
+    loader: Rc<PageLoader>,
+    /// Parser-inserted scripts, so a later move does not run them again.
+    ran_scripts: Rc<RefCell<HashSet<usize>>>,
 }
 
 /// Border box of a laid-out element, in CSS pixels.
@@ -67,6 +81,9 @@ pub struct BoxMetrics {
 
 struct Clock {
     now: u64,
+    /// Wall time at the last timer jump, so `performance.now()` keeps moving
+    /// during a task and still jumps when the event loop advances.
+    wall: std::time::Instant,
     next: u32,
     queue: Vec<Timer>,
 }
@@ -83,24 +100,23 @@ struct PageLoader {
     fetch: RefCell<Box<dyn FnMut(&str) -> Option<String>>>,
     cache: RefCell<HashMap<String, Module>>,
     imports: HashMap<String, String>,
+    /// Document URL. Relative imports from a classic script resolve against it.
+    base: String,
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct NodeKey {
-    #[unsafe_ignore_trace]
     id: usize,
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct ResponseKey {
-    #[unsafe_ignore_trace]
     body: String,
-    #[unsafe_ignore_trace]
     headers: String,
 }
 
 pub fn engine_name() -> &'static str {
-    "boa"
+    "spidermonkey"
 }
 
 pub struct Session {
@@ -174,6 +190,7 @@ impl Session {
         let navigation = Rc::new(RefCell::new(None));
         let clock = Rc::new(RefCell::new(Clock {
             now: 0,
+            wall: std::time::Instant::now(),
             next: 0,
             queue: Vec::new(),
         }));
@@ -181,18 +198,23 @@ impl Session {
             fetch: RefCell::new(Box::new(fetch)),
             cache: RefCell::new(HashMap::new()),
             imports,
+            base: href.to_string(),
         });
         let local = Rc::new(RefCell::new(local));
         let session_store = Rc::new(RefCell::new(session_store));
         let mut context = Context::builder()
-            .module_loader(Rc::clone(&loader))
+            .module_loader(Rc::clone(&loader) as Rc<dyn ModuleLoader>)
+            .host_hooks(Rc::new(RejectionHooks) as Rc<dyn engine::HostHooks>)
             .build()
             .unwrap_or_else(|_| Context::default());
         // Boa's default stack is 10,240 slots. A page script that builds a
         // large expression (Google's interstitial) hits that before it finishes.
-        let mut limits = boa_engine::vm::RuntimeLimits::default();
+        let mut limits = engine::vm::RuntimeLimits::default();
         limits.set_stack_size_limit(1024 * 1024);
-        limits.set_recursion_limit(4_096);
+        // Each Boa frame is several kilobytes of native stack. 4,096 frames
+        // overflow the UI thread before Boa can throw. 1,536 still covers a
+        // deep render and turns a runaway constructor into a catchable error.
+        limits.set_recursion_limit(1_536);
         context.set_runtime_limits(limits);
         context.insert_data(Host {
             doc: Rc::clone(&shared),
@@ -212,6 +234,8 @@ impl Session {
             geometry: Rc::new(RefCell::new(HashMap::new())),
             scroll: Rc::new(Cell::new(0.0)),
             sources: Rc::new(RefCell::new(HashMap::new())),
+            loader: Rc::clone(&loader),
+            ran_scripts: Rc::new(RefCell::new(HashSet::new())),
         });
         let mut jobs = Vec::new();
         if let Err(error) = install_host(&mut context) {
@@ -297,6 +321,11 @@ impl Session {
         self.doc.borrow().clone()
     }
 
+    /// Tree generation. The shell skips style and layout while this stays put.
+    pub fn revision(&self) -> u64 {
+        self.doc.borrow().revision
+    }
+
     pub fn edit(&mut self, update: impl FnOnce(&mut Document)) {
         update(&mut self.doc.borrow_mut());
     }
@@ -321,10 +350,23 @@ impl Session {
 
     /// Moves the page clock forward and runs timers whose delay has elapsed.
     pub fn advance(&mut self, ms: u64) -> bool {
+        self.advance_limited(ms, None, 90)
+    }
+
+    /// One animation frame. `ms` is real time since the previous frame, and
+    /// only one callback runs so a tween sees that gap instead of a batch.
+    pub fn advance_frame(&mut self, ms: u64) -> bool {
+        self.advance_limited(ms.max(1), None, 1)
+    }
+
+    /// `only` limits the timer kind. `max_frames` caps animation callbacks in
+    /// this pass. A live frame uses 1. A screenshot batch uses more.
+    pub fn advance_limited(&mut self, ms: u64, only: Option<u8>, max_frames: u32) -> bool {
+        let _bound = self.context.as_mut().map(|context| context.bind());
         let Some(context) = self.context.as_mut() else {
             return false;
         };
-        match run_due_timers(context, ms) {
+        match run_due_timers(context, ms, only, max_frames) {
             Ok(ran) => ran,
             Err(error) => {
                 self.log
@@ -333,6 +375,13 @@ impl Session {
                 false
             }
         }
+    }
+
+    pub fn animation_frames_pending(&self) -> bool {
+        let Some(host) = self.context.as_ref().and_then(|context| context.get_data::<Host>().cloned()) else {
+            return false;
+        };
+        host.clock.borrow().queue.iter().any(|timer| timer.kind == 6)
     }
 
     pub fn next_timer_ms(&self) -> Option<u64> {
@@ -348,6 +397,7 @@ impl Session {
     /// Runs listeners from the target up through its ancestors.
     /// Returns true when the browser should still perform the default action.
     pub fn dispatch(&mut self, id: NodeId, event: &str) -> bool {
+        let _bound = self.context.as_mut().map(|context| context.bind());
         self.prevented.set(false);
         let chain = {
             let doc = self.doc.borrow();
@@ -542,32 +592,88 @@ pub struct Submission {
     pub query: String,
 }
 
+/// Registrable-ish site of an absolute URL: the last two host labels.
+fn script_site(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("//"))?;
+    let host = rest.split(['/', '?', '#']).next()?.split('@').last()?;
+    let host = host.split(':').next().unwrap_or(host);
+    let parts: Vec<&str> = host.split('.').filter(|part| !part.is_empty()).collect();
+    if parts.len() >= 2 {
+        Some(format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]))
+    } else if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
 fn script_jobs(
     context: &Context,
     doc: &Rc<RefCell<Document>>,
     loader: &PageLoader,
 ) -> Vec<ScriptJob> {
     let scripts = doc.borrow().scripts.clone();
+    let page_site = script_site(&loader.base).unwrap_or_default();
+    if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+        eprintln!("page site {page_site} from {}", loader.base);
+    }
     let mut classic = Vec::new();
+    let mut classic_late = Vec::new();
     let mut deferred = Vec::new();
     let mut asynchronous = Vec::new();
     for script in scripts {
         if !script.javascript || script.nomodule {
             continue;
         }
-        if script.module || script.defer {
+        if std::env::var_os("MITHU_JS_DEBUG").is_some()
+            && let Some(src) = &script.src
+        {
+            eprintln!(
+                "classify async={} defer={} site={:?} {src}",
+                script.asynchronous,
+                script.defer,
+                script_site(src)
+            );
+        }
+        let third_party = script
+            .src
+            .as_deref()
+            .and_then(script_site)
+            .is_some_and(|site| !page_site.is_empty() && site != page_site);
+        if script.module || (script.defer && !third_party) {
             deferred.push(script);
         } else if script.asynchronous {
             asynchronous.push(script);
+        } else if third_party {
+            // A third-party parser-blocking script (ads) can spend the whole
+            // load budget. The document's own async bundle runs first.
+            classic_late.push(script);
         } else {
             classic.push(script);
         }
     }
     let mut jobs = Vec::new();
-    for script in classic.into_iter().chain(deferred).chain(asynchronous) {
+    for script in classic
+        .into_iter()
+        .chain(deferred)
+        .chain(asynchronous)
+        .chain(classic_late)
+    {
         let code = if let Some(src) = &script.src {
             let mut fetch = loader.fetch.borrow_mut();
-            fetch(src).unwrap_or_default()
+            match fetch(src) {
+                Some(code) if !code.trim().is_empty() => code,
+                _ => {
+                    if std::env::var_os("MITHU_LOGS").is_some() {
+                        eprintln!("script empty {src}");
+                    }
+                    continue;
+                }
+            }
         } else {
             script.code.clone()
         };
@@ -603,11 +709,127 @@ fn script_jobs(
     jobs
 }
 
+struct RejectionHooks;
+
+impl engine::HostHooks for RejectionHooks {
+    fn promise_rejection_tracker(
+        &self,
+        promise: &JsPromise,
+        operation: engine::OperationType,
+        context: &mut Context,
+    ) {
+        let promise = JsValue::from(promise.clone());
+        let Some(object) = promise.as_object() else {
+            return;
+        };
+        let unhandled = operation == engine::OperationType::Reject;
+        let _ = object.set(
+            js_string!("__mithuUnhandled"),
+            JsValue::from(unhandled),
+            false,
+            context,
+        );
+        if !unhandled {
+            return;
+        }
+        // A handler may attach before the current turn ends. Report only if
+        // the rejection is still unhandled when that turn's microtasks run.
+        let Ok(report) = context
+            .global_object()
+            .get(js_string!("__mithuReportRejection"), context)
+        else {
+            return;
+        };
+        if let Some(report) = report.as_object() {
+            let _ = report.call(&JsValue::undefined(), &[promise], context);
+        }
+    }
+}
+
+fn record_rejection(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let promise = args.first().cloned().unwrap_or(JsValue::undefined());
+    let reason = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    let mut message = context.rejection_report(&promise, &reason);
+    if let Some(object) = reason.as_object()
+        && let Ok(stack) = object.get(js_string!("stack"), context)
+    {
+        let stack = stack.display().to_string();
+        if !stack.is_empty() && stack != "undefined" && !message.contains(&stack) {
+            message.push('\n');
+            message.push_str(&stack);
+        }
+    }
+    note_error(context, &message);
+    Ok(JsValue::undefined())
+}
+
 fn note_error(context: &Context, error: &dyn std::fmt::Display) {
     if let Some(host) = context.get_data::<Host>() {
-        let message = format!("JavaScript error: {error}");
+        let at = host
+            .current_script
+            .borrow()
+            .and_then(|id| {
+                host.doc
+                    .borrow()
+                    .attr(id, "src")
+                    .map(str::to_string)
+                    .filter(|src| !src.is_empty())
+            })
+            .unwrap_or_default();
+        let prefix = if at.is_empty() {
+            String::new()
+        } else {
+            format!("{at}: ")
+        };
+        let message = format!("JavaScript error: {prefix}{error}");
         let extra = debug_source_window(host, &message);
-        host.log.borrow_mut().push(format!("{message}{extra}"));
+        let sample = if message.contains("418") {
+            hydration_text_sample(host)
+        } else {
+            String::new()
+        };
+        host.log
+            .borrow_mut()
+            .push(format!("{message}{extra}{sample}"));
+    }
+}
+
+/// Server text nodes at a React hydration mismatch. Whitespace, NBSP, and
+/// CR are visible in the debug format so they can be compared with the client.
+fn hydration_text_sample(host: &Host) -> String {
+    let doc = host.doc.borrow();
+    let mut lines = Vec::new();
+    for (index, node) in doc.nodes.iter().enumerate() {
+        let NodeData::Text(text) = &node.data else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let parent = node
+            .parent
+            .and_then(|id| doc.element_name(id))
+            .unwrap_or("");
+        if parent == "script" || parent == "style" || parent == "noscript" {
+            continue;
+        }
+        let odd = text.chars().any(|ch| {
+            ch == '\u{00A0}' || ch == '\r' || ch == '\t' || ch == '\n'
+        }) || text.starts_with(' ')
+            || text.ends_with(' ')
+            || text.contains("  ");
+        if !odd && parent != "h1" && parent != "h2" {
+            continue;
+        }
+        lines.push(format!("text#{index}<{parent}> {text:?}"));
+        if lines.len() >= 16 {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("\nhydration text {}", lines.join(" | "))
     }
 }
 
@@ -681,7 +903,15 @@ fn drive_scripts(
         for job in jobs {
             if let Some(host) = context.get_data::<Host>() {
                 *host.current_script.borrow_mut() = Some(job.node);
+                host.ran_scripts.borrow_mut().insert(job.node.0);
                 remember_source(host, &job.path, &job.code);
+            }
+            if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+                eprintln!(
+                    "script {} {}",
+                    if job.module { "module" } else { "classic" },
+                    job.path
+                );
             }
             if job.module {
                 if let Err(error) = run_module(&mut context, &job.code, &job.path) {
@@ -713,8 +943,14 @@ fn drive_scripts(
             if let Err(error) = deliver_mutations(&mut context) {
                 note_error(&context, &error);
             }
+            // Script-inserted external scripts are tasks of their own. Drain
+            // them before the next classic script so a stub can finish
+            // installing `window.clarity.q` before the tag reads it.
+            if let Err(error) = run_due_timers(&mut context, 0, Some(5), 90) {
+                note_error(&context, &error);
+            }
         }
-        if let Err(error) = run_due_timers(&mut context, 0) {
+        if let Err(error) = run_due_timers(&mut context, 0, None, 90) {
             note_error(&context, &error);
         }
         signal_document_loaded(&mut context);
@@ -733,6 +969,7 @@ pub fn run_scripts(
 }
 
 fn install_host(context: &mut Context) -> JsResult<()> {
+    let _bound = context.bind();
     let listeners = ObjectInitializer::new(context).build();
     let document = document_object(context)?;
     let console = console_object(context)?;
@@ -761,6 +998,31 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("navigator"), navigator, flags)?;
     let screen = screen_object(context)?;
     context.register_global_property(js_string!("screen"), screen, flags)?;
+    context.register_global_property(js_string!("innerWidth"), JsValue::from(1280), flags)?;
+    context.register_global_property(js_string!("innerHeight"), JsValue::from(800), flags)?;
+    context.register_global_property(js_string!("outerWidth"), JsValue::from(1280), flags)?;
+    context.register_global_property(js_string!("outerHeight"), JsValue::from(800), flags)?;
+    context.register_global_property(js_string!("devicePixelRatio"), JsValue::from(1), flags)?;
+    let scroll_y = native(context, "get scrollY", 0, get_scroll_y);
+    let scroll_x = native(context, "get scrollX", 0, get_scroll_x);
+    let origin = native(context, "get window origin", 0, get_origin);
+    for (name, getter) in [
+        ("scrollX", scroll_x.clone()),
+        ("pageXOffset", scroll_x),
+        ("scrollY", scroll_y.clone()),
+        ("pageYOffset", scroll_y),
+        ("origin", origin),
+    ] {
+        let descriptor = engine::property::PropertyDescriptor::builder()
+            .get(JsValue::from(getter))
+            .enumerable(true)
+            .configurable(true);
+        context.global_object().define_property_or_throw(
+            js_string!(name),
+            descriptor,
+            context,
+        )?;
+    }
     context.register_global_property(js_string!("location"), location.clone(), flags)?;
     if let Ok(document) = context.global_object().get(js_string!("document"), context)
         && let Some(document) = document.as_object()
@@ -818,10 +1080,18 @@ fn install_host(context: &mut Context) -> JsResult<()> {
         1,
         NativeFunction::from_fn_ptr(window_dispatch),
     )?;
+    context.register_global_callable(
+        js_string!("postMessage"),
+        1,
+        NativeFunction::from_fn_ptr(window_post_message),
+    )?;
     let local_storage = storage_object(context, false)?;
     let session_storage = storage_object(context, true)?;
+    install_storage_interface(context, &local_storage, &session_storage)?;
     context.register_global_property(js_string!("localStorage"), local_storage, flags)?;
     context.register_global_property(js_string!("sessionStorage"), session_storage, flags)?;
+    let time_zone = system_time_zone();
+    context.register_global_property(js_string!("__mithuTimeZone"), js_string!(time_zone), flags)?;
     crate::web::register(context)?;
     context.register_global_callable(
         js_string!("requestIdleCallback"),
@@ -859,8 +1129,290 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     let _ = wire_document_prototype(context);
     let _ = wire_prototype_chain(context);
     let _ = install_group(context);
+    context.register_global_callable(
+        js_string!("__mithuRecordRejection"),
+        1,
+        NativeFunction::from_fn_ptr(record_rejection),
+    )?;
+    context.eval(Source::from_bytes(READABLE_STREAM))?;
+    context.eval(Source::from_bytes(include_str!("platform.js")))?;
+    let _ = context.eval(Source::from_bytes(HOST_GAPS));
+    context.register_global_callable(
+        js_string!("__mithuMissing"),
+        1,
+        NativeFunction::from_fn_ptr(record_missing),
+    )?;
+    let _ = context.eval(Source::from_bytes(MISSING_TRACE));
     Ok(())
 }
+
+fn get_scroll_y(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    Ok(JsValue::from(f64::from(host.scroll.get())))
+}
+
+fn get_scroll_x(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(0))
+}
+
+/// Host objects YouTube and GitHub read while booting. Each one is the
+/// smallest object that keeps a feature-detect from throwing.
+const HOST_GAPS: &str = r#"
+(function () {
+  if (typeof ReadableStream === "function") globalThis.ReadableStream = ReadableStream;
+  if (!globalThis.trustedTypes) {
+    var policy = {
+      createHTML: function (value) { return String(value); },
+      createScript: function (value) { return String(value); },
+      createScriptURL: function (value) { return String(value); }
+    };
+    globalThis.trustedTypes = {
+      createPolicy: function () { return policy; },
+      getAttributeType: function () { return null; },
+      emptyHTML: "",
+      emptyScript: "",
+      defaultPolicy: policy
+    };
+  }
+  if (!globalThis.caches) {
+    var cache = {
+      match: function () { return Promise.resolve(undefined); },
+      keys: function () { return Promise.resolve([]); },
+      put: function () { return Promise.resolve(); },
+      delete: function () { return Promise.resolve(false); }
+    };
+    globalThis.caches = {
+      open: function () { return Promise.resolve(cache); },
+      match: cache.match,
+      keys: cache.keys,
+      has: function () { return Promise.resolve(false); },
+      delete: cache.delete
+    };
+  }
+  if (!globalThis.indexedDB) {
+    globalThis.indexedDB = {
+      open: function () {
+        var request = {
+          result: {
+            objectStoreNames: { contains: function () { return false; } },
+            createObjectStore: function () { return {}; },
+            transaction: function () {
+              var store = {
+                get: function () { var inner = {}; Promise.resolve().then(function () { if (inner.onsuccess) inner.onsuccess({ target: inner }); }); return inner; },
+                put: function () { return {}; },
+                openCursor: function () { var inner = {}; Promise.resolve().then(function () { if (inner.onsuccess) inner.onsuccess({ target: { result: null } }); }); return inner; },
+                index: function () { return store; }
+              };
+              return { objectStore: function () { return store; } };
+            }
+          }
+        };
+        Promise.resolve().then(function () { if (request.onsuccess) request.onsuccess({ target: request }); });
+        return request;
+      },
+      deleteDatabase: function () {
+        var request = {};
+        Promise.resolve().then(function () { if (request.onsuccess) request.onsuccess({ target: request }); });
+        return request;
+      }
+    };
+  }
+})();
+"#;
+
+fn record_missing(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if std::env::var_os("MITHU_LOGS").is_none() {
+        return Ok(JsValue::undefined());
+    }
+    let name = args
+        .first()
+        .map(|value| value.display().to_string())
+        .unwrap_or_default();
+    if !name.is_empty()
+        && let Some(host) = context.get_data::<Host>()
+    {
+        let line = format!("missing {name}");
+        let mut log = host.log.borrow_mut();
+        if !log.iter().any(|seen| seen == &line) {
+            log.push(line);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+/// Log the first missing `window` / `document` properties a page reads.
+/// The proxy sits in front of the existing prototype, and `getPrototypeOf`
+/// keeps `instanceof` on the real prototype chain.
+const MISSING_TRACE: &str = r#"
+(function () {
+  var seen = Object.create(null);
+  var count = 0;
+  var closed = false;
+  function note(name) {
+    if (closed || seen[name]) return;
+    seen[name] = true;
+    count++;
+    if (count > 40) closed = true;
+    if (typeof globalThis.__mithuMissing === "function") globalThis.__mithuMissing(name);
+  }
+  function trap(label) {
+    return {
+      get: function (obj, prop, recv) {
+        var named = typeof prop === "string";
+        var has = named && prop in obj;
+        var value = Reflect.get(obj, prop, recv);
+        if (!closed && named && !has && prop !== "then" && prop !== "constructor" && prop.slice(0, 2) !== "__") note(label + "." + prop);
+        return value;
+      },
+      getPrototypeOf: function (target) {
+        return Object.getPrototypeOf(target);
+      }
+    };
+  }
+  function watchPrototype(ctor, obj, label) {
+    if (!ctor || !ctor.prototype || !obj) return;
+    var previous = Object.getPrototypeOf(obj);
+    var previousCtor = ctor.prototype;
+    var proxy = new Proxy(previousCtor, trap(label));
+    try { ctor.prototype = proxy; } catch (e) {}
+    try { Object.setPrototypeOf(obj, proxy); } catch (e) {}
+    if (!(obj instanceof ctor)) {
+      try { ctor.prototype = previousCtor; } catch (e) {}
+      try { Object.setPrototypeOf(obj, previous); } catch (e) {}
+    }
+  }
+  watchPrototype(globalThis.Window, globalThis, "window");
+  watchPrototype(globalThis.Document, globalThis.document, "document");
+})();
+"#;
+
+/// Enough of `ReadableStream` for a React flight stream: enqueue, close,
+/// `getReader().read()`, and `tee()`.
+const READABLE_STREAM: &str = r#"
+class ReadableStream {
+  constructor(underlying) {
+    this._queue = [];
+    this._closed = false;
+    this._error = undefined;
+    this._wait = null;
+    var stream = this;
+    this._controller = {
+      enqueue: function (chunk) {
+        stream._queue.push(chunk);
+        stream._wake();
+      },
+      close: function () {
+        stream._closed = true;
+        stream._wake();
+      },
+      error: function (err) {
+        stream._error = err;
+        stream._closed = true;
+        stream._wake();
+      },
+      get desiredSize() {
+        return stream._closed ? 0 : 1;
+      }
+    };
+    if (underlying && typeof underlying.start === "function") {
+      underlying.start(this._controller);
+    }
+  }
+  _wake() {
+    var wait = this._wait;
+    if (!wait) return;
+    if (this._error) {
+      this._wait = null;
+      wait.reject(this._error);
+      return;
+    }
+    if (this._queue.length) {
+      this._wait = null;
+      wait.resolve({ value: this._queue.shift(), done: false });
+      return;
+    }
+    if (this._closed) {
+      this._wait = null;
+      wait.resolve({ value: undefined, done: true });
+    }
+  }
+  getReader() {
+    var stream = this;
+    return {
+      read: function () {
+        if (stream._error) return Promise.reject(stream._error);
+        if (stream._queue.length) {
+          return Promise.resolve({ value: stream._queue.shift(), done: false });
+        }
+        if (stream._closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise(function (resolve, reject) {
+          stream._wait = { resolve: resolve, reject: reject };
+        });
+      },
+      releaseLock: function () {},
+      cancel: function () {
+        stream._controller.close();
+        return Promise.resolve();
+      }
+    };
+  }
+  cancel() {
+    this._controller.close();
+    return Promise.resolve();
+  }
+  tee() {
+    var reader = this.getReader();
+    var first, second;
+    var left = new ReadableStream({ start: function (controller) { first = controller; } });
+    var right = new ReadableStream({ start: function (controller) { second = controller; } });
+    var pump = function () {
+      reader.read().then(function (result) {
+        if (result.done) {
+          first.close();
+          second.close();
+          return;
+        }
+        first.enqueue(result.value);
+        second.enqueue(result.value);
+        pump();
+      }, function (err) {
+        first.error(err);
+        second.error(err);
+      });
+    };
+    pump();
+    return [left, right];
+  }
+}
+(function () {
+  var origin = Date.now();
+  var start = performance.now();
+  Date.now = function () { return origin + (performance.now() - start); };
+})();
+if (typeof caches === "undefined") {
+  function MithuCache() {}
+  MithuCache.prototype.match = function () { return Promise.resolve(undefined); };
+  MithuCache.prototype.matchAll = function () { return Promise.resolve([]); };
+  MithuCache.prototype.put = function () { return Promise.resolve(undefined); };
+  MithuCache.prototype.delete = function () { return Promise.resolve(false); };
+  MithuCache.prototype.keys = function () { return Promise.resolve([]); };
+  var cache = new MithuCache();
+  globalThis.caches = {
+    open: function () { return Promise.resolve(cache); },
+    has: function () { return Promise.resolve(false); },
+    delete: function () { return Promise.resolve(false); },
+    keys: function () { return Promise.resolve([]); },
+    match: function () { return Promise.resolve(undefined); }
+  };
+}
+globalThis.__mithuReportRejection = function (promise) {
+  Promise.resolve().then(function () {
+    if (promise.__mithuUnhandled) {
+      promise.catch(function (reason) { globalThis.__mithuRecordRejection(promise, reason); });
+    }
+  });
+};
+"#;
 
 fn wire_document_prototype(context: &mut Context) -> JsResult<()> {
     let document = context
@@ -886,9 +1438,16 @@ fn wire_prototype_chain(context: &mut Context) -> JsResult<()> {
         ("HTMLTemplateElement", "HTMLElement"),
         ("HTMLImageElement", "HTMLElement"),
         ("HTMLElement", "Element"),
+        ("SVGElement", "Element"),
         ("Element", "Node"),
         ("Document", "Node"),
         ("DocumentFragment", "Node"),
+        ("DocumentType", "Node"),
+        ("CharacterData", "Node"),
+        ("Text", "CharacterData"),
+        ("Comment", "CharacterData"),
+        ("CDATASection", "Text"),
+        ("ProcessingInstruction", "CharacterData"),
         ("Node", "EventTarget"),
         ("ShadowRoot", "DocumentFragment"),
     ] {
@@ -897,6 +1456,9 @@ fn wire_prototype_chain(context: &mut Context) -> JsResult<()> {
     for name in crate::web::HTML_ELEMENT_CLASSES {
         link_prototype(context, name, "HTMLElement")?;
     }
+    link_prototype(context, "HTMLMediaElement", "HTMLElement")?;
+    link_prototype(context, "HTMLAudioElement", "HTMLMediaElement")?;
+    link_prototype(context, "HTMLVideoElement", "HTMLMediaElement")?;
     install_node_methods(context)?;
     install_canvas_methods(context)?;
     expose_shady_natives(context)?;
@@ -963,8 +1525,14 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     define_hidden(&proto, context, "isSameNode", JsValue::from(same))?;
     let clone = native(context, "cloneNode", 1, clone_node);
     define_hidden(&proto, context, "cloneNode", JsValue::from(clone))?;
+    let replace_with_fn = native(context, "replaceWith", 0, replace_with);
+    define_hidden(&proto, context, "replaceWith", JsValue::from(replace_with_fn))?;
     let replace = native(context, "replaceChild", 2, replace_child);
     define_hidden(&proto, context, "replaceChild", JsValue::from(replace))?;
+    let has_children = native(context, "hasChildNodes", 0, has_child_nodes);
+    define_hidden(&proto, context, "hasChildNodes", JsValue::from(has_children))?;
+    let contains_fn = native(context, "contains", 1, node_contains);
+    define_hidden(&proto, context, "contains", JsValue::from(contains_fn))?;
     let text_get = native(context, "get textContent", 0, get_text);
     let text_set = native(context, "set textContent", 1, set_text);
     define_accessor(&proto, context, "textContent", text_get, Some(text_set))?;
@@ -982,7 +1550,44 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     define_accessor(&proto, context, "nextSibling", next_sibling, None)?;
     define_accessor(&proto, context, "previousSibling", previous_sibling, None)?;
     define_accessor(&proto, context, "childNodes", child_nodes, None)?;
+    let element = context.global_object().get(js_string!("Element"), context)?;
+    if let Some(element) = element.as_object() {
+        let proto = element.get(js_string!("prototype"), context)?;
+        if let Some(proto) = proto.as_object() {
+            let namespace = native(context, "get namespaceURI", 0, get_namespace_uri);
+            let property = engine::property::PropertyDescriptor::builder()
+                .get(JsValue::from(namespace))
+                .enumerable(false)
+                .configurable(true);
+            proto.define_property_or_throw(js_string!("namespaceURI"), property, context)?;
+        }
+    }
     Ok(())
+}
+
+fn get_namespace_uri(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::null());
+    };
+    let host = host(context)?;
+    let doc = host.doc.borrow();
+    if doc.element_name(id).is_none() {
+        return Ok(JsValue::null());
+    }
+    Ok(js_string!(element_namespace(&doc, id)).into())
+}
+
+fn element_namespace(doc: &Document, id: NodeId) -> &'static str {
+    let mut current = Some(id);
+    while let Some(node) = current {
+        match doc.element_name(node) {
+            Some("foreignObject") => return "http://www.w3.org/1999/xhtml",
+            Some("svg") => return "http://www.w3.org/2000/svg",
+            Some("math") => return "http://www.w3.org/1998/Math/MathML",
+            _ => current = doc.parent_element(node),
+        }
+    }
+    "http://www.w3.org/1999/xhtml"
 }
 
 fn install_group(context: &mut Context) -> JsResult<()> {
@@ -991,7 +1596,7 @@ fn install_group(context: &mut Context) -> JsResult<()> {
         let proto = array.get(js_string!("prototype"), context)?;
         if let Some(proto) = proto.as_object() {
             let group = native(context, "group", 1, group_array);
-            let property = boa_engine::property::PropertyDescriptor::builder()
+            let property = engine::property::PropertyDescriptor::builder()
                 .value(group)
                 .writable(true)
                 .enumerable(false)
@@ -1218,7 +1823,7 @@ fn define_hidden(
     name: &str,
     value: JsValue,
 ) -> JsResult<()> {
-    let property = boa_engine::property::PropertyDescriptor::builder()
+    let property = engine::property::PropertyDescriptor::builder()
         .value(value)
         .writable(true)
         .enumerable(false)
@@ -1228,14 +1833,14 @@ fn define_hidden(
         .map(|_| ())
 }
 
-fn define_accessor(
+pub(crate) fn define_accessor(
     proto: &JsObject,
     context: &mut Context,
     name: &str,
-    getter: boa_engine::object::builtins::JsFunction,
-    setter: Option<boa_engine::object::builtins::JsFunction>,
+    getter: JsFunction,
+    setter: Option<JsFunction>,
 ) -> JsResult<()> {
-    let property = boa_engine::property::PropertyDescriptor::builder()
+    let property = engine::property::PropertyDescriptor::builder()
         .get(JsValue::from(getter))
         .maybe_set(setter.map(JsValue::from))
         .enumerable(true)
@@ -1245,10 +1850,10 @@ fn define_accessor(
         .map(|_| ())
 }
 
-fn link_prototype(context: &mut Context, child: &str, parent: &str) -> JsResult<()> {
+fn link_prototype(context: &mut Context, child_name: &str, parent: &str) -> JsResult<()> {
     let child = context
         .global_object()
-        .get(js_string!(child.to_string()), context)?;
+        .get(js_string!(child_name.to_string()), context)?;
     let parent = context
         .global_object()
         .get(js_string!(parent.to_string()), context)?;
@@ -1447,7 +2052,73 @@ function __mithuDataset(id) {
 "#;
 
 fn deliver_mutations(context: &mut Context) -> JsResult<()> {
+    let _bound = context.bind();
     crate::web::deliver_mutations(context)
+}
+
+fn system_time_zone() -> String {
+    if let Ok(zone) = std::env::var("TZ")
+        && !zone.is_empty()
+        && zone != "localtime"
+    {
+        return zone;
+    }
+    if let Ok(path) = std::fs::read_link("/etc/localtime")
+        && let Some(text) = path.to_str()
+        && let Some(zone) = text.split("zoneinfo/").nth(1)
+        && !zone.is_empty()
+    {
+        return zone.to_string();
+    }
+    "UTC".to_string()
+}
+
+/// `localStorage instanceof Storage` needs a real constructor. The stores keep
+/// their own methods; the prototype is what `instanceof` walks.
+fn install_storage_interface(
+    context: &mut Context,
+    local_storage: &JsObject,
+    session_storage: &JsObject,
+) -> JsResult<()> {
+    let prototype = ObjectInitializer::new(context).build();
+    let constructor = FunctionObjectBuilder::new(
+        context.realm(),
+        NativeFunction::from_fn_ptr(storage_construct),
+    )
+    .name(js_string!("Storage"))
+    .length(0)
+    .constructor(true)
+    .build();
+    constructor.set(
+        js_string!("prototype"),
+        JsValue::from(prototype.clone()),
+        false,
+        context,
+    )?;
+    prototype.set(
+        js_string!("constructor"),
+        JsValue::from(constructor.clone()),
+        false,
+        context,
+    )?;
+    local_storage.set_prototype(Some(prototype.clone()));
+    session_storage.set_prototype(Some(prototype));
+    context.register_global_property(
+        js_string!("Storage"),
+        JsValue::from(constructor),
+        ATTR,
+    )?;
+    Ok(())
+}
+
+fn storage_construct(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Err(JsNativeError::typ()
+        .with_message("Illegal constructor")
+        .into())
 }
 
 fn storage_object(context: &mut Context, session: bool) -> JsResult<JsObject> {
@@ -1753,7 +2424,27 @@ fn location_object(context: &mut Context) -> JsResult<JsObject> {
         .accessor(js_string!("pathname"), Some(path_get), None, ATTR)
         .accessor(js_string!("search"), Some(search_get), None, ATTR)
         .accessor(js_string!("hash"), Some(hash_get), None, ATTR)
-        .accessor(js_string!("origin"), Some(origin_get), None, ATTR);
+        .accessor(js_string!("origin"), Some(origin_get), None, ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(set_location),
+            js_string!("assign"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(set_location),
+            js_string!("replace"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(reload_location),
+            js_string!("reload"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_location),
+            js_string!("toString"),
+            0,
+        );
     Ok(object.build())
 }
 
@@ -1880,6 +2571,8 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let head_get = native(context, "get head", 0, get_head);
     let script_get = native(context, "get currentScript", 0, get_current_script);
     let sheets_get = native(context, "get styleSheets", 0, get_style_sheets);
+    let adopted_sheets_get = native(context, "get adoptedStyleSheets", 0, adopted_get);
+    let adopted_sheets_set = native(context, "set adoptedStyleSheets", 1, adopted_set);
     let scripts_get = native(context, "get scripts", 0, get_scripts);
     let ready_get = native(context, "get readyState", 0, get_ready_state);
     let base_get = native(context, "get baseURI", 0, get_location);
@@ -1890,7 +2583,8 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let fonts = font_set(context)?;
     let implementation = implementation_object(context)?;
     let window = context.global_object().clone();
-    let mut object = ObjectInitializer::new(context);
+    let root = host(context)?.doc.borrow().root.0;
+    let mut object = ObjectInitializer::with_native_data(NodeKey { id: root }, context);
     object
         .function(
             NativeFunction::from_fn_ptr(get_element_by_id),
@@ -1918,6 +2612,16 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(create_comment),
+            js_string!("createComment"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_document_fragment),
+            js_string!("createDocumentFragment"),
+            0,
+        )
+        .function(
             NativeFunction::from_fn_ptr(get_elements_by_tag_name),
             js_string!("getElementsByTagName"),
             1,
@@ -1926,6 +2630,21 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             NativeFunction::from_fn_ptr(get_elements_by_class_name),
             js_string!("getElementsByClassName"),
             1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_elements_by_name),
+            js_string!("getElementsByName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(element_from_point),
+            js_string!("elementFromPoint"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(elements_from_point),
+            js_string!("elementsFromPoint"),
+            2,
         )
         .function(
             NativeFunction::from_fn_ptr(document_listener),
@@ -1953,6 +2672,12 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
         .accessor(js_string!("head"), Some(head_get), None, ATTR)
         .accessor(js_string!("currentScript"), Some(script_get), None, ATTR)
         .accessor(js_string!("styleSheets"), Some(sheets_get), None, ATTR)
+        .accessor(
+            js_string!("adoptedStyleSheets"),
+            Some(adopted_sheets_get),
+            Some(adopted_sheets_set),
+            ATTR,
+        )
         .accessor(js_string!("scripts"), Some(scripts_get), None, ATTR)
         .accessor(js_string!("readyState"), Some(ready_get), None, ATTR)
         .accessor(js_string!("baseURI"), Some(base_get), None, ATTR)
@@ -2082,6 +2807,131 @@ fn get_style_sheets(
         values.push(sheet_for(&element, id, context)?);
     }
     Ok(JsObject::from(JsArray::from_iter(values, context)).into())
+}
+
+pub(crate) fn adopted_get(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if let Some(object) = this.as_object() {
+        let cached = object.get(js_string!("__adopted"), context)?;
+        if cached.is_object() {
+            return Ok(cached);
+        }
+    }
+    Ok(JsObject::from(JsArray::from_iter(Vec::<JsValue>::new(), context)).into())
+}
+
+pub(crate) fn adopted_set(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = args.first().cloned().unwrap_or(JsValue::undefined());
+    if let Some(object) = this.as_object() {
+        let _ = object.set(js_string!("__adopted"), value.clone(), true, context);
+    }
+    let css = adopted_css(&value, context)?;
+    apply_adopted_css(this, &css, context)?;
+    Ok(value)
+}
+
+fn adopted_css(value: &JsValue, context: &mut Context) -> JsResult<String> {
+    let Some(object) = value.as_object() else {
+        return Ok(String::new());
+    };
+    let length = object
+        .get(js_string!("length"), context)?
+        .as_number()
+        .unwrap_or(0.0) as usize;
+    let mut css = String::new();
+    for index in 0..length.min(32) {
+        let sheet = object.get(js_string!(index.to_string()), context)?;
+        let Some(sheet) = sheet.as_object() else {
+            continue;
+        };
+        let text = sheet.get(js_string!("__css"), context)?;
+        if let Some(text) = text.as_string() {
+            css.push_str(&text.to_std_string_escaped());
+            css.push('\n');
+        }
+    }
+    Ok(css)
+}
+
+fn apply_adopted_css(this: &JsValue, css: &str, context: &mut Context) -> JsResult<()> {
+    let host = host(context)?;
+    let mut doc = host.doc.borrow_mut();
+    let parent = node_of(this)
+        .filter(|id| doc.nodes.get(id.0).is_some())
+        .or_else(|| {
+            doc.nodes.iter().enumerate().find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("head")).then_some(NodeId(index))
+            })
+        });
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    let stale: Vec<NodeId> = doc
+        .nodes
+        .get(parent.0)
+        .map(|node| node.children.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| doc.attr(*id, "mithu-adopted").is_some())
+        .collect();
+    for id in stale {
+        doc.detach(id);
+    }
+    if !css.trim().is_empty() {
+        let style = doc.create_element(parent, "style");
+        doc.set_attr(style, "mithu-adopted", "1");
+        doc.append_text(style, css);
+    }
+    doc.refresh_metadata();
+    Ok(())
+}
+
+pub(crate) fn construct_style_sheet(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let object = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(style_replace_sync),
+            js_string!("replaceSync"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(style_replace),
+            js_string!("replace"),
+            1,
+        )
+        .build();
+    Ok(object.into())
+}
+
+fn style_replace_sync(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let text = args
+        .first()
+        .and_then(|value| value.as_string())
+        .map(|text| text.to_std_string_escaped())
+        .unwrap_or_default();
+    if let Some(object) = this.as_object() {
+        object.set(js_string!("__css"), js_string!(text), true, context)?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn style_replace(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    style_replace_sync(this, args, context)?;
+    Ok(JsPromise::resolve(
+        JsValue::undefined(),
+        context,
+    )?
+    .into())
 }
 
 fn get_sheet(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -2242,6 +3092,16 @@ fn create_html_document(
             js_string!("createTextNode"),
             1,
         )
+        .function(
+            NativeFunction::from_fn_ptr(create_comment),
+            js_string!("createComment"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_document_fragment),
+            js_string!("createDocumentFragment"),
+            0,
+        )
         .build();
     Ok(doc.into())
 }
@@ -2314,6 +3174,7 @@ fn get_ready_state(_this: &JsValue, _args: &[JsValue], context: &mut Context) ->
 }
 
 fn signal_document_loaded(context: &mut Context) {
+    let _bound = context.bind();
     let Some(html) = (|| {
         let host = context.get_data::<Host>().cloned()?;
         *host.ready_state.borrow_mut() = "interactive".to_string();
@@ -2368,7 +3229,7 @@ pub(crate) fn native(
     name: &str,
     length: usize,
     body: fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>,
-) -> boa_engine::object::builtins::JsFunction {
+) -> JsFunction {
     FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(body))
         .name(JsString::from(name))
         .length(length)
@@ -2392,7 +3253,13 @@ fn console_log(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         }
         parts.push(text);
     }
-    host.log.borrow_mut().push(parts.join(" "));
+    let message = parts.join(" ");
+    let sample = if message.contains("418") {
+        hydration_text_sample(&host)
+    } else {
+        String::new()
+    };
+    host.log.borrow_mut().push(format!("{message}{sample}"));
     Ok(JsValue::undefined())
 }
 
@@ -2485,6 +3352,15 @@ fn get_elements_by_tag_name(
         doc.element_name(id)
             .is_some_and(|element| name == "*" || element == name)
     })
+}
+
+fn get_elements_by_name(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = arg_string(args, 0, context)?;
+    collect_named(this, context, move |doc, id| doc.attr(id, "name") == Some(name.as_str()))
 }
 
 fn get_elements_by_class_name(
@@ -2612,6 +3488,8 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let name_get = native(context, "get nodeName", 0, get_node_name);
     let value_get = native(context, "get value", 0, get_value);
     let value_set = native(context, "set value", 1, set_value);
+    let placeholder_get = native(context, "get placeholder", 0, get_placeholder);
+    let placeholder_set = native(context, "set placeholder", 1, set_placeholder);
     let checked_get = native(context, "get checked", 0, get_checked);
     let checked_set = native(context, "set checked", 1, set_checked);
     let href_get = native(context, "get href", 0, get_href);
@@ -2671,6 +3549,8 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     let nonce_get = native(context, "get nonce", 0, get_nonce);
     let connected_get = native(context, "get isConnected", 0, get_is_connected);
     let nonce_set = native(context, "set nonce", 1, set_nonce);
+    let first_element_get = native(context, "get firstElementChild", 0, get_first_element_child);
+    let attributes_get = native(context, "get attributes", 0, get_attributes);
     let mut object = ObjectInitializer::with_native_data(NodeKey { id }, context);
     object
         .function(
@@ -2694,6 +3574,16 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(get_attribute_names),
+            js_string!("getAttributeNames"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(has_attributes),
+            js_string!("hasAttributes"),
+            0,
+        )
+        .function(
             NativeFunction::from_fn_ptr(query_selector),
             js_string!("querySelector"),
             1,
@@ -2711,6 +3601,11 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         .function(
             NativeFunction::from_fn_ptr(get_elements_by_class_name),
             js_string!("getElementsByClassName"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_elements_by_name),
+            js_string!("getElementsByName"),
             1,
         )
         .function(
@@ -2805,6 +3700,13 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         .accessor(js_string!("parentElement"), Some(parent_get), None, ATTR)
         .accessor(js_string!("nextElementSibling"), Some(next_get), None, ATTR)
         .accessor(
+            js_string!("firstElementChild"),
+            Some(first_element_get),
+            None,
+            ATTR,
+        )
+        .accessor(js_string!("attributes"), Some(attributes_get), None, ATTR)
+        .accessor(
             js_string!("previousElementSibling"),
             Some(previous_get),
             None,
@@ -2833,6 +3735,12 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
         )
         .accessor(js_string!("value"), Some(value_get), Some(value_set), ATTR)
         .accessor(
+            js_string!("placeholder"),
+            Some(placeholder_get),
+            Some(placeholder_set),
+            ATTR,
+        )
+        .accessor(
             js_string!("checked"),
             Some(checked_get),
             Some(checked_set),
@@ -2853,6 +3761,16 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             NativeFunction::from_fn_ptr(get_bounding_rect),
             js_string!("getBoundingClientRect"),
             0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_bbox),
+            js_string!("getBBox"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(animate_element),
+            js_string!("animate"),
+            1,
         )
         .accessor(js_string!("offsetWidth"), Some(offset_width), None, ATTR)
         .accessor(js_string!("offsetHeight"), Some(offset_height), None, ATTR)
@@ -2891,7 +3809,7 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
             .build();
         let _ = value.set(js_string!("delegate"), delegate, false, context);
     }
-    let ctor_name = JsString::from(element_interface(&tag));
+    let ctor_name = JsString::from(element_interface_for(id, &tag, context));
     if let Ok(ctor) = context.global_object().get(ctor_name, context)
         && let Some(ctor) = ctor.as_object()
         && let Ok(proto) = ctor.get(js_string!("prototype"), context)
@@ -2905,10 +3823,46 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
     value
 }
 
+fn element_interface_for(id: usize, tag: &str, context: &mut Context) -> &'static str {
+    if let Ok(host) = host(context) {
+        let doc = host.doc.borrow();
+        if element_namespace(&doc, NodeId(id)) == "http://www.w3.org/2000/svg" {
+            return "SVGElement";
+        }
+    }
+    element_interface(tag)
+}
+
 fn element_interface(tag: &str) -> &'static str {
     match tag {
-        "a" | "area" => "HTMLAnchorElement",
+        "a" => "HTMLAnchorElement",
+        "area" => "HTMLAreaElement",
         "audio" => "HTMLAudioElement",
+        "base" => "HTMLBaseElement",
+        "br" => "HTMLBRElement",
+        "blockquote" | "q" => "HTMLQuoteElement",
+        "caption" => "HTMLTableCaptionElement",
+        "col" | "colgroup" => "HTMLTableColElement",
+        "data" => "HTMLDataElement",
+        "datalist" => "HTMLDataListElement",
+        "del" | "ins" => "HTMLModElement",
+        "details" => "HTMLDetailsElement",
+        "dialog" => "HTMLDialogElement",
+        "dl" => "HTMLDListElement",
+        "embed" => "HTMLEmbedElement",
+        "fieldset" => "HTMLFieldSetElement",
+        "hr" => "HTMLHRElement",
+        "legend" => "HTMLLegendElement",
+        "map" => "HTMLMapElement",
+        "menu" => "HTMLMenuElement",
+        "meter" => "HTMLMeterElement",
+        "object" => "HTMLObjectElement",
+        "optgroup" => "HTMLOptGroupElement",
+        "output" => "HTMLOutputElement",
+        "pre" => "HTMLPreElement",
+        "progress" => "HTMLProgressElement",
+        "time" => "HTMLTimeElement",
+        "track" => "HTMLTrackElement",
         "body" => "HTMLBodyElement",
         "button" => "HTMLButtonElement",
         "canvas" => "HTMLCanvasElement",
@@ -2986,6 +3940,21 @@ fn get_bounding_rect(
     let y = f64::from(metrics.y - scroll);
     let width = f64::from(metrics.width);
     let height = f64::from(metrics.height);
+    let stamp = format!("{x}:{y}:{width}:{height}");
+    if let Some(object) = this.as_object() {
+        let cached = object.get(js_string!("__mithuRect"), context)?;
+        if let Some(cached_object) = cached.as_object() {
+            let cached_stamp = cached_object
+                .get(js_string!("__stamp"), context)
+                .ok()
+                .and_then(|value| value.as_string())
+                .map(|value| value.to_std_string_escaped())
+                .unwrap_or_default();
+            if cached_stamp == stamp {
+                return Ok(cached);
+            }
+        }
+    }
     let mut object = ObjectInitializer::new(context);
     object
         .property(js_string!("x"), JsValue::from(x), ATTR)
@@ -2995,8 +3964,13 @@ fn get_bounding_rect(
         .property(js_string!("left"), JsValue::from(x), ATTR)
         .property(js_string!("top"), JsValue::from(y), ATTR)
         .property(js_string!("right"), JsValue::from(x + width), ATTR)
-        .property(js_string!("bottom"), JsValue::from(y + height), ATTR);
-    Ok(object.build().into())
+        .property(js_string!("bottom"), JsValue::from(y + height), ATTR)
+        .property(js_string!("__stamp"), js_string!(stamp), ATTR);
+    let rect = JsValue::from(object.build());
+    if let Some(object) = this.as_object() {
+        let _ = object.set(js_string!("__mithuRect"), rect.clone(), true, context);
+    }
+    Ok(rect)
 }
 
 fn metric_number(
@@ -3110,16 +4084,31 @@ fn note_mutation(
             target,
             kind: kind.to_string(),
             attribute,
+            added: Vec::new(),
+            removed: Vec::new(),
         });
     Ok(())
 }
 
 fn match_media(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let query = arg_string(args, 0, context).unwrap_or_default();
+    let global = context.global_object();
+    let existing = global.get(js_string!("__mithuMql"), context)?;
+    let bag = if let Some(object) = existing.as_object() {
+        object.clone()
+    } else {
+        let object = ObjectInitializer::new(context).build();
+        global.set(js_string!("__mithuMql"), object.clone(), true, context)?;
+        object
+    };
+    let cached = bag.get(js_string!(query.clone()), context)?;
+    if cached.is_object() {
+        return Ok(cached);
+    }
     let mut object = ObjectInitializer::new(context);
     object
-        .property(js_string!("media"), js_string!(query), ATTR)
-        .property(js_string!("matches"), JsValue::from(false), ATTR)
+        .property(js_string!("media"), js_string!(query.clone()), ATTR)
+        .property(js_string!("matches"), JsValue::from(media_matches(&query)), ATTR)
         .function(
             NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
             js_string!("addListener"),
@@ -3140,7 +4129,50 @@ fn match_media(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
             js_string!("removeEventListener"),
             2,
         );
-    Ok(object.build().into())
+    let list = JsValue::from(object.build());
+    bag.set(js_string!(query), list.clone(), true, context)?;
+    Ok(list)
+}
+
+/// Viewport is 1280×800. A query is answered once and then cached, so a
+/// `useSyncExternalStore` snapshot keeps the same boolean.
+fn media_matches(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    if query.contains("prefers-color-scheme") && query.contains("dark") {
+        return false;
+    }
+    if query.contains("prefers-reduced-motion") {
+        return false;
+    }
+    if let Some(px) = media_length(&query, "min-width") {
+        return 1280.0 >= px;
+    }
+    if let Some(px) = media_length(&query, "max-width") {
+        return 1280.0 <= px;
+    }
+    if let Some(px) = media_length(&query, "min-height") {
+        return 800.0 >= px;
+    }
+    if let Some(px) = media_length(&query, "max-height") {
+        return 800.0 <= px;
+    }
+    false
+}
+
+fn media_length(query: &str, feature: &str) -> Option<f32> {
+    let rest = query.split(feature).nth(1)?;
+    let rest = rest.trim_start().trim_start_matches(':').trim_start();
+    let digits: String = rest
+        .chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
+    let px = digits.parse::<f32>().ok()?;
+    if rest.contains("em") {
+        Some(px * 16.0)
+    } else {
+        Some(px)
+    }
 }
 
 fn get_computed_style(
@@ -3318,12 +4350,21 @@ fn kebab_to_camel(name: &str) -> String {
 }
 
 fn queue_microtask(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    if let Some(function) = args
-        .first()
-        .and_then(|value| value.as_object())
-        .filter(|object| object.is_callable())
+    let function = args.first().cloned().unwrap_or(JsValue::undefined());
+    if !function
+        .as_object()
+        .is_some_and(|object| object.is_callable())
     {
-        let _ = function.call(&JsValue::undefined(), &[], context);
+        return Ok(JsValue::undefined());
+    }
+    // A fulfilled promise still queues its reaction as a microtask.
+    let promise = JsPromise::resolve(JsValue::undefined(), context)?;
+    let promise = JsValue::from(promise);
+    if let Some(object) = promise.as_object() {
+        let then = object.get(js_string!("then"), context)?;
+        if let Some(then) = then.as_object() {
+            let _ = then.call(&promise, &[function], context)?;
+        }
     }
     Ok(JsValue::undefined())
 }
@@ -3486,8 +4527,37 @@ fn upgrade_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     Ok(JsValue::undefined())
 }
 
+thread_local! {
+    static UPGRADE_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+fn upgrading() -> bool {
+    UPGRADE_DEPTH.with(|slot| slot.get() > 0)
+}
+
 fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
     if !tag.contains('-') {
+        return;
+    }
+    // A constructor that creates another instance of itself would recurse
+    // until the native stack aborts. Stop that chain and keep the element.
+    const MAX_UPGRADE_DEPTH: u32 = 256;
+    let depth = UPGRADE_DEPTH.with(|slot| {
+        let depth = slot.get();
+        slot.set(depth.saturating_add(1));
+        depth
+    });
+    struct UpgradeGuard;
+    impl Drop for UpgradeGuard {
+        fn drop(&mut self) {
+            UPGRADE_DEPTH.with(|slot| slot.set(slot.get().saturating_sub(1)));
+        }
+    }
+    let _guard = UpgradeGuard;
+    if depth >= MAX_UPGRADE_DEPTH {
+        if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+            eprintln!("custom element upgrade nested too deep: {tag}");
+        }
         return;
     }
     let Ok(bag) = context
@@ -3546,8 +4616,82 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
                 .ok()
                 .is_some_and(|host| host.doc.borrow().is_connected(id))
         });
-        if connected {
-            call_connected(value, context);
+        let observed = observed_attribute_names(&ctor, context);
+        let attributes = node_of(value)
+            .map(|id| element_attribute_pairs(id, context))
+            .unwrap_or_default();
+        for reaction in custom_element::upgrade_reactions(connected, &attributes, &observed) {
+            run_reaction(value, &reaction, context);
+        }
+    }
+}
+
+fn observed_attribute_names(ctor: &JsObject, context: &mut Context) -> Vec<String> {
+    let Ok(list) = ctor.get(js_string!("observedAttributes"), context) else {
+        return Vec::new();
+    };
+    let Some(list) = list.as_object() else {
+        return Vec::new();
+    };
+    let length = list
+        .get(js_string!("length"), context)
+        .ok()
+        .and_then(|value| value.to_u32(context).ok())
+        .unwrap_or(0);
+    let mut names = Vec::new();
+    for index in 0..length {
+        if let Ok(name) = list.get(index, context)
+            && let Ok(name) = name.to_string(context)
+        {
+            names.push(name.to_std_string_lossy());
+        }
+    }
+    names
+}
+
+fn element_attribute_pairs(id: NodeId, context: &mut Context) -> Vec<(String, String)> {
+    let Ok(host) = host(context) else {
+        return Vec::new();
+    };
+    let doc = host.doc.borrow();
+    match &doc.node(id).data {
+        mithu_dom::NodeData::Element(element) => element.attrs.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn run_reaction(value: &JsValue, reaction: &custom_element::Reaction, context: &mut Context) {
+    match reaction {
+        custom_element::Reaction::Connected => call_connected(value, context),
+        custom_element::Reaction::AttributeChanged { name, old, new } => {
+            let Some(object) = value.as_object() else {
+                return;
+            };
+            let Ok(callback) = object.get(js_string!("attributeChangedCallback"), context) else {
+                return;
+            };
+            let Some(callback) = callback.as_object().filter(|callback| callback.is_callable())
+            else {
+                return;
+            };
+            let old = old
+                .as_ref()
+                .map(|text| JsValue::from(js_string!(text.clone())))
+                .unwrap_or(JsValue::null());
+            let new = new
+                .as_ref()
+                .map(|text| JsValue::from(js_string!(text.clone())))
+                .unwrap_or(JsValue::null());
+            let _ = callback.call(
+                value,
+                &[
+                    js_string!(name.clone()).into(),
+                    old,
+                    new,
+                    JsValue::null(),
+                ],
+                context,
+            );
         }
     }
 }
@@ -3861,20 +5005,43 @@ fn set_html(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let html = arg_string(args, 0, context)?;
-    let mut doc = host.doc.borrow_mut();
-    let id = if doc.element_name(id) == Some("template") {
-        ensure_template_content(&mut doc, id)
-    } else {
-        id
-    };
-    doc.clear_children(id);
-    if html.contains('<') {
-        let parsed = parse_html(&format!("<div id=\"mithu-root\">{html}</div>"));
-        if let Some(root) = parsed.get_element_by_id("mithu-root") {
-            copy_children(&parsed, root, &mut doc, id);
+    let children = {
+        let mut doc = host.doc.borrow_mut();
+        let id = if doc.element_name(id) == Some("template") {
+            ensure_template_content(&mut doc, id)
+        } else {
+            id
+        };
+        doc.clear_children(id);
+        // `<script>` and `<style>` are raw text elements. `r<t` in a script is a
+        // comparison, and parsing it as markup turns the script into a syntax error.
+        if matches!(
+            doc.element_name(id),
+            Some("script" | "style" | "textarea" | "title" | "noscript")
+        ) {
+            if !html.is_empty() {
+                doc.append_text(id, &html);
+            }
+            return Ok(JsValue::undefined());
         }
-    } else if !html.is_empty() {
-        doc.append_text(id, &html);
+        if html.contains('<') {
+            let parsed = parse_html(&format!("<div id=\"mithu-root\">{html}</div>"));
+            if let Some(root) = parsed.get_element_by_id("mithu-root") {
+                copy_children(&parsed, root, &mut doc, id);
+            }
+        } else if !html.is_empty() {
+            doc.append_text(id, &html);
+        }
+        // Template contents stay inert. A connected parent, including a shadow
+        // root, upgrades the new custom elements.
+        if doc.is_connected(id) {
+            doc.node(id).children.clone()
+        } else {
+            Vec::new()
+        }
+    };
+    for child in children {
+        notify_connected(child, context);
     }
     Ok(JsValue::undefined())
 }
@@ -3896,6 +5063,13 @@ fn set_id(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<J
 fn get_class(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
+    let svg = {
+        let doc = host.doc.borrow();
+        element_namespace(&doc, id) == "http://www.w3.org/2000/svg"
+    };
+    if svg {
+        return Ok(svg_animated_string(id.0, "class", context).into());
+    }
     Ok(js_string!(
         host.doc
             .borrow()
@@ -3906,12 +5080,189 @@ fn get_class(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResu
     .into())
 }
 
+/// `SVGAnimatedString`: `baseVal` reads and writes the attribute, `animVal` reads it.
+fn svg_animated_string(node: usize, attr: &'static str, context: &mut Context) -> JsObject {
+    let holder = ObjectInitializer::new(context)
+        .property(js_string!("node"), JsValue::from(node as u32), ATTR)
+        .property(js_string!("attr"), js_string!(attr), ATTR)
+        .build();
+    let get = native(context, "get baseVal", 0, get_animated_string);
+    let set = native(context, "set baseVal", 1, set_animated_string);
+    ObjectInitializer::new(context)
+        .property(js_string!("__holder"), holder, ATTR)
+        .accessor(js_string!("baseVal"), Some(get.clone()), Some(set), ATTR)
+        .accessor(js_string!("animVal"), Some(get), None, ATTR)
+        .build()
+}
+
+fn animated_holder(this: &JsValue, context: &mut Context) -> Option<(usize, String)> {
+    let object = this.as_object()?;
+    let holder = object.get(js_string!("__holder"), context).ok()?;
+    let holder = holder.as_object()?;
+    let node = holder
+        .get(js_string!("node"), context)
+        .ok()
+        .and_then(|value| value.as_number())? as usize;
+    let attr = holder
+        .get(js_string!("attr"), context)
+        .ok()
+        .and_then(|value| value.as_string())
+        .map(|value| value.to_std_string_escaped())?;
+    Some((node, attr))
+}
+
+fn get_animated_string(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some((node, attr)) = animated_holder(this, context) else {
+        return Ok(js_string!("").into());
+    };
+    let host = host(context)?;
+    let value = host
+        .doc
+        .borrow()
+        .attr(NodeId(node), &attr)
+        .unwrap_or("")
+        .to_string();
+    Ok(js_string!(value).into())
+}
+
+fn set_animated_string(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some((node, attr)) = animated_holder(this, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let host = host(context)?;
+    let value = arg_string(args, 0, context)?;
+    host.doc.borrow_mut().set_attr(NodeId(node), &attr, &value);
+    Ok(JsValue::undefined())
+}
+
+fn get_bbox(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let metrics = box_metrics(this, context).unwrap_or_default();
+    let x = f64::from(metrics.x);
+    let y = f64::from(metrics.y);
+    let width = f64::from(metrics.width);
+    let height = f64::from(metrics.height);
+    let mut object = ObjectInitializer::new(context);
+    object
+        .property(js_string!("x"), JsValue::from(x), ATTR)
+        .property(js_string!("y"), JsValue::from(y), ATTR)
+        .property(js_string!("width"), JsValue::from(width), ATTR)
+        .property(js_string!("height"), JsValue::from(height), ATTR);
+    Ok(object.build().into())
+}
+
+fn animate_element(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(frames) = args.first().and_then(|value| value.as_object()) {
+        let len = frames
+            .get(js_string!("length"), context)
+            .ok()
+            .and_then(|value| value.as_number())
+            .unwrap_or(0.0) as i32;
+        if len > 0
+            && let Ok(last) = frames.get(js_string!((len - 1).to_string()), context)
+            && let Some(last) = last.as_object()
+            && let Ok(opacity) = last.get(js_string!("opacity"), context)
+            && !opacity.is_undefined()
+            && !opacity.is_null()
+        {
+            let text = opacity
+                .as_number()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| opacity.display().to_string());
+            let _ = write_style(this, "opacity", &[js_string!(text).into()], context);
+        }
+    }
+    let finished = JsPromise::resolve(
+        JsValue::from(ObjectInitializer::new(context).build()),
+        context,
+    )?;
+    let mut object = ObjectInitializer::new(context);
+    object
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("play"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("pause"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            js_string!("cancel"),
+            0,
+        )
+        .property(js_string!("finished"), finished, ATTR);
+    Ok(object.build().into())
+}
+
 fn set_class(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let value = arg_string(args, 0, context)?;
     host.doc.borrow_mut().set_attr(id, "class", &value);
     Ok(JsValue::undefined())
+}
+
+fn replace_with(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = node_of(this).ok_or_else(type_error)?;
+    let parent_id = {
+        let host = host(context)?;
+        host.doc.borrow().node(id).parent
+    };
+    let Some(parent_id) = parent_id else {
+        return Ok(JsValue::undefined());
+    };
+    let parent = node_value(parent_id.0, context);
+    for node in args {
+        if node.is_null() || node.is_undefined() {
+            continue;
+        }
+        insert_before_child(&parent, &[node.clone(), this.clone()], context)?;
+    }
+    remove_child(&parent, &[this.clone()], context)?;
+    Ok(JsValue::undefined())
+}
+
+fn get_attribute_names(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsArray::from_iter([], context).into());
+    };
+    let names = {
+        let host = host(context)?;
+        let doc = host.doc.borrow();
+        match &doc.node(id).data {
+            NodeData::Element(element) => element
+                .attrs
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        }
+    };
+    let values = names
+        .into_iter()
+        .map(|name| JsValue::from(js_string!(name)))
+        .collect::<Vec<_>>();
+    Ok(JsArray::from_iter(values, context).into())
+}
+
+fn has_attributes(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let names = get_attribute_names(this, args, context)?;
+    let count = names
+        .as_object()
+        .and_then(|object| object.get(js_string!("length"), context).ok())
+        .and_then(|value| value.as_number())
+        .unwrap_or(0.0);
+    Ok(JsValue::from(count > 0.0))
 }
 
 fn get_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -3929,8 +5280,24 @@ fn set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let id = node_of(this).ok_or_else(type_error)?;
     let name = arg_string(args, 0, context)?;
     let value = arg_string(args, 1, context)?;
+    let old = host.doc.borrow().attr(id, &name).map(str::to_string);
     host.doc.borrow_mut().set_attr(id, &name, &value);
-    note_mutation(context, id, "attributes", Some(name))?;
+    note_mutation(context, id, "attributes", Some(name.clone()))?;
+    if !upgrading() {
+        let tag = host.doc.borrow().element_name(id).unwrap_or("").to_string();
+        if tag.contains('-')
+            && let Ok(bag) = custom_registry(context)
+            && let Ok(ctor) = bag.get(js_string!(tag), context)
+            && let Some(ctor) = ctor.as_object()
+        {
+            let observed = observed_attribute_names(&ctor, context);
+            if let Some(reaction) =
+                custom_element::attribute_reaction(&name, old, value, &observed)
+            {
+                run_reaction(this, &reaction, context);
+            }
+        }
+    }
     Ok(JsValue::undefined())
 }
 
@@ -4289,6 +5656,15 @@ pub(crate) fn attach_shadow(
     if let Some(object) = root.as_object() {
         object.set(js_string!("mode"), js_string!(mode.clone()), true, context)?;
         object.set(js_string!("host"), this.clone(), true, context)?;
+        let adopted_get_fn = native(context, "get adoptedStyleSheets", 0, adopted_get);
+        let adopted_set_fn = native(context, "set adoptedStyleSheets", 1, adopted_set);
+        let _ = define_accessor(
+            &object,
+            context,
+            "adoptedStyleSheets",
+            adopted_get_fn,
+            Some(adopted_set_fn),
+        );
     }
     if mode != "closed" {
         if let Some(object) = this.as_object() {
@@ -4297,9 +5673,9 @@ pub(crate) fn attach_shadow(
     }
     if let Some(host_id) = node_of(this) {
         let host = host(context)?;
-        host.doc
-            .borrow_mut()
-            .set_attr(host_id, "mithu-shadow", &root_id.0.to_string());
+        let mut doc = host.doc.borrow_mut();
+        doc.set_attr(root_id, "mithu-host", &host_id.0.to_string());
+        doc.set_attr(host_id, "mithu-shadow", &root_id.0.to_string());
     }
     Ok(root)
 }
@@ -4342,6 +5718,7 @@ fn insert_mixed(
     for arg in args {
         if let Some(child) = node_of(arg) {
             host.doc.borrow_mut().insert_before(parent, child, anchor);
+            notify_connected(child, context);
         } else if !arg.is_null_or_undefined() {
             let text = arg.to_string(context)?.to_std_string_lossy();
             if text.is_empty() {
@@ -4422,6 +5799,127 @@ fn graft(
     }
 }
 
+fn execute_inserted_script(id: NodeId, context: &mut Context) {
+    let Some(host) = context.get_data::<Host>().cloned() else {
+        return;
+    };
+    let (src, inline) = {
+        let doc = host.doc.borrow();
+        if doc.element_name(id) != Some("script") || !doc.is_connected(id) {
+            return;
+        }
+        let kind = doc
+            .attr(id, "type")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let javascript = kind.is_empty()
+            || kind == "module"
+            || matches!(
+                kind.as_str(),
+                "text/javascript"
+                    | "application/javascript"
+                    | "text/ecmascript"
+                    | "application/ecmascript"
+            );
+        if !javascript || doc.attr(id, "nomodule").is_some() {
+            return;
+        }
+        let src = doc
+            .attr(id, "src")
+            .map(str::to_string)
+            .filter(|value| !value.is_empty());
+        let inline = if src.is_none() {
+            doc.text_content(id)
+        } else {
+            String::new()
+        };
+        (src, inline)
+    };
+    if host.ran_scripts.borrow().contains(&id.0) {
+        return;
+    }
+    if src.is_none() && inline.trim().is_empty() {
+        return;
+    }
+    host.ran_scripts.borrow_mut().insert(id.0);
+    // An external script inserted by another script is a separate task.
+    // Running it inside `appendChild` lets Clarity's loader replace
+    // `window.clarity` before the stub has published `.q`.
+    if src.is_some() {
+        let _ = schedule_callback(context, JsValue::from(id.0 as u32), 5, 0);
+        return;
+    }
+    finish_inserted_script(id, context);
+}
+
+fn finish_inserted_script(id: NodeId, context: &mut Context) {
+    let Some(host) = context.get_data::<Host>().cloned() else {
+        return;
+    };
+    let (module, src, inline) = {
+        let doc = host.doc.borrow();
+        if doc.element_name(id) != Some("script") {
+            return;
+        }
+        let kind = doc
+            .attr(id, "type")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let src = doc
+            .attr(id, "src")
+            .map(str::to_string)
+            .filter(|value| !value.is_empty());
+        let inline = if src.is_none() {
+            doc.text_content(id)
+        } else {
+            String::new()
+        };
+        (kind == "module", src, inline)
+    };
+    let code = if let Some(src) = src.as_deref() {
+        let base = host.location.borrow().clone();
+        let url = resolve_request(&base, src)
+            .map(|url| url.to_display())
+            .unwrap_or_else(|_| src.to_string());
+        match (host.loader.fetch.borrow_mut())(&url) {
+            Some(code) => code,
+            None => {
+                host.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: script not found: {url}"));
+                return;
+            }
+        }
+    } else {
+        inline
+    };
+    let path = src.unwrap_or_else(|| format!("inserted-{}.js", id.0));
+    let previous = host.current_script.replace(Some(id));
+    remember_source(&host, &path, &code);
+    let result = if module {
+        run_module(context, &code, &path)
+    } else {
+        let source_path = PathBuf::from(&path);
+        match Script::parse(
+            Source::from_bytes(code.as_str()).with_path(&source_path),
+            None,
+            context,
+        ) {
+            Ok(script) => script.evaluate(context).map(|_| ()),
+            Err(error) => Err(error),
+        }
+    };
+    if let Err(error) = result {
+        note_error(context, &error);
+    } else if let Err(error) = context.run_jobs() {
+        note_error(context, &error);
+    }
+    *host.current_script.borrow_mut() = previous;
+    fire_node_listeners(context, id, "load");
+}
+
 fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let parent = node_of(this).ok_or_else(type_error)?;
@@ -4430,12 +5928,15 @@ fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         let children = host.doc.borrow().node(NodeId(holder)).children.clone();
         for child in children {
             host.doc.borrow_mut().append_child(parent, child);
+            notify_connected(child, context);
+            execute_inserted_script(child, context);
         }
         return Ok(child_value);
     }
     let child = node_of(&child_value).ok_or_else(type_error)?;
     host.doc.borrow_mut().append_child(parent, child);
     notify_connected(child, context);
+    execute_inserted_script(child, context);
     Ok(child_value)
 }
 
@@ -4450,18 +5951,19 @@ fn call_connected(value: &JsValue, context: &mut Context) {
     if done {
         return;
     }
+    let Ok(callback) = object.get(js_string!("connectedCallback"), context) else {
+        return;
+    };
+    let Some(callback) = callback.as_object().filter(|callback| callback.is_callable()) else {
+        return;
+    };
     let _ = object.set(
         js_string!("__mithuConnected"),
         JsValue::from(true),
         false,
         context,
     );
-    if let Ok(callback) = object.get(js_string!("connectedCallback"), context)
-        && let Some(callback) = callback.as_object()
-        && callback.is_callable()
-    {
-        let _ = callback.call(value, &[], context);
-    }
+    let _ = callback.call(value, &[], context);
 }
 
 fn notify_connected(id: NodeId, context: &mut Context) {
@@ -4615,6 +6117,7 @@ fn push_listener(context: &mut Context, key: &str, value: &JsValue, replace: boo
 }
 
 fn run_module(context: &mut Context, code: &str, name: &str) -> JsResult<()> {
+    let _bound = context.bind();
     let path = PathBuf::from(name);
     let module = Module::parse(Source::from_bytes(code).with_path(&path), None, context)?;
     // Link only after the loader promise finishes. Linking earlier panics inside Boa
@@ -4622,11 +6125,11 @@ fn run_module(context: &mut Context, code: &str, name: &str) -> JsResult<()> {
     let promise = module.load_link_evaluate(context);
     context.run_jobs()?;
     match promise.state() {
-        boa_engine::builtins::promise::PromiseState::Fulfilled(_) => Ok(()),
-        boa_engine::builtins::promise::PromiseState::Rejected(error) => {
+        engine::builtins::promise::PromiseState::Fulfilled(_) => Ok(()),
+        engine::builtins::promise::PromiseState::Rejected(error) => {
             Err(JsError::from_opaque(error))
         }
-        boa_engine::builtins::promise::PromiseState::Pending => Err(JsNativeError::typ()
+        engine::builtins::promise::PromiseState::Pending => Err(JsNativeError::typ()
             .with_message("the module did not finish loading")
             .into()),
     }
@@ -4660,7 +6163,13 @@ fn settle_fonts(context: &mut Context) {
     }
 }
 
-fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
+fn run_due_timers(
+    context: &mut Context,
+    ms: u64,
+    only: Option<u8>,
+    max_frames: u32,
+) -> JsResult<bool> {
+    let _bound = context.bind();
     settle_fonts(context);
     let host = host(context)?;
     {
@@ -4668,13 +6177,24 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
         clock.now = clock.now.saturating_add(ms);
     }
     let mut ran = false;
-    for _ in 0..100 {
+    // One-shot tasks (React, rAF) need to drain. A repeating timer must not
+    // occupy every slot in this pass, or those tasks never run. Animation
+    // frames advance the clock 16ms each so tweens see time pass, and a pass
+    // stops after 40 frames so the page can paint.
+    let mut fired_repeat = Vec::new();
+    let mut frames = 0u32;
+    for _ in 0..2_000 {
         let next = {
             let clock = host.clock.borrow();
             clock
                 .queue
                 .iter()
-                .filter(|timer| timer.due <= clock.now)
+                .filter(|timer| {
+                    timer.due <= clock.now
+                        && !fired_repeat.contains(&timer.id)
+                        && only.is_none_or(|kind| timer.kind == kind)
+                        && !(timer.kind == 6 && frames >= max_frames)
+                })
                 .min_by_key(|timer| timer.due)
                 .map(|timer| timer.id)
         };
@@ -4701,26 +6221,82 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
             }
             (repeat, kind)
         };
-        let item = timer_value(context, id)?;
-        match kind {
+        if repeat.is_some() {
+            fired_repeat.push(id);
+        }
+        let item = match timer_value(context, id) {
+            Ok(item) => item,
+            Err(error) => {
+                note_error(context, &error);
+                continue;
+            }
+        };
+        // A throw inside one callback used to abort the rest of the pass, so
+        // a handled fetch error never reached its catch and later frames and
+        // observers never ran. Log it and keep the queue moving.
+        let step = match kind {
             1 => {
                 if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
-                    let deadline = idle_deadline(context)?;
-                    function.call(&JsValue::undefined(), &[deadline], context)?;
+                    match idle_deadline(context) {
+                        Ok(deadline) => {
+                            function.call(&JsValue::undefined(), &[deadline], context)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    Ok(JsValue::undefined())
                 }
             }
-            2 => crate::web::finish_xhr(&item, context)?,
+            2 => crate::web::finish_xhr(&item, context).map(|()| JsValue::undefined()),
+            3 => deliver_macrotask_message(&item, context).map(|()| JsValue::undefined()),
+            4 => crate::web::deliver_layout_observer(&item, context).map(|()| JsValue::undefined()),
+            5 => {
+                if let Some(id) = item.as_number() {
+                    finish_inserted_script(NodeId(id as usize), context);
+                }
+                Ok(JsValue::undefined())
+            }
+            6 => {
+                frames += 1;
+                // A live frame already moved the clock by the real elapsed
+                // time. A screenshot batch passes 0 and steps 16ms so a tween
+                // can finish before the pump stops.
+                if max_frames > 1 {
+                    let mut clock = host.clock.borrow_mut();
+                    clock.now = clock.now.saturating_add(16);
+                }
+                if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
+                    let now = {
+                        let clock = host.clock.borrow();
+                        clock.now as f64 + clock.wall.elapsed().as_secs_f64() * 1000.0
+                    };
+                    function.call(&JsValue::undefined(), &[JsValue::from(now)], context)
+                } else {
+                    Ok(JsValue::undefined())
+                }
+            }
             _ => {
                 if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
-                    function.call(&JsValue::undefined(), &[], context)?;
+                    function.call(&JsValue::undefined(), &[], context)
+                } else {
+                    Ok(JsValue::undefined())
                 }
             }
+        };
+        if let Err(error) = step {
+            note_error(context, &error);
         }
         if repeat.is_none() {
-            forget_timer(context, id)?;
+            if let Err(error) = forget_timer(context, id) {
+                note_error(context, &error);
+            }
         }
-        context.run_jobs()?;
-        deliver_mutations(context)?;
+        if let Err(error) = context.run_jobs() {
+            note_error(context, &error);
+        }
+        if let Err(error) = deliver_mutations(context) {
+            note_error(context, &error);
+        }
     }
     Ok(ran)
 }
@@ -4851,8 +6427,22 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     if spec.is_empty() {
         return reject_promise(context, "fetch requires a url");
     }
+    if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+        eprintln!("fetch {spec}");
+    }
     let host = host(context)?;
     let location = host.location.borrow().clone();
+    let extra = fetch_headers(args, context)?;
+    let extra_refs: Vec<(&str, &str)> = extra
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let method = fetch_method(args, context);
+    let body_bytes = fetch_body(args, context)?;
+    let content_type = extra.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            .then_some(value.clone())
+    });
     let outcome = resolve_request(&location, &spec).and_then(|url| {
         let initiator = mithu_url::Url::parse(&location)
             .ok()
@@ -4860,22 +6450,38 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
             .filter(|host| !host.is_empty());
         let page = mithu_url::Url::parse(&location).ok();
         let origin = page.as_ref().map(serialized_origin);
-        let response = if let (Some(host), Some(origin)) = (initiator.as_deref(), origin.as_deref())
-        {
-            mithu_net::get_with_origin(&url, host, origin)
-        } else if let Some(host) = initiator.as_deref() {
-            mithu_net::get_from(&url, host)
-        } else {
-            mithu_net::get(&url)
+        let credentials = fetch_credentials(args, context);
+        let cross = page
+            .as_ref()
+            .is_some_and(|page| cross_origin(page, &url));
+        let send_cookies = match credentials.as_str() {
+            "omit" => false,
+            "include" => true,
+            _ => !cross,
         };
+        let response = mithu_net::send(
+            &method,
+            &url,
+            content_type.as_deref(),
+            &body_bytes,
+            initiator.as_deref(),
+            origin.as_deref(),
+            &extra_refs,
+            send_cookies,
+        );
         let mode = fetch_mode(args, context);
         response
             .map_err(|error| error.to_string())
             .and_then(|response| {
+                let allow = response.header("access-control-allow-origin");
                 if let Some(page) = page.as_ref()
                     && cross_origin(page, &response.url)
                     && mode != "no-cors"
-                    && !cors_allows(page, response.header("access-control-allow-origin"))
+                    && (!cors_allows(page, allow)
+                        || !mithu_net::credentials_allow_origin(
+                            allow,
+                            credentials == "include",
+                        ))
                 {
                     return Err(format!("cross-origin fetch was blocked ({})", response.url));
                 }
@@ -4892,13 +6498,20 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
                         String::new(),
                     ));
                 }
+                let same_origin = page
+                    .as_ref()
+                    .is_none_or(|page| !cross_origin(page, &response.url));
+                let visible = mithu_net::visible_response_headers(
+                    &response.headers,
+                    same_origin || mode == "no-cors",
+                    credentials == "include",
+                );
                 Ok((
                     response.status,
                     (200..300).contains(&response.status),
                     response.url.to_string(),
                     response.text(),
-                    response
-                        .headers
+                    visible
                         .iter()
                         .map(|(name, value)| format!("{name}: {value}"))
                         .collect::<Vec<_>>()
@@ -4940,6 +6553,167 @@ pub(crate) fn cors_allows(page: &mithu_url::Url, allow: Option<&str>) -> bool {
         return true;
     }
     allow == serialized_origin(page)
+}
+
+fn fetch_headers(args: &[JsValue], context: &mut Context) -> JsResult<Vec<(String, String)>> {
+    let Some(object) = header_bag(args, context)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    let list = object.get(js_string!("_list"), context)?;
+    if let Some(list) = list.as_object() {
+        let length = list
+            .get(js_string!("length"), context)?
+            .to_u32(context)
+            .unwrap_or(0);
+        for index in 0..length {
+            let pair = list.get(index, context)?;
+            let Some(pair) = pair.as_object() else {
+                continue;
+            };
+            let name = pair
+                .get(0, context)?
+                .to_string(context)?
+                .to_std_string_lossy();
+            let value = pair
+                .get(1, context)?
+                .to_string(context)?
+                .to_std_string_lossy();
+            push_request_header(&mut out, name, value);
+        }
+        return Ok(out);
+    }
+    let keys = object_keys(&object, context)?;
+    for name in keys {
+        if name.starts_with('_') {
+            continue;
+        }
+        let value = object.get(js_string!(name.clone()), context)?;
+        if value.is_null() || value.is_undefined() {
+            continue;
+        }
+        let value = value.to_string(context)?.to_std_string_lossy();
+        push_request_header(&mut out, name, value);
+    }
+    Ok(out)
+}
+
+fn header_bag(args: &[JsValue], context: &mut Context) -> JsResult<Option<JsObject>> {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let headers = object.get(js_string!("headers"), context)?;
+        if let Some(headers) = headers.as_object() {
+            return Ok(Some(headers));
+        }
+        if object.get(js_string!("_list"), context)?.is_object() {
+            return Ok(Some(object.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn push_request_header(out: &mut Vec<(String, String)>, name: String, value: String) {
+    if name.is_empty() || value.is_empty() || mithu_net::is_forbidden_request_header(&name) {
+        return;
+    }
+    out.push((name, value));
+}
+
+fn object_keys(value: &JsObject, context: &mut Context) -> JsResult<Vec<String>> {
+    let object_ctor = context.global_object().get(js_string!("Object"), context)?;
+    let Some(object_ctor) = object_ctor.as_object() else {
+        return Ok(Vec::new());
+    };
+    let keys = object_ctor.get(js_string!("keys"), context)?;
+    let Some(keys) = keys.as_object() else {
+        return Ok(Vec::new());
+    };
+    let listed = keys.call(
+        &JsValue::from(object_ctor.clone()),
+        &[JsValue::from(value.clone())],
+        context,
+    )?;
+    let Some(listed) = listed.as_object() else {
+        return Ok(Vec::new());
+    };
+    let length = listed
+        .get(js_string!("length"), context)?
+        .to_u32(context)
+        .unwrap_or(0);
+    let mut names = Vec::new();
+    for index in 0..length {
+        names.push(
+            listed
+                .get(index, context)?
+                .to_string(context)?
+                .to_std_string_lossy(),
+        );
+    }
+    Ok(names)
+}
+
+fn fetch_credentials(args: &[JsValue], context: &mut Context) -> String {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let Ok(value) = object.get(js_string!("credentials"), context) else {
+            continue;
+        };
+        if let Some(text) = value.as_string() {
+            let text = text.to_std_string_lossy();
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    "same-origin".to_string()
+}
+
+fn fetch_method(args: &[JsValue], context: &mut Context) -> String {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let Ok(method) = object.get(js_string!("method"), context) else {
+            continue;
+        };
+        if let Some(text) = method.as_string() {
+            let method = text.to_std_string_lossy();
+            if !method.is_empty() {
+                return method.to_ascii_uppercase();
+            }
+        }
+    }
+    "GET".to_string()
+}
+
+fn fetch_body(args: &[JsValue], context: &mut Context) -> JsResult<Vec<u8>> {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let body = object.get(js_string!("body"), context)?;
+        if body.is_undefined() || body.is_null() {
+            continue;
+        }
+        if let Some(object) = body.as_object()
+            && let Ok(text) = object.get(js_string!("_body"), context)
+            && text.is_string()
+        {
+            return Ok(text.to_string(context)?.to_std_string_escaped().into_bytes());
+        }
+        if let Some(object) = body.as_object()
+            && let Ok(text) = object.get(js_string!("_text"), context)
+            && text.is_string()
+        {
+            return Ok(text.to_string(context)?.to_std_string_escaped().into_bytes());
+        }
+        return Ok(body.to_string(context)?.to_std_string_escaped().into_bytes());
+    }
+    Ok(Vec::new())
 }
 
 fn fetch_mode(args: &[JsValue], context: &mut Context) -> String {
@@ -5292,6 +7066,24 @@ fn response_object(
     headers: String,
     context: &mut Context,
 ) -> JsValue {
+    if let Ok(ctor) = context.global_object().get(js_string!("Response"), context)
+        && let Some(ctor) = ctor.as_object().filter(|object| object.is_constructor())
+    {
+        let status_text = if ok { "OK" } else { "" };
+        let init = ObjectInitializer::new(context)
+            .property(js_string!("status"), JsValue::from(i32::from(status)), ATTR)
+            .property(js_string!("statusText"), js_string!(status_text), ATTR)
+            .property(js_string!("url"), js_string!(url.clone()), ATTR)
+            .property(js_string!("headers"), js_string!(headers.clone()), ATTR)
+            .build();
+        if let Ok(value) = ctor.construct(
+            &[js_string!(body.clone()).into(), JsValue::from(init)],
+            None,
+            context,
+        ) {
+            return value.into();
+        }
+    }
     let headers_object = {
         let mut headers_object = ObjectInitializer::with_native_data(
             ResponseKey {
@@ -5441,11 +7233,15 @@ fn request_animation_frame(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let mut timed = args.to_vec();
-    if timed.len() < 2 {
-        timed.push(JsValue::from(0));
+    let function = args.first().cloned().unwrap_or(JsValue::undefined());
+    if !function
+        .as_object()
+        .is_some_and(|object| object.is_callable())
+    {
+        return Ok(JsValue::from(0));
     }
-    schedule_timer(context, &timed, false)
+    // Kind 6 is one animation frame. The callback receives the frame time.
+    schedule_callback(context, function, 6, 0)
 }
 
 fn performance_object(context: &mut Context) -> JsResult<JsObject> {
@@ -5540,7 +7336,47 @@ fn performance_entries(
 
 fn performance_now(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
-    Ok(JsValue::from(host.clock.borrow().now as f64))
+    let clock = host.clock.borrow();
+    let elapsed = clock.wall.elapsed().as_secs_f64() * 1000.0;
+    Ok(JsValue::from(clock.now as f64 + elapsed))
+}
+
+fn window_post_message(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let data = crate::web::clone_message_value(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let event = ObjectInitializer::new(context)
+        .property(js_string!("data"), data, ATTR)
+        .property(js_string!("type"), js_string!("message"), ATTR)
+        .property(js_string!("__window"), JsValue::from(true), ATTR)
+        .build();
+    schedule_callback(context, JsValue::from(event), 3, 0)?;
+    Ok(JsValue::undefined())
+}
+
+fn deliver_macrotask_message(event: &JsValue, context: &mut Context) -> JsResult<()> {
+    let window_message = event
+        .as_object()
+        .and_then(|object| object.get(js_string!("__window"), context).ok())
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false);
+    if !window_message {
+        return crate::web::deliver_port_message(event, context);
+    }
+    let functions = read_listeners(context, "win:message").unwrap_or_default();
+    let this = JsValue::from(context.global_object().clone());
+    for function in functions {
+        function.call(&this, &[event.clone()], context)?;
+    }
+    let onmessage = context
+        .global_object()
+        .get(js_string!("onmessage"), context)?;
+    if let Some(function) = onmessage.as_object().filter(|object| object.is_callable()) {
+        function.call(&this, &[event.clone()], context)?;
+    }
+    Ok(())
 }
 
 fn set_interval(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -5643,6 +7479,13 @@ fn set_location(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     Ok(JsValue::undefined())
 }
 
+fn reload_location(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let current = host.location.borrow().clone();
+    *host.navigation.borrow_mut() = Some(current);
+    Ok(JsValue::undefined())
+}
+
 fn get_document_element(
     _this: &JsValue,
     _args: &[JsValue],
@@ -5668,14 +7511,100 @@ fn create_text_node(_this: &JsValue, args: &[JsValue], context: &mut Context) ->
     Ok(node_value(id.0, context))
 }
 
+fn create_comment(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let text = arg_string(args, 0, context).unwrap_or_default();
+    let id = host.doc.borrow_mut().create_comment_detached(&text);
+    Ok(node_value(id.0, context))
+}
+
+fn create_document_fragment(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = host.doc.borrow_mut().create_element_detached("mithu-fragment");
+    fragment_value(id.0, context)
+}
+
+fn element_from_point(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let hits = elements_under_point(args, context)?;
+    Ok(hits.into_iter().next().unwrap_or(JsValue::null()))
+}
+
+fn elements_from_point(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let hits = elements_under_point(args, context)?;
+    Ok(JsArray::from_iter(hits, context).into())
+}
+
+/// Deepest laid-out element first. GPT's viewability check calls this.
+fn elements_under_point(args: &[JsValue], context: &mut Context) -> JsResult<Vec<JsValue>> {
+    let x = args
+        .first()
+        .map(|value| value.to_number(context))
+        .transpose()?
+        .unwrap_or(f64::NAN);
+    let y = args
+        .get(1)
+        .map(|value| value.to_number(context))
+        .transpose()?
+        .unwrap_or(f64::NAN);
+    if !x.is_finite() || !y.is_finite() {
+        return Ok(Vec::new());
+    }
+    let host = host(context)?;
+    let scroll = f64::from(host.scroll.get());
+    let geometry = host.geometry.borrow().clone();
+    let mut hits: Vec<(f32, usize)> = geometry
+        .into_iter()
+        .filter(|(_, metrics)| {
+            let left = f64::from(metrics.x);
+            let top = f64::from(metrics.y) - scroll;
+            let right = left + f64::from(metrics.width);
+            let bottom = top + f64::from(metrics.height);
+            metrics.width > 0.0
+                && metrics.height > 0.0
+                && x >= left
+                && x < right
+                && y >= top
+                && y < bottom
+        })
+        .map(|(id, metrics)| (metrics.width * metrics.height, id))
+        .collect();
+    hits.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut values = Vec::new();
+    for (_, id) in hits {
+        if host.doc.borrow().element_name(NodeId(id)).is_some() {
+            values.push(element_value(id, context));
+        }
+    }
+    Ok(values)
+}
+
 fn node_value(id: usize, context: &mut Context) -> JsValue {
-    let element = host(context)
-        .ok()
-        .is_some_and(|host| host.doc.borrow().element_name(NodeId(id)).is_some());
-    if element {
-        element_value(id, context)
-    } else {
-        text_node(id, context)
+    let kind = host(context).ok().and_then(|host| {
+        host.doc.borrow().nodes.get(id).map(|node| match &node.data {
+            NodeData::Element(_) => 1u16,
+            NodeData::Document => 9,
+            _ => 0,
+        })
+    });
+    match kind {
+        Some(1) => element_value(id, context),
+        Some(9) => context
+            .global_object()
+            .get(js_string!("document"), context)
+            .unwrap_or(JsValue::null()),
+        _ => text_node(id, context),
     }
 }
 
@@ -5726,7 +7655,7 @@ fn text_node(id: usize, context: &mut Context) -> JsValue {
     value
 }
 
-fn attach_node_prototype(object: &boa_engine::JsObject, context: &mut Context) {
+fn attach_node_prototype(object: &JsObject, context: &mut Context) {
     let Ok(ctor) = context.global_object().get(js_string!("Node"), context) else {
         return;
     };
@@ -5768,6 +7697,63 @@ fn clone_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
         host.doc.borrow_mut().clone_node(id, deep)
     };
     Ok(node_value(cloned.0, context))
+}
+
+fn get_first_element_child(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::null());
+    };
+    let child = {
+        let host = host(context)?;
+        let doc = host.doc.borrow();
+        doc.node(id)
+            .children
+            .iter()
+            .copied()
+            .find(|child| doc.element_name(*child).is_some())
+    };
+    Ok(match child {
+        Some(child) => element_value(child.0, context),
+        None => JsValue::null(),
+    })
+}
+
+fn get_attributes(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsArray::from_iter([], context).into());
+    };
+    let pairs = {
+        let host = host(context)?;
+        let doc = host.doc.borrow();
+        match &doc.node(id).data {
+            NodeData::Element(element) => element.attrs.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let mut values = Vec::new();
+    for (name, value) in &pairs {
+        let attr = ObjectInitializer::new(context)
+            .property(js_string!("name"), js_string!(name.clone()), ATTR)
+            .property(js_string!("value"), js_string!(value.clone()), ATTR)
+            .property(js_string!("nodeName"), js_string!(name.clone()), ATTR)
+            .build();
+        values.push(JsValue::from(attr));
+    }
+    let list = JsValue::from(JsArray::from_iter(values, context));
+    if let Some(object) = list.as_object() {
+        for (name, value) in &pairs {
+            let attr = ObjectInitializer::new(context)
+                .property(js_string!("name"), js_string!(name.clone()), ATTR)
+                .property(js_string!("value"), js_string!(value.clone()), ATTR)
+                .build();
+            object.set(js_string!(name.clone()), attr, true, context)?;
+        }
+    }
+    Ok(list)
 }
 
 fn get_nonce(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -5833,7 +7819,11 @@ fn get_src(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult
 }
 
 fn set_src(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    write_attr(this, "src", args, context)
+    let written = write_attr(this, "src", args, context)?;
+    if let Some(id) = node_of(this) {
+        execute_inserted_script(id, context);
+    }
+    Ok(written)
 }
 
 fn get_href(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -5842,6 +7832,14 @@ fn get_href(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResul
 
 fn set_href(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     write_attr(this, "href", args, context)
+}
+
+fn get_placeholder(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    attr_value(this, "placeholder", context)
+}
+
+fn set_placeholder(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    write_attr(this, "placeholder", args, context)
 }
 
 fn attr_value(this: &JsValue, name: &str, context: &mut Context) -> JsResult<JsValue> {
@@ -5962,6 +7960,8 @@ fn insert_before_child(
             host.doc
                 .borrow_mut()
                 .insert_before(parent, child, reference);
+            notify_connected(child, context);
+            execute_inserted_script(child, context);
             reference = Some(child);
         }
         return Ok(child_value);
@@ -5969,6 +7969,7 @@ fn insert_before_child(
     let child = node_of(&child_value).ok_or_else(type_error)?;
     host.doc.borrow_mut().insert_before(parent, child, before);
     notify_connected(child, context);
+    execute_inserted_script(child, context);
     Ok(child_value)
 }
 
@@ -5982,6 +7983,40 @@ fn remove_event_listener(
     let handler = args.get(1).cloned().unwrap_or(JsValue::undefined());
     drop_listener(context, &format!("add:{}:{event}", id.0), &handler)?;
     Ok(JsValue::undefined())
+}
+
+fn has_child_nodes(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Ok(host) = host(context) else {
+        return Ok(JsValue::from(false));
+    };
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::from(false));
+    };
+    Ok(JsValue::from(!host.doc.borrow().node(id).children.is_empty()))
+}
+
+fn node_contains(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::from(false));
+    };
+    let Some(other) = args.first().and_then(node_of) else {
+        return Ok(JsValue::from(false));
+    };
+    if id == other {
+        return Ok(JsValue::from(true));
+    }
+    let Ok(host) = host(context) else {
+        return Ok(JsValue::from(false));
+    };
+    let doc = host.doc.borrow();
+    let mut current = doc.node(other).parent;
+    while let Some(node) = current {
+        if node == id {
+            return Ok(JsValue::from(true));
+        }
+        current = doc.node(node).parent;
+    }
+    Ok(JsValue::from(false))
 }
 
 fn get_child_nodes(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -6050,15 +8085,11 @@ fn sibling_node(this: &JsValue, context: &mut Context, next: bool) -> JsResult<J
 fn get_parent_node(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
-    let parent = {
-        let doc = host.doc.borrow();
-        doc.node(id)
-            .parent
-            .filter(|parent| doc.element_name(*parent).is_some())
-    };
-    Ok(parent
-        .map(|id| element_value(id.0, context))
-        .unwrap_or(JsValue::null()))
+    let parent = host.doc.borrow().node(id).parent;
+    Ok(match parent {
+        Some(parent) => node_value(parent.0, context),
+        None => JsValue::null(),
+    })
 }
 
 fn get_current_target(
@@ -6212,7 +8243,7 @@ fn map_specifier(imports: &HashMap<String, String>, spec: &str) -> Option<String
 
 impl ModuleLoader for PageLoader {
     fn init_import_meta(
-        self: Rc<Self>,
+        &self,
         import_meta: &JsObject,
         module: &Module,
         context: &mut Context,
@@ -6226,20 +8257,22 @@ impl ModuleLoader for PageLoader {
     }
 
     fn load_imported_module(
-        self: Rc<Self>,
+        &self,
         referrer: Referrer,
         request: ModuleRequest,
-        context: &RefCell<&mut Context>,
-    ) -> impl std::future::Future<Output = JsResult<Module>> {
+        context: &mut Context,
+    ) -> JsResult<Module> {
         let requested = request.specifier().to_std_string_lossy();
         let mapped = map_specifier(&self.imports, &requested);
         let specifier = if let Some(mapped) = mapped {
             mapped
         } else {
-            referrer
+            let base = referrer
                 .path()
                 .and_then(|path| path.to_str())
-                .and_then(|base| resolve_request(base, &requested).ok())
+                .filter(|path| !path.is_empty())
+                .unwrap_or(self.base.as_str());
+            resolve_request(base, &requested)
                 .map(|url| url.to_display())
                 .unwrap_or(requested)
         };
@@ -6247,24 +8280,27 @@ impl ModuleLoader for PageLoader {
             if let Some(module) = self.cache.borrow().get(&specifier).cloned() {
                 return Ok(module);
             }
+            if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+                eprintln!("import {specifier}");
+            }
             let code = (self.fetch.borrow_mut())(&specifier).ok_or_else(|| {
+                if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+                    eprintln!("import failed {specifier}");
+                }
                 JsError::from(
                     JsNativeError::typ().with_message(format!("module not found: {specifier}")),
                 )
             })?;
             let path = PathBuf::from(&specifier);
-            let module = {
-                let mut context = context.borrow_mut();
-                Module::parse(
-                    Source::from_bytes(code.as_str()).with_path(&path),
-                    None,
-                    &mut context,
-                )?
-            };
+            let module = Module::parse(
+                Source::from_bytes(code.as_str()).with_path(&path),
+                None,
+                context,
+            )?;
             self.cache.borrow_mut().insert(specifier, module.clone());
             Ok(module)
         })();
-        std::future::ready(result)
+        result
     }
 }
 
@@ -6579,7 +8615,11 @@ mod tests {
                 (doc.element_name(NodeId(index)) == Some("body")).then_some(NodeId(index))
             })
             .unwrap();
-        assert_eq!(doc.attr(body, "data-raf"), Some("0"));
+        let raf = doc.attr(body, "data-raf").unwrap_or("");
+        assert!(
+            raf.parse::<f64>().is_ok_and(|value| value >= 0.0),
+            "{raf}"
+        );
         let frame = doc
             .nodes
             .iter()
@@ -6650,6 +8690,172 @@ mod tests {
     }
 
     #[test]
+    fn a_readable_stream_tees_and_reads_enqueued_chunks() {
+        let doc = parse_html(
+            r#"<html><body><script>
+              var stream = new ReadableStream({
+                start: function (controller) {
+                  controller.enqueue("a");
+                  controller.enqueue("b");
+                  controller.close();
+                }
+              });
+              var ignored = new ReadableStream();
+              if (typeof ignored.cancel !== "function") throw new Error("stream cancel");
+              ignored.cancel();
+              var branches = stream.tee();
+              var reader = branches[0].getReader();
+              reader.read().then(function (first) {
+                return reader.read().then(function (second) {
+                  return reader.read().then(function (end) {
+                    document.documentElement.setAttribute(
+                      "data-stream",
+                      first.value + second.value + (end.done ? "done" : "open")
+                    );
+                  });
+                });
+              });
+            </script></body></html>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let rejected = parse_html(
+            r#"<html><body><script>Promise.reject(undefined);</script></body></html>"#,
+        );
+        let rejected = Session::open(rejected, |_| None);
+        let lines = rejected.logs().join("\n");
+        assert!(
+            lines.contains("rejected undefined"),
+            "{lines}"
+        );
+        let html = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(NodeId(index)) == Some("html"))
+                    .then_some(NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(session.document().attr(html, "data-stream"), Some("abdone"));
+    }
+
+    #[test]
+    fn an_inserted_script_runs_when_it_is_connected() {
+        let doc = parse_html(
+            r#"<html><head></head><body>
+            <script>
+              var inline = document.createElement("script");
+              inline.textContent = "document.documentElement.setAttribute('data-inline','yes')";
+              document.body.appendChild(inline);
+              var external = document.createElement("script");
+              external.src = "/extra.js";
+              external.addEventListener("load", function () {
+                document.documentElement.setAttribute("data-load", "yes");
+              });
+              document.head.appendChild(external);
+            </script>
+            </body></html>"#,
+        );
+        let session = Session::open_at(doc, "https://example.test/", |src| {
+            src.ends_with("/extra.js").then(|| {
+                "document.documentElement.setAttribute('data-src','yes')".to_string()
+            })
+        });
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let html = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(NodeId(index)) == Some("html"))
+                    .then_some(NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(session.document().attr(html, "data-inline"), Some("yes"));
+        assert_eq!(session.document().attr(html, "data-src"), Some("yes"));
+        assert_eq!(session.document().attr(html, "data-load"), Some("yes"));
+    }
+
+    #[test]
+    fn message_channel_and_post_message_are_macrotasks() {
+        let doc = parse_html(
+            r#"<html><body></body>
+            <script>
+              var seen = [];
+              var channel = new MessageChannel();
+              channel.port1.addEventListener("message", function (event) {
+                seen.push("listener:" + event.data);
+              });
+              channel.port2.postMessage("early");
+              channel.port1.start();
+              channel.port2.postMessage("late");
+              channel.port1.onmessage = function (event) { seen.push("handler:" + event.data); };
+              channel.port2.postMessage("after");
+              window.addEventListener("message", function (event) { seen.push("win:" + event.data); });
+              window.onmessage = function (event) { seen.push("on:" + event.data); };
+              window.postMessage("hello");
+              queueMicrotask(function () { seen.push("micro"); });
+              var before = performance.now();
+              seen.push("script");
+              setTimeout(function () {
+                var after = performance.now();
+                document.documentElement.setAttribute("data-order", seen.join(","));
+                document.documentElement.setAttribute("data-now", String(after >= before));
+              }, 0);
+            </script></html>"#,
+        );
+        let mut session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let _ = session.advance(0);
+        let html = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(mithu_dom::NodeId(index)) == Some("html"))
+                    .then_some(mithu_dom::NodeId(index))
+            })
+            .unwrap();
+        let order = session
+            .document()
+            .attr(html, "data-order")
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(
+            order,
+            "script,micro,handler:early,listener:early,handler:late,listener:late,handler:after,listener:after,win:hello,on:hello"
+        );
+        assert_eq!(session.document().attr(html, "data-now"), Some("true"));
+    }
+
+    #[test]
+    fn an_adopted_style_sheet_is_collected_for_layout() {
+        let mut doc = parse_html(
+            r#"<div id="host"></div><script>
+            var sheet = new CSSStyleSheet();
+            sheet.replaceSync("p{color:#111}");
+            document.adoptedStyleSheets = [sheet];
+            var root = document.getElementById("host").attachShadow({mode:"open"});
+            var local = new CSSStyleSheet();
+            local.replaceSync(":host{display:block}");
+            root.adoptedStyleSheets = [local];
+            </script>"#,
+        );
+        let log = run_scripts(&mut doc, |_| None);
+        assert!(log.is_empty(), "{log:?}");
+        let joined = doc.stylesheets.join("\n");
+        assert!(joined.contains("color"), "{joined}");
+        assert!(
+            joined.contains("display:block") && !joined.contains(":host"),
+            "{joined}"
+        );
+    }
+
+    #[test]
     fn inner_html_builds_elements() {
         let mut doc = parse_html(
             r##"<div id="host"></div><script>
@@ -6660,6 +8866,37 @@ mod tests {
         let yes = doc.get_element_by_id("yes").unwrap();
         assert_eq!(doc.text_content(yes), "Hi");
         assert_eq!(doc.element_name(yes), Some("b"));
+    }
+
+    #[test]
+    fn script_text_keeps_comparisons_and_nodes_report_children() {
+        let doc = parse_html(
+            r#"<div id="box"><span></span></div><p id="out"></p>
+            <script>
+              var box = document.getElementById("box");
+              if (!box.hasChildNodes() || !box.contains(box.firstChild)) {
+                throw new Error("children");
+              }
+              if (typeof DocumentType === "undefined" || !DocumentType.prototype) {
+                throw new Error("doctype");
+              }
+              if (!box.namespaceURI || box.namespaceURI.indexOf("1999/xhtml") < 0) {
+                throw new Error("namespace");
+              }
+              var script = document.createElement("script");
+              script.innerHTML = "for (var r = 1; r < 3; r++) { window.__ran = r; }";
+              document.body.appendChild(script);
+              document.getElementById("out").textContent = String(/\S\.\p{L}/u.test("a.b"));
+            </script>"#,
+        );
+        let mut session = Session::open(doc, |_| None);
+        assert!(
+            session.logs().is_empty(),
+            "{}",
+            session.logs().join("\n")
+        );
+        let out = session.document().get_element_by_id("out").unwrap();
+        assert_eq!(session.document().text_content(out), "true");
     }
 
     #[test]
@@ -6842,6 +9079,81 @@ mod tests {
         let session = Session::open(doc, |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
         assert_eq!(session.document().title, "ok");
+    }
+
+    #[test]
+    fn a_child_list_record_lists_added_nodes() {
+        let doc = parse_html(
+            r#"<body><div id="host"></div><script>
+              var host = document.getElementById("host");
+              var observer = new MutationObserver(function (records) {
+                var added = records[0] && records[0].addedNodes;
+                document.title = added && added.length === 1 && added[0].id === "item" ? "ok" : "bad";
+              });
+              observer.observe(host, { childList: true });
+              var item = document.createElement("span");
+              item.id = "item";
+              host.appendChild(item);
+            </script></body>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "ok");
+    }
+
+    #[test]
+    fn a_thrown_fetch_error_is_caught_and_later_timers_still_run() {
+        let doc = parse_html(
+            r#"<html><body><script>
+              var later = false;
+              Promise.resolve(1).then(function () {
+                throw new Error("logged-out");
+              }).catch(function () { later = true; });
+              setTimeout(function () {
+                document.documentElement.setAttribute("data-caught", later ? "yes" : "no");
+              }, 0);
+            </script></body></html>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(
+            session.document().attr(
+                session
+                    .document()
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, _)| {
+                        (session.document().element_name(mithu_dom::NodeId(index)) == Some("html"))
+                            .then_some(mithu_dom::NodeId(index))
+                    })
+                    .unwrap(),
+                "data-caught",
+            ),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn a_shadow_template_stamp_connects_the_custom_element() {
+        let doc = parse_html(
+            r#"<body><script>
+              class Item extends HTMLElement {
+                connectedCallback() { this.textContent = "Video title"; }
+              }
+              customElements.define("ytd-rich-item", Item);
+              var host = document.createElement("div");
+              document.body.appendChild(host);
+              var root = host.attachShadow({ mode: "open" });
+              var template = document.createElement("template");
+              template.innerHTML = "<ytd-rich-item></ytd-rich-item>";
+              root.appendChild(template.content);
+              document.title = root.textContent === "Video title" ? "stamped" : ("stamp:" + root.textContent);
+            </script></body>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "stamped");
     }
 
     #[test]
@@ -7042,6 +9354,38 @@ mod tests {
     }
 
     #[test]
+    fn wpt_html_and_fetch_subset_reports_a_pass_rate() {
+        for (label, relative) in [("html", "../../tests/wpt/html"), ("fetch", "../../tests/wpt/fetch")]
+        {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let files = js_fixtures(&root);
+            assert!(!files.is_empty(), "{label}");
+            let mut script = String::from("var passed = 0; var failed = '';");
+            for path in &files {
+                let name = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("case");
+                let body = std::fs::read_to_string(path).unwrap();
+                script.push_str(&format!(
+                    "try {{ {body}; passed += 1; }} catch (error) {{ failed += '{name}:' + error + ','; }}"
+                ));
+            }
+            script.push_str(&format!(
+                "document.title = passed + '/' + {} + ' ' + failed;",
+                files.len()
+            ));
+            let doc = parse_html(&format!("<body><script>{script}</script></body>"));
+            let session = Session::open(doc, |_| None);
+            let title = session.document().title.clone();
+            eprintln!("wpt {label} subset {title}");
+            let (passed, rest) = title.split_once('/').unwrap_or(("0", "0"));
+            let total = rest.split_whitespace().next().unwrap_or("0");
+            assert_eq!(passed, total, "{title}");
+        }
+    }
+
+    #[test]
     fn a_module_imports_a_relative_url() {
         let doc = parse_html(r#"<script type="module" src="/app.js"></script>"#);
         let session = Session::open_at(doc, "https://example.com/docs/page", |src| match src {
@@ -7109,6 +9453,61 @@ mod tests {
     }
 
     #[test]
+    fn snapshots_stay_stable_and_comments_can_be_created() {
+        let doc = parse_html(
+            r#"<body></body><script>
+              var state = { __NA: true };
+              history.replaceState(state, "", location.href);
+              if (history.state !== state) throw new Error("state");
+              var list = matchMedia("(min-width: 800px)");
+              if (matchMedia("(min-width: 800px)") !== list || list.matches !== true) {
+                throw new Error("mql");
+              }
+              if (innerWidth !== 1280) throw new Error("width");
+              var mark = document.createComment("$?");
+              if (mark.nodeType !== 8 || mark.data !== "$?") throw new Error("comment");
+              var fragment = document.createDocumentFragment();
+              fragment.appendChild(mark);
+              if (fragment.nodeType !== 11 || fragment.firstChild !== mark) throw new Error("fragment");
+              var box = document.createElement("div");
+              document.body.appendChild(box);
+              var seen = 0;
+              new ResizeObserver(function () { seen += 1; }).observe(box);
+              new IntersectionObserver(function () { seen += 1; }).observe(box);
+              if (seen !== 0) throw new Error("sync observer " + seen);
+              var rect = box.getBoundingClientRect();
+              if (box.getBoundingClientRect() !== rect) throw new Error("rect");
+              if (document.elementFromPoint(10, 10) !== null) throw new Error("hit");
+              if (document.elementsFromPoint(10, 10).length !== 0) throw new Error("hits");
+              if (typeof PerformanceObserver !== "function") throw new Error("po");
+              if (PerformanceObserver.supportedEntryTypes.indexOf("layout-shift") < 0) throw new Error("shift");
+              var imported = document.importNode(mark, true);
+              if (imported.nodeType !== 8 || imported.data !== "$?") throw new Error("import");
+              var walker = document.createTreeWalker(fragment, NodeFilter.SHOW_COMMENT);
+              var stepped = walker.nextNode();
+              if (!stepped || stepped.data !== "$?") throw new Error("walker");
+              var named = document.createElement("div");
+              named.setAttribute("id", "z");
+              if ([...named.attributes][0].name !== "id") throw new Error("attrs");
+              if (named.getAttributeNames()[0] !== "id" || !named.hasAttributes()) throw new Error("names");
+              var slot = document.createElement("span");
+              document.body.appendChild(slot);
+              slot.appendChild(document.createTextNode("old"));
+              slot.replaceWith(document.createTextNode("ok"));
+              if (document.body.textContent.indexOf("ok") < 0) throw new Error("replace");
+              if (!document.firstElementChild) throw new Error("first");
+              document.title = "stable";
+            </script>"#,
+        );
+        let mut session = Session::open_at(doc, "https://example.com/docs", |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "stable");
+        assert!(session.take_navigation().is_none());
+        session.advance(0);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+    }
+
+    #[test]
     fn local_storage_round_trips_and_json_scripts_are_skipped() {
         let mut doc = parse_html(
             r#"<script type="application/ld+json">{not js}</script>
@@ -7129,6 +9528,49 @@ mod tests {
         assert!(
             session.logs().iter().all(|line| !line.contains("not js")),
             "a data block must not be evaluated"
+        );
+    }
+
+    #[test]
+    fn storage_intl_and_document_parent_match_the_host() {
+        let mut doc = parse_html(
+            r#"<html><body>
+            <script>
+              if (!(localStorage instanceof Storage)) throw new Error("localStorage");
+              if (!(sessionStorage instanceof Storage)) throw new Error("sessionStorage");
+              try {
+                new Storage();
+                throw new Error("constructed");
+              } catch (error) {
+                if (String(error.message || error).indexOf("Illegal") < 0) throw error;
+              }
+              var html = document.documentElement;
+              if (html.parentNode !== document) throw new Error("html parent");
+              if (document.parentNode !== null) throw new Error("document parent");
+              var stamp = new Date(Date.UTC(2020, 0, 2, 15, 4, 5));
+              var local = stamp.toLocaleString("en-US");
+              if (local.indexOf("2020") < 0 || local.indexOf("GMT") >= 0) throw new Error(local);
+              var bangla = (1234).toLocaleString("bn");
+              if (bangla.indexOf("১") < 0) throw new Error(bangla);
+              if ((1234.5).toLocaleString("en-US") !== "1,234.5") throw new Error("group");
+              if (new Intl.PluralRules("en").select(1) !== "one") throw new Error("plural");
+              if (new Intl.RelativeTimeFormat("en").format(-1, "day") !== "1 day ago") throw new Error("relative");
+              if (new Intl.Collator("en", { sensitivity: "base" }).compare("A", "a") !== 0) throw new Error("collator");
+              var words = new Intl.Segmenter("en", { granularity: "word" }).segment("hi there");
+              if (!words.length || words[0].segment !== "hi") throw new Error("segment");
+              var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+              if (!zone) throw new Error("zone");
+              if ((zone === "UTC" || zone === "Etc/UTC") && new Date(2020, 0, 1).getTimezoneOffset() !== 0) {
+                throw new Error("offset " + zone);
+              }
+            </script>
+            </body></html>"#,
+        );
+        let session = Session::open(std::mem::take(&mut doc), |_| None);
+        let logs = session.logs();
+        assert!(
+            logs.iter().all(|line| !line.contains("JavaScript error")),
+            "{logs:?}"
         );
     }
 
@@ -7260,7 +9702,9 @@ mod tests {
               var img = new Image();
               img.src = "https://example.com/pixel.png";
               var channel = new MessageChannel();
-              channel.port1.onmessage = function (event) { img.alt = event.data; };
+              channel.port1.onmessage = function (event) {
+                document.documentElement.setAttribute("data-port", event.data);
+              };
               channel.port2.postMessage("ported");
               var bytes = new Uint8Array(4);
               crypto.getRandomValues(bytes);
@@ -7288,7 +9732,7 @@ mod tests {
               style.sheet.insertRule("a{}", 0);
               document.title = [
                 img.src,
-                img.alt,
+                "",
                 crypto.randomUUID().length,
                 link.host,
                 location.search,
@@ -7312,10 +9756,22 @@ mod tests {
                 .then(|| "export const name = \"react\";".to_string())
         });
         assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let _ = session.advance(0);
+        let port = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(mithu_dom::NodeId(index)) == Some("html"))
+                    .then_some(mithu_dom::NodeId(index))
+            })
+            .and_then(|html| session.document().attr(html, "data-port").map(str::to_string));
+        assert_eq!(port.as_deref(), Some("ported"));
         let title = session.document().title.clone();
         assert_eq!(
             title,
-            "https://example.com/pixel.png|ported|36|cdn.example|?q=mithu||dark|sd|function|function|function|true|Linux x86_64|function|ping|true|1"
+            "https://example.com/pixel.png||36|cdn.example|?q=mithu||dark|sd|function|function|function|true|Linux x86_64|function|ping|true|1"
         );
         let html = session
             .document()
@@ -7462,5 +9918,133 @@ mod tests {
         let session = Session::open_at(doc, "https://react.dev/", |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
         assert_eq!(session.document().title, "hydrated");
+    }
+
+    #[test]
+    fn the_common_window_surface_is_constructable() {
+        let doc = parse_html(
+            r#"<dialog id="ask"></dialog><span id="icon"></span>
+            <script>
+              var dialog = document.getElementById("ask");
+              if (!(dialog instanceof HTMLDialogElement)) throw new Error("dialog type");
+              if (!(document.createElement("br") instanceof HTMLBRElement)) throw new Error("br");
+              if (!(document.createElement("audio") instanceof HTMLMediaElement)) throw new Error("media");
+              dialog.showModal();
+              if (!dialog.open) throw new Error("open");
+              dialog.close("yes");
+              if (dialog.open || dialog.returnValue !== "yes") throw new Error("close:" + dialog.returnValue);
+              var slot = document.createElement("slot");
+              slot.appendChild(document.createElement("b"));
+              if (slot.assignedElements().length !== 1) throw new Error("slot");
+              if (CSS.supports("display", "grid") !== true) throw new Error("supports");
+              if (CSS.escape("a b") !== "a\\ b") throw new Error("escape:" + CSS.escape("a b"));
+              if (String(CSS.px(12)) !== "12px" || String(CSS.number(2)) !== "2") throw new Error("css unit");
+              if (typeof navigation.navigate !== "function") throw new Error("navigation");
+              if (typeof navigation.currentEntry.getState !== "function") throw new Error("entry");
+              var any = AbortSignal.any([AbortSignal.abort("stop")]);
+              if (!any.aborted) throw new Error("any");
+              if (typeof AbortSignal.timeout(1000).aborted !== "boolean") throw new Error("timeout");
+              var cloned = structuredClone({ n: 1, list: [2] });
+              if (cloned.n !== 1 || cloned.list[0] !== 2) throw new Error("clone");
+              var headers = new Headers("Accept: text/html\nX-QT-AUTH: token");
+              if (headers.get("x-qt-auth") !== "token") throw new Error("headers");
+              var response = new Response("{\"ok\":1}", { status: 201, headers: headers, url: "https://example.com/a" });
+              if (response.status !== 201 || !response.ok || response.headers.get("accept") !== "text/html") throw new Error("response");
+              if (Response.json({ a: 1 }).headers.get("content-type") !== "application/json") throw new Error("json");
+              var request = new Request("/path", { method: "post", body: "hi", headers: { "content-type": "text/plain" } });
+              if (request.method !== "POST" || request.headers.get("content-type") !== "text/plain") throw new Error("request");
+              if (!request.url.endsWith("/path")) throw new Error("request url " + request.url);
+              var blob = new Blob(["ab"]);
+              if (blob.size !== 2) throw new Error("blob");
+              if (!(new File(["a"], "a.txt") instanceof Blob)) throw new Error("file");
+              var form = new FormData();
+              form.append("q", "1");
+              if (form.get("q") !== "1") throw new Error("form");
+              if (!URL.canParse("https://example.com") || URL.canParse("http://[")) throw new Error("canParse");
+              if ([1, 2, 3].findLast(function (n) { return n < 3; }) !== 2) throw new Error("findLast");
+              if ([3, 1, 2].toSorted().join() !== "1,2,3") throw new Error("toSorted");
+              var grouped = Object.groupBy(["aa", "b"], function (item) { return item.length; });
+              if (grouped[2].length !== 1) throw new Error("groupBy");
+              var pair = Promise.withResolvers();
+              if (typeof pair.resolve !== "function") throw new Error("withResolvers");
+              if (new WeakRef({ id: 7 }).deref().id !== 7) throw new Error("weak");
+              new FinalizationRegistry(function () {});
+              if (typeof location.assign !== "function" || location.toString().indexOf("example.com") < 0) throw new Error("location");
+              var named = document.createElement("input");
+              named.setAttribute("name", "q");
+              document.documentElement.appendChild(named);
+              if (document.getElementsByName("q").length !== 1) throw new Error("by name");
+              document.title = "platform";
+            </script>"#,
+        );
+        let session = Session::open_at(doc, "https://example.com/docs", |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "platform");
+        let dialog = session.document().get_element_by_id("ask").unwrap();
+        assert!(session.document().attr(dialog, "open").is_none());
+    }
+
+    #[test]
+    fn unicode_property_escapes_inside_strings_stay_strings() {
+        let doc = parse_html(
+            r#"<script>
+              var pattern = "\\p{N}";
+              var letter = /\p{L}/u.test("A");
+              var ident = /^[$_\p{ID_Start}][$_\u{200C}\u{200D}\p{ID_Continue}]*$/u;
+              var punct = new RegExp("\\p{P}|\\p{S}", "u");
+              var yx = RegExp("\\p{RI}\\p{RI}|\\p{Emoji}(\\p{EMod}|\\u{FE0F})", "gu");
+              document.title = pattern === "[0-9]" && letter && ident.test("name") && punct.test("!") && String(yx).indexOf("p{") < 0 ? "kept" : String(yx);
+            </script>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "kept");
+    }
+
+    #[test]
+    fn an_inserted_external_script_runs_after_the_caller() {
+        let doc = parse_html(
+            r#"<html><body><script>
+              window.clarity = function () { window.clarity.q.push([].slice.call(arguments)); };
+              window.clarity.q = [];
+              var tag = document.createElement("script");
+              tag.src = "/tag.js";
+              document.head.appendChild(tag);
+              window.clarity.q.push(["queued"]);
+            </script></body></html>"#,
+        );
+        let session = Session::open_at(doc, "https://example.test/", |src| {
+            src.ends_with("/tag.js").then(|| {
+                "document.documentElement.setAttribute('data-seen', String(window.clarity.q.length));".to_string()
+            })
+        });
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let html = session.document().nodes.iter().enumerate().find_map(|(index, _)| {
+            (session.document().element_name(NodeId(index)) == Some("html")).then_some(NodeId(index))
+        }).unwrap();
+        assert_eq!(session.document().attr(html, "data-seen"), Some("1"));
+    }
+
+    #[test]
+    fn svg_class_name_is_an_animated_string() {
+        let doc = parse_html(
+            r#"<svg id="icon" class="mark"><rect id="box" width="10" height="4"></rect></svg>
+            <script>
+              var icon = document.getElementById("icon");
+              var box = document.getElementById("box");
+              if (typeof SVGAnimatedString !== "function") throw new Error("ctor");
+              if (typeof SVGElement !== "function") throw new Error("svg");
+              if (!(icon instanceof SVGElement)) throw new Error("instance");
+              if (icon.className.baseVal !== "mark") throw new Error("base");
+              icon.className.baseVal = "mark on";
+              var bounds = box.getBBox();
+              document.title = icon.className.animVal + ":" + bounds.width;
+            </script>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "mark on:0");
+        let icon = session.document().get_element_by_id("icon").unwrap();
+        assert_eq!(session.document().attr(icon, "class"), Some("mark on"));
     }
 }

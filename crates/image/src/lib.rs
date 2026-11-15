@@ -1,4 +1,4 @@
-//! Decode PNG, JPEG, GIF, and WebP into pixels the painter can blend.
+//! Decode PNG, JPEG, GIF, WebP, and SVG into pixels the painter can blend.
 //!
 //! Format decoders live in the `image` crate. Rewriting JPEG would not make
 //! the browser stronger. Pixels are packed `0xAARRGGBB`.
@@ -34,7 +34,69 @@ pub fn decode(bytes: &[u8]) -> Option<Bitmap> {
     from_dynamic(image)
 }
 
+/// Rasterize an SVG document with resvg. Gradients, clip paths, and masks
+/// are included. The longest side is kept between the file's own size and 512px.
+pub fn decode_svg(bytes: &[u8]) -> Option<Bitmap> {
+    if bytes.is_empty() || bytes.len() > 2_000_000 {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    if !text.contains("<svg") && !text.contains("<SVG") {
+        return None;
+    }
+    let options = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
+    let size = tree.size();
+    let long = size.width().max(size.height()).max(1.0);
+    let scale = (256.0 / long).clamp(1.0, 4.0);
+    let width = (size.width() * scale).round().clamp(1.0, 512.0) as u32;
+    let height = (size.height() * scale).round().clamp(1.0, 512.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let pixels: Vec<u32> = pixmap
+        .data()
+        .chunks_exact(4)
+        .map(|px| unpremultiply(px[0], px[1], px[2], px[3]))
+        .collect();
+    if pixels.iter().all(|pixel| *pixel == 0) {
+        return None;
+    }
+    Some(Bitmap {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn unpremultiply(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    if a == 0 {
+        return 0;
+    }
+    let (r, g, b) = if a == 255 {
+        (r, g, b)
+    } else {
+        let scale = 255u32 / u32::from(a);
+        (
+            (u32::from(r) * scale).min(255) as u8,
+            (u32::from(g) * scale).min(255) as u8,
+            (u32::from(b) * scale).min(255) as u8,
+        )
+    };
+    (u32::from(a) << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+}
+
 pub fn decode_data_url(url: &str) -> Option<Bitmap> {
+    let unescaped;
+    let url = if url.contains('\\') {
+        unescaped = unescape_css(url);
+        unescaped.as_str()
+    } else {
+        url
+    };
     let rest = url.trim().strip_prefix("data:")?;
     let (meta, data) = rest.split_once(',')?;
     let bytes = if meta.to_ascii_lowercase().contains(";base64") {
@@ -44,7 +106,45 @@ pub fn decode_data_url(url: &str) -> Option<Bitmap> {
     } else {
         percent_decode_bytes(data)
     };
-    decode(&bytes)
+    decode(&bytes).or_else(|| decode_svg(&bytes))
+}
+
+/// Stylo serializes a quote inside a url as `\22` or `\"`. The SVG bytes
+/// need the real character before resvg will parse them.
+fn unescape_css(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+            let next = bytes[index + 1];
+            if next.is_ascii_hexdigit() {
+                let mut end = index + 2;
+                let limit = (index + 7).min(bytes.len());
+                while end < limit && bytes[end].is_ascii_hexdigit() {
+                    end += 1;
+                }
+                if let Ok(code) = u32::from_str_radix(
+                    std::str::from_utf8(&bytes[index + 1..end]).unwrap_or(""),
+                    16,
+                ) && let Some(ch) = char::from_u32(code)
+                {
+                    out.push(ch);
+                    if end < bytes.len() && bytes[end] == b' ' {
+                        end += 1;
+                    }
+                    index = end;
+                    continue;
+                }
+            }
+            out.push(next as char);
+            index += 2;
+            continue;
+        }
+        out.push(bytes[index] as char);
+        index += 1;
+    }
+    out
 }
 
 fn from_dynamic(image: DynamicImage) -> Option<Bitmap> {
@@ -119,6 +219,27 @@ mod tests {
         let url = format!("data:image/png;base64,{encoded}");
         let again = decode_data_url(&url).expect("data url");
         assert_eq!(again.pixels, bitmap.pixels);
+    }
+
+    #[test]
+    fn rasterizes_a_gradient_clipped_to_a_circle() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
+            <defs>
+                <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#ff0000"/>
+                    <stop offset="1" stop-color="#0000ff"/>
+                </linearGradient>
+                <clipPath id="c"><circle cx="20" cy="20" r="16"/></clipPath>
+            </defs>
+            <rect width="40" height="40" fill="url(#g)" clip-path="url(#c)"/>
+        </svg>"##;
+        let bitmap = decode_svg(svg).expect("svg");
+        assert!(bitmap.width >= 40 && bitmap.height >= 40);
+        let center = bitmap.pixels[(bitmap.height as usize / 2) * bitmap.width as usize
+            + bitmap.width as usize / 2];
+        assert_ne!(center >> 24, 0, "the clipped gradient should cover the middle");
+        let corner = bitmap.pixels[0];
+        assert_eq!(corner >> 24, 0, "the clip should leave the corner clear");
     }
 
     #[test]

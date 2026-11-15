@@ -7,7 +7,7 @@
 use std::sync::OnceLock;
 
 use mithu_base::{Color, Rect};
-use mithu_paint::Canvas;
+use mithu_paint::Draw;
 
 #[derive(Clone)]
 pub struct Icon {
@@ -15,7 +15,7 @@ pub struct Icon {
     pub contours: Vec<Vec<(f32, f32)>>,
 }
 
-pub fn draw(canvas: &mut Canvas<'_>, kind: Kind, dest: Rect, color: Color, clip: Rect) {
+pub fn draw(canvas: &mut dyn Draw, kind: Kind, dest: Rect, color: Color, clip: Rect) {
     let icon = kind.icon();
     if icon.contours.is_empty() || dest.width <= 0.0 || dest.height <= 0.0 {
         return;
@@ -37,7 +37,7 @@ pub fn draw(canvas: &mut Canvas<'_>, kind: Kind, dest: Rect, color: Color, clip:
                 .collect()
         })
         .collect();
-    canvas.fill_contours(&contours, color, clip);
+    canvas.fill_contours(&contours, color, clip, false);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

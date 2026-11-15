@@ -10,8 +10,11 @@ description = "Mithu browser window"
 
 [dependencies]
 mithu-image = { path = "../../crates/image" }
+mithu-paint = { path = "../../crates/paint" }
 mithu-shell = { path = "../../crates/shell" }
+pollster = "0.4"
 softbuffer = "0.4"
+vello = { version = "0.12", default-features = true }
 winit = "0.30"
 
 [lints]

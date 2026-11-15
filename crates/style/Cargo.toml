@@ -12,6 +12,14 @@ description = "Cascade and computed style"
 mithu-base = { path = "../base" }
 mithu-css = { path = "../css" }
 mithu-dom = { path = "../dom" }
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "8228d15f33bef461ab189be5ceec881ff1df9ba6", default-features = false, features = ["svg", "woff", "floats", "system-fonts", "complex-scripts"] }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "8228d15f33bef461ab189be5ceec881ff1df9ba6", default-features = false }
+markup5ever = "0.40.0"
+parley = { version = "0.13", default-features = false, features = ["std", "system", "complex-scripts"] }
+style = { version = "0.24.0", package = "stylo" }
+stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "8228d15f33bef461ab189be5ceec881ff1df9ba6", default-features = false, features = ["block", "flexbox", "grid", "floats"] }
+style_traits = { version = "0.24.0", package = "stylo_traits" }
+style_config = { version = "0.24.0", package = "stylo_static_prefs" }
 
 [dev-dependencies]
 mithu-html = { path = "../html" }

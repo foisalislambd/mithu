@@ -80,12 +80,14 @@ impl CookieJar {
             if name != "set-cookie" {
                 continue;
             }
-            let Some(parsed) = parse_set_cookie(value, url, now, top_level_host) else {
-                continue;
-            };
-            self.cookies.retain(|cookie| !same_slot(cookie, &parsed));
-            if parsed.expires_at != Some(0) {
-                self.cookies.push(parsed);
+            for piece in split_combined_cookies(value) {
+                let Some(parsed) = parse_set_cookie(piece, url, now, top_level_host) else {
+                    continue;
+                };
+                self.cookies.retain(|cookie| !same_slot(cookie, &parsed));
+                if parsed.expires_at != Some(0) {
+                    self.cookies.push(parsed);
+                }
             }
         }
     }
@@ -357,10 +359,54 @@ fn path_matches(cookie_path: &str, request_path: &str) -> bool {
 }
 
 fn default_path(path: &str) -> String {
+    // RFC 6265: directory of the request path, excluding the query and the
+    // right-most slash. `/api/auth/v1/session` stores `/api/auth/v1`, which
+    // still matches `/api/auth/v1/users/me`.
+    let path = path.split(['?', '#']).next().unwrap_or(path);
     match path.rfind('/') {
         Some(0) | None => "/".to_string(),
-        Some(index) => path[..=index].to_string(),
+        Some(index) => path[..index].to_string(),
     }
+}
+
+/// A single header line sometimes carries two cookies joined by a comma.
+/// An `Expires` date also contains a comma, and that comma is followed by a
+/// day number rather than another `name=value` pair.
+fn split_combined_cookies(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b',' {
+            let rest = value[index + 1..].trim_start();
+            if cookie_pair_starts(rest) {
+                let piece = value[start..index].trim();
+                if !piece.is_empty() {
+                    parts.push(piece);
+                }
+                start = value.len() - rest.len();
+                index = start;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    let tail = value[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    parts
+}
+
+fn cookie_pair_starts(value: &str) -> bool {
+    let end = value.find(['=', ';', ',']).unwrap_or(value.len());
+    let name = &value[..end];
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        && value[end..].starts_with('=')
 }
 
 fn now_secs() -> u64 {
@@ -492,6 +538,61 @@ mod tests {
             Some("theme=light")
         );
         assert!(jar.header_for(&url("https://example.org/")).is_none());
+    }
+
+    #[test]
+    fn each_set_cookie_is_stored_including_a_leading_dot() {
+        let mut jar = CookieJar::new();
+        let home = url("https://www.prothomalo.com/");
+        jar.ingest(
+            &home,
+            &[
+                (
+                    "set-cookie".into(),
+                    "qt-auth=one; Domain=.prothomalo.com; Path=/".into(),
+                ),
+                (
+                    "set-cookie".into(),
+                    "sid=two; Path=/, theme=dark; Path=/blog".into(),
+                ),
+            ],
+        );
+        let header = jar
+            .header_for(&url("https://www.prothomalo.com/"))
+            .unwrap_or_default();
+        assert!(header.contains("qt-auth=one"), "{header}");
+        assert!(header.contains("sid=two"), "{header}");
+        assert!(!header.contains("theme=dark"), "{header}");
+        let blog = jar
+            .header_for(&url("https://www.prothomalo.com/blog"))
+            .unwrap_or_default();
+        assert!(blog.contains("theme=dark"), "{blog}");
+        let joined = jar
+            .header_for(&url("https://prothomalo.com/"))
+            .unwrap_or_default();
+        assert!(joined.contains("qt-auth=one"), "{joined}");
+        let api = jar
+            .header_for(&url("https://services.prothomalo.com/api/auth/v1/users/me"))
+            .unwrap_or_default();
+        assert!(api.contains("qt-auth=one"), "{api}");
+    }
+
+    #[test]
+    fn default_path_is_the_directory_and_still_matches_the_api() {
+        let mut jar = CookieJar::new();
+        jar.ingest(
+            &url("https://www.prothomalo.com/api/auth/v1/session"),
+            &[(
+                "set-cookie".into(),
+                "qt-auth=guest; Domain=prothomalo.com".into(),
+            )],
+        );
+        let users = jar
+            .header_for(&url("https://www.prothomalo.com/api/auth/v1/users/me"))
+            .unwrap_or_default();
+        assert!(users.contains("qt-auth=guest"), "{users}");
+        let other = jar.header_for(&url("https://www.prothomalo.com/sports"));
+        assert!(other.is_none(), "{other:?}");
     }
 
     #[test]

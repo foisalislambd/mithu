@@ -7,6 +7,7 @@
 //! HTTP/3 is not spoken: that needs a QUIC stack, and the client only
 //! advertises `h2` and `http/1.1`.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -14,14 +15,19 @@ use std::time::Duration;
 
 use mithu_url::Url;
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 mod cache;
 mod cookies;
+mod cors;
 mod http2;
 
 pub use cache::HttpCache;
 pub use cookies::{Cookie, CookieJar};
+pub use cors::{
+    credentials_allow_origin, is_forbidden_request_header, is_forbidden_response_header,
+    visible_response_headers,
+};
 
 /// Chrome's current stable major, with Mithu named after it the way Edge and Brave do.
 pub const CHROME_MAJOR: &str = "157";
@@ -67,7 +73,7 @@ fn profile() -> &'static Mutex<Profile> {
     PROFILE.get_or_init(|| {
         Mutex::new(Profile {
             cookies: CookieJar::new(),
-            cache: HttpCache::new(32),
+            cache: HttpCache::new(512),
         })
     })
 }
@@ -214,12 +220,58 @@ fn decode_windows_1252(body: &[u8]) -> String {
 }
 
 pub fn get(url: &Url) -> Result<Response, NetError> {
-    fetch("GET", url, None, &[], 0, CacheMode::Use, None, true, None)
+    fetch("GET", url, None, &[], 0, CacheMode::Use, None, true, None, &[], true)
 }
 
 /// A CORS `fetch` or XHR. `origin` is the page's serialized origin, which
 /// Chromium sends so the server can echo `Access-Control-Allow-Origin`.
 pub fn get_with_origin(url: &Url, initiator_host: &str, origin: &str) -> Result<Response, NetError> {
+    get_with_origin_headers(url, initiator_host, origin, &[])
+}
+
+/// Like [`get_with_origin`], with request headers from `fetch` init.
+/// A scripted `fetch`. `method` and `body` come from the `Request`, and the
+/// cookie jar is applied the same way as a subresource GET.
+pub fn send(
+    method: &str,
+    url: &Url,
+    content_type: Option<&str>,
+    body: &[u8],
+    initiator_host: Option<&str>,
+    origin: Option<&str>,
+    headers: &[(&str, &str)],
+    cookies: bool,
+) -> Result<Response, NetError> {
+    let cache = if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+        CacheMode::Use
+    } else {
+        CacheMode::Bypass
+    };
+    fetch(
+        method,
+        url,
+        content_type,
+        if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+            &[]
+        } else {
+            body
+        },
+        0,
+        cache,
+        initiator_host,
+        false,
+        origin,
+        headers,
+        cookies,
+    )
+}
+
+pub fn get_with_origin_headers(
+    url: &Url,
+    initiator_host: &str,
+    origin: &str,
+    headers: &[(&str, &str)],
+) -> Result<Response, NetError> {
     fetch(
         "GET",
         url,
@@ -230,6 +282,8 @@ pub fn get_with_origin(url: &Url, initiator_host: &str, origin: &str) -> Result<
         Some(initiator_host),
         false,
         Some(origin),
+        headers,
+        true,
     )
 }
 
@@ -248,6 +302,8 @@ pub fn navigate_from(url: &Url, initiator_host: &str) -> Result<Response, NetErr
         Some(initiator_host),
         true,
         None,
+        &[],
+        true,
     )
 }
 
@@ -262,12 +318,26 @@ pub fn get_from(url: &Url, initiator_host: &str) -> Result<Response, NetError> {
         Some(initiator_host),
         false,
         None,
+        &[],
+        true,
     )
 }
 
 /// GET that ignores a fresh cache entry. The reload button uses this.
 pub fn reload(url: &Url) -> Result<Response, NetError> {
-    fetch("GET", url, None, &[], 0, CacheMode::Bypass, None, true, None)
+    fetch(
+        "GET",
+        url,
+        None,
+        &[],
+        0,
+        CacheMode::Bypass,
+        None,
+        true,
+        None,
+        &[],
+        true,
+    )
 }
 
 pub fn post(url: &Url, content_type: &str, body: &[u8]) -> Result<Response, NetError> {
@@ -281,6 +351,8 @@ pub fn post(url: &Url, content_type: &str, body: &[u8]) -> Result<Response, NetE
         None,
         true,
         None,
+        &[],
+        true,
     )
 }
 
@@ -294,6 +366,8 @@ fn fetch(
     initiator: Option<&str>,
     top_level: bool,
     origin: Option<&str>,
+    headers: &[(&str, &str)],
+    cookies: bool,
 ) -> Result<Response, NetError> {
     if redirects > 8 {
         return Err(NetError::TooManyRedirects);
@@ -324,17 +398,29 @@ fn fetch(
     } else {
         initiator.unwrap_or(url.host.as_str())
     };
-    let cookie = with_profile(|profile| {
-        profile.cookies.header_for_request(&cookies::CookieRequest {
-            url,
-            initiator_host: initiator,
-            top_level,
-            method,
-            top_level_host: Some(top_host),
+    let cookie = if cookies {
+        with_profile(|profile| {
+            profile.cookies.header_for_request(&cookies::CookieRequest {
+                url,
+                initiator_host: initiator,
+                top_level,
+                method,
+                top_level_host: Some(top_host),
+            })
         })
-    });
+    } else {
+        None
+    };
     let port = url.effective_port().unwrap_or(80);
-    let request = build_request(method, url, content_type, body, cookie.as_deref(), origin);
+    let request = build_request(
+        method,
+        url,
+        content_type,
+        body,
+        cookie.as_deref(),
+        origin,
+        headers,
+    );
     let mut parsed = if url.scheme == "https" {
         https_exchange(&url.host, port, &request, method, url)?
     } else {
@@ -364,6 +450,8 @@ fn fetch(
                 initiator,
                 top_level,
                 origin,
+                headers,
+                cookies,
             );
         }
         return fetch(
@@ -376,6 +464,8 @@ fn fetch(
             initiator,
             top_level,
             origin,
+            headers,
+            cookies,
         );
     }
     let response = Response {
@@ -396,6 +486,21 @@ fn fetch(
     Ok(response)
 }
 
+fn header_value<'a>(headers: &'a [(&str, &str)], name: &str) -> Option<&'a str> {
+    headers.iter().rev().find_map(|(key, value)| {
+        (key.eq_ignore_ascii_case(name)
+            && !value.chars().any(|ch| ch == '\r' || ch == '\n'))
+        .then_some(*value)
+    })
+}
+
+fn header_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 fn build_request(
     method: &str,
     url: &Url,
@@ -403,6 +508,7 @@ fn build_request(
     body: &[u8],
     cookie: Option<&str>,
     origin: Option<&str>,
+    headers: &[(&str, &str)],
 ) -> Vec<u8> {
     let host = match url.port {
         Some(port) if Url::default_port(&url.scheme) != Some(port) => {
@@ -411,8 +517,10 @@ fn build_request(
         _ => url.host.clone(),
     };
     let mut head = format!(
-        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {USER_AGENT}\r\nSec-CH-UA: {SEC_CH_UA}\r\nSec-CH-UA-Mobile: {SEC_CH_UA_MOBILE}\r\nSec-CH-UA-Platform: {SEC_CH_UA_PLATFORM}\r\nAccept: text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nConnection: close\r\n",
-        url.request_target()
+        "{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {USER_AGENT}\r\nSec-CH-UA: {SEC_CH_UA}\r\nSec-CH-UA-Mobile: {SEC_CH_UA_MOBILE}\r\nSec-CH-UA-Platform: {SEC_CH_UA_PLATFORM}\r\nAccept: {accept}\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nConnection: close\r\n",
+        url.request_target(),
+        accept = header_value(headers, "accept")
+            .unwrap_or("text/html,application/xhtml+xml,image/*,text/css,*/*;q=0.1"),
     );
     if let Some(content_type) = content_type {
         head.push_str(&format!(
@@ -435,6 +543,23 @@ fn build_request(
         }
         head.push_str("\r\n");
     }
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("accept")
+            || name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case("cookie")
+            || name.eq_ignore_ascii_case("origin")
+            || name.eq_ignore_ascii_case("referer")
+        {
+            continue;
+        }
+        if !header_name_ok(name) || value.chars().any(|ch| ch == '\r' || ch == '\n') {
+            continue;
+        }
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
     head.push_str("\r\n");
     let mut request = head.into_bytes();
     request.extend_from_slice(body);
@@ -447,6 +572,41 @@ fn tcp_exchange(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetErr
     exchange(&mut stream, request)
 }
 
+struct PooledHttp2 {
+    io: StreamOwned<ClientConnection, TcpStream>,
+    state: http2::ConnState,
+}
+
+fn h2_pool() -> &'static Mutex<HashMap<String, Vec<PooledHttp2>>> {
+    static POOL: OnceLock<Mutex<HashMap<String, Vec<PooledHttp2>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pool_key(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
+fn take_h2(host: &str, port: u16) -> Option<PooledHttp2> {
+    h2_pool()
+        .lock()
+        .ok()?
+        .get_mut(&pool_key(host, port))?
+        .pop()
+}
+
+fn store_h2(host: &str, port: u16, pooled: PooledHttp2) {
+    if !pooled.state.reusable() {
+        return;
+    }
+    let Ok(mut pool) = h2_pool().lock() else {
+        return;
+    };
+    let slot = pool.entry(pool_key(host, port)).or_default();
+    if slot.len() < 4 {
+        slot.push(pooled);
+    }
+}
+
 fn https_exchange(
     host: &str,
     port: u16,
@@ -454,6 +614,38 @@ fn https_exchange(
     method: &str,
     url: &Url,
 ) -> Result<RawHttp, NetError> {
+    if let Some(mut pooled) = take_h2(host, port) {
+        let cookie = header_value_from_request(request, "cookie");
+        let origin = header_value_from_request(request, "origin");
+        let referer = header_value_from_request(request, "referer");
+        let (extra, body) = split_request(request);
+        let extra_refs: Vec<(&str, &str)> = extra
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        match http2::exchange(
+            &mut pooled.io,
+            &mut pooled.state,
+            method,
+            url,
+            cookie.as_deref(),
+            origin.as_deref(),
+            referer.as_deref(),
+            &extra_refs,
+            body,
+        ) {
+            Ok(message) => {
+                let parsed = RawHttp {
+                    status: message.status,
+                    headers: message.headers,
+                    body: message.body,
+                };
+                store_h2(host, port, pooled);
+                return Ok(parsed);
+            }
+            Err(_) => {}
+        }
+    }
     match https_once(host, port, request, method, url, true) {
         Ok(message) => Ok(message),
         Err(error) => {
@@ -491,28 +683,59 @@ fn https_once(
             .map_err(|error| NetError::Tls(error.to_string()))?;
     }
     let alpn = connection.alpn_protocol().map(|protocol| protocol.to_vec());
-    let mut tls = rustls::Stream::new(&mut connection, &mut socket);
     if allow_h2 && alpn.as_deref() == Some(b"h2".as_slice()) {
+        let mut io = StreamOwned::new(connection, socket);
+        let mut state = http2::ConnState::new();
         let cookie = header_value_from_request(request, "cookie");
         let origin = header_value_from_request(request, "origin");
         let referer = header_value_from_request(request, "referer");
-        return http2::roundtrip(
-            &mut tls,
+        let (extra, body) = split_request(request);
+        let extra_refs: Vec<(&str, &str)> = extra
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let message = http2::exchange(
+            &mut io,
+            &mut state,
             method,
             url,
             cookie.as_deref(),
             origin.as_deref(),
             referer.as_deref(),
+            &extra_refs,
+            body,
         )
-            .map(|message| RawHttp {
-                status: message.status,
-                headers: message.headers,
-                body: message.body,
-            })
-            .map_err(|error| NetError::Tls(format!("http2: {error}")));
+        .map_err(|error| NetError::Tls(format!("http2: {error}")))?;
+        store_h2(
+            host,
+            port,
+            PooledHttp2 { io, state },
+        );
+        return Ok(RawHttp {
+            status: message.status,
+            headers: message.headers,
+            body: message.body,
+        });
     }
+    let mut tls = rustls::Stream::new(&mut connection, &mut socket);
     let raw = exchange(&mut tls, request)?;
     parse_http_message(&raw)
+}
+
+fn split_request(request: &[u8]) -> (Vec<(String, String)>, &[u8]) {
+    let Some(split) = request.windows(4).position(|mark| mark == b"\r\n\r\n") else {
+        return (Vec::new(), b"");
+    };
+    let head = std::str::from_utf8(&request[..split]).unwrap_or("");
+    let body = &request[split + 4..];
+    let mut headers = Vec::new();
+    for line in head.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        headers.push((name.trim().to_string(), value.trim().to_string()));
+    }
+    (headers, body)
 }
 
 fn header_value_from_request(request: &[u8], name: &str) -> Option<String> {
@@ -786,7 +1009,7 @@ mod tests {
     #[test]
     fn requests_advertise_mithu_after_chrome() {
         let url = Url::parse("https://example.com/a").unwrap();
-        let bytes = build_request("GET", &url, None, b"", None, None);
+        let bytes = build_request("GET", &url, None, b"", None, None, &[]);
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains(&format!("User-Agent: {USER_AGENT}")));
         assert!(text.contains("Mithu/0.1.0"));
@@ -794,9 +1017,18 @@ mod tests {
         assert!(text.contains(&format!("Sec-CH-UA: {SEC_CH_UA}")));
         assert!(text.contains("Sec-CH-UA-Mobile: ?0"));
         assert!(text.contains("Sec-CH-UA-Platform: \"Linux\""));
-        let cors = build_request("GET", &url, None, b"", None, Some("https://www.prothomalo.com"));
+        let cors = build_request(
+            "GET",
+            &url,
+            None,
+            b"",
+            None,
+            Some("https://www.prothomalo.com"),
+            &[("Accept", "application/json")],
+        );
         let cors = String::from_utf8(cors).unwrap();
         assert!(cors.contains("Referer: https://www.prothomalo.com/\r\n"));
+        assert!(cors.contains("Accept: application/json\r\n"));
         let encoded = http2::encode_request_for_test("GET", &url, None, None);
         let ua = USER_AGENT.as_bytes();
         assert!(encoded.windows(ua.len()).any(|window| window == ua));

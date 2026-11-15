@@ -1,20 +1,28 @@
 //! Host classes a page script expects to exist: `URL`, `TextEncoder`,
 //! `XMLHttpRequest`, `MutationObserver`, and `history`.
 
-use boa_engine::class::{Class, ClassBuilder};
-use boa_engine::object::builtins::{JsArray, JsPromise};
-use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
-use boa_engine::property::Attribute;
-use boa_engine::{
-    Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue,
-    NativeFunction, Trace, js_string,
-};
+use crate::engine::class::{Class, ClassBuilder};
+use crate::engine::object::builtins::{JsArray, JsPromise};
+use crate::engine::object::{FunctionObjectBuilder, ObjectInitializer};
+use crate::engine::property::Attribute;
+use crate::engine::{Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction};
+use crate::js_string;
 
 use crate::{arg_string, cors_allows, cross_origin, host, native, resolve_request};
 
 const ATTR: Attribute = Attribute::WRITABLE
     .union(Attribute::ENUMERABLE)
     .union(Attribute::CONFIGURABLE);
+
+fn illegal_constructor(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Err(JsNativeError::typ()
+        .with_message("Illegal constructor")
+        .into())
+}
 
 pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     context.register_global_class::<PageUrl>()?;
@@ -41,6 +49,19 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     context.register_global_class::<FontFaceHost>()?;
     context.register_global_class::<RangeHost>()?;
     context.register_global_class::<IntersectionObserverHost>()?;
+    let style_sheet = FunctionObjectBuilder::new(
+        context.realm(),
+        NativeFunction::from_fn_ptr(crate::construct_style_sheet),
+    )
+    .name(js_string!("CSSStyleSheet"))
+    .length(0)
+    .constructor(true)
+    .build();
+    context.register_global_property(
+        js_string!("CSSStyleSheet"),
+        style_sheet,
+        Attribute::WRITABLE.union(Attribute::CONFIGURABLE),
+    )?;
     context.register_global_class::<ResizeObserverHost>()?;
     register_html_elements(context)?;
     let image = context.global_object().get(js_string!("Image"), context)?;
@@ -75,18 +96,40 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
         "Comment",
         "CDATASection",
         "Text",
+        "DocumentType",
         "ProcessingInstruction",
         "Window",
         "SVGElement",
+        "SVGAnimatedString",
+        "SVGAnimatedLength",
+        "SVGAnimatedNumber",
+        "SVGRect",
         "CustomElementRegistry",
         "HTMLUnknownElement",
         "NodeFilter",
         "TreeWalker",
     ] {
         let prototype = ObjectInitializer::new(context).build();
-        let constructor = ObjectInitializer::new(context)
-            .property(js_string!("prototype"), prototype, ATTR)
-            .build();
+        let constructor = FunctionObjectBuilder::new(
+            context.realm(),
+            NativeFunction::from_fn_ptr(illegal_constructor),
+        )
+        .name(JsString::from(name))
+        .length(0)
+        .constructor(true)
+        .build();
+        constructor.set(
+            js_string!("prototype"),
+            JsValue::from(prototype.clone()),
+            false,
+            context,
+        )?;
+        prototype.set(
+            js_string!("constructor"),
+            JsValue::from(constructor.clone()),
+            false,
+            context,
+        )?;
         if name == "NodeFilter" {
             constructor.set(js_string!("SHOW_ALL"), JsValue::from(-1), false, context)?;
             constructor.set(js_string!("SHOW_ELEMENT"), JsValue::from(1), false, context)?;
@@ -117,9 +160,8 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
     Ok(())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct PageUrl {
-    #[unsafe_ignore_trace]
     url: mithu_url::Url,
 }
 
@@ -301,9 +343,8 @@ fn hash_of(url: &mithu_url::Url) -> String {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct SearchParams {
-    #[unsafe_ignore_trace]
     query: String,
 }
 
@@ -565,9 +606,8 @@ fn form_escape(input: &str) -> String {
     out
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct TextEncoderHost {
-    #[unsafe_ignore_trace]
     _private: u8,
 }
 
@@ -615,9 +655,8 @@ fn text_encode(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     uint8_array(text.as_bytes(), context)
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct TextDecoderHost {
-    #[unsafe_ignore_trace]
     _private: u8,
 }
 
@@ -710,18 +749,14 @@ fn uint8_array(bytes: &[u8], context: &mut Context) -> JsResult<JsValue> {
     Ok(array.into())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct Xhr {
-    #[unsafe_ignore_trace]
     method: String,
-    #[unsafe_ignore_trace]
     url: String,
-    #[unsafe_ignore_trace]
     asynchronous: bool,
-    #[unsafe_ignore_trace]
     status: u16,
-    #[unsafe_ignore_trace]
     body: String,
+    headers: Vec<(String, String)>,
 }
 
 impl Class for Xhr {
@@ -757,6 +792,7 @@ impl Class for Xhr {
             asynchronous: true,
             status: 0,
             body: String::new(),
+            headers: Vec::new(),
         })
     }
 
@@ -799,7 +835,18 @@ fn xhr_open(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     Ok(JsValue::undefined())
 }
 
-fn xhr_header(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+fn xhr_header(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(mut xhr) = object.downcast_mut::<Xhr>() else {
+        return Ok(JsValue::undefined());
+    };
+    let name = arg_string(args, 0, context)?;
+    let value = arg_string(args, 1, context)?;
+    if !name.is_empty() {
+        xhr.headers.push((name, value));
+    }
     Ok(JsValue::undefined())
 }
 
@@ -807,14 +854,22 @@ fn xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let object = this.as_object().ok_or_else(|| {
         JsNativeError::typ().with_message("XMLHttpRequest method called on the wrong object")
     })?;
-    let (method, url, asynchronous) = {
+    let (method, url, asynchronous, headers) = {
         let Some(xhr) = object.downcast_ref::<Xhr>() else {
             return Err(JsNativeError::typ()
                 .with_message("XMLHttpRequest method called on the wrong object")
                 .into());
         };
-        (xhr.method.clone(), xhr.url.clone(), xhr.asynchronous)
+        (
+            xhr.method.clone(),
+            xhr.url.clone(),
+            xhr.asynchronous,
+            xhr.headers.clone(),
+        )
     };
+    if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+        eprintln!("xhr {method} {url}");
+    }
     let body = args
         .first()
         .filter(|value| !value.is_undefined() && !value.is_null())
@@ -822,7 +877,7 @@ fn xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
         .transpose()?
         .map(|value| value.to_std_string_lossy())
         .unwrap_or_default();
-    let (status, text) = xhr_roundtrip(&method, &url, &body, context);
+    let (status, text) = xhr_roundtrip(&method, &url, &body, &headers, context);
     if asynchronous {
         if let Some(mut xhr) = object.downcast_mut::<Xhr>() {
             xhr.status = status;
@@ -871,7 +926,27 @@ fn apply_xhr(object: &JsObject, status: u16, text: &str, context: &mut Context) 
         true,
         context,
     )?;
-    object.set(js_string!("response"), js_string!(text), true, context)?;
+    let response_type = object
+        .get(js_string!("responseType"), context)?
+        .to_string(context)?
+        .to_std_string_lossy();
+    let response = if response_type == "json" {
+        let json = context.global_object().get(js_string!("JSON"), context)?;
+        match json.as_object().and_then(|value| {
+            value
+                .get(js_string!("parse"), context)
+                .ok()
+                .and_then(|parse| parse.as_object())
+        }) {
+            Some(parse) if parse.is_callable() => parse
+                .call(&json, &[js_string!(text).into()], context)
+                .unwrap_or(JsValue::null()),
+            _ => JsValue::null(),
+        }
+    } else {
+        js_string!(text).into()
+    };
+    object.set(js_string!("response"), response, true, context)?;
     object.set(js_string!("readyState"), JsValue::from(4), true, context)?;
     call_handler(object, "onreadystatechange", context)?;
     if (200..300).contains(&status) || status == 0 {
@@ -893,7 +968,13 @@ fn call_handler(object: &JsObject, name: &str, context: &mut Context) -> JsResul
     Ok(())
 }
 
-fn xhr_roundtrip(method: &str, spec: &str, body: &str, context: &mut Context) -> (u16, String) {
+fn xhr_roundtrip(
+    method: &str,
+    spec: &str,
+    body: &str,
+    headers: &[(String, String)],
+    context: &mut Context,
+) -> (u16, String) {
     let Ok(host) = host(context) else {
         return (0, String::new());
     };
@@ -906,15 +987,35 @@ fn xhr_roundtrip(method: &str, spec: &str, body: &str, context: &mut Context) ->
     }
     let initiator = mithu_url::Url::parse(&location).ok();
     let origin = initiator.as_ref().map(super::serialized_origin);
-    let result = if method == "POST" {
-        mithu_net::post(&url, "application/x-www-form-urlencoded", body.as_bytes())
-    } else if let (Some(page), Some(origin)) = (initiator.as_ref(), origin.as_deref()) {
-        mithu_net::get_with_origin(&url, &page.host, origin)
-    } else if let Some(page) = initiator.as_ref() {
-        mithu_net::get_from(&url, &page.host)
+    let content_type = headers.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            .then_some(value.as_str())
+    });
+    let header_refs: Vec<(&str, &str)> = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("content-type"))
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let fallback = if method.eq_ignore_ascii_case("POST") && !body.is_empty() {
+        let trimmed = body.trim_start();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            Some("application/json")
+        } else {
+            Some("application/x-www-form-urlencoded")
+        }
     } else {
-        mithu_net::get(&url)
+        None
     };
+    let result = mithu_net::send(
+        method,
+        &url,
+        content_type.or(fallback),
+        body.as_bytes(),
+        initiator.as_ref().map(|page| page.host.as_str()),
+        origin.as_deref(),
+        &header_refs,
+        true,
+    );
     match result {
         Ok(response) => {
             if let Some(page) = initiator.as_ref()
@@ -929,9 +1030,8 @@ fn xhr_roundtrip(method: &str, spec: &str, body: &str, context: &mut Context) ->
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct MutationObserverHost {
-    #[unsafe_ignore_trace]
     _private: u8,
 }
 
@@ -985,9 +1085,11 @@ impl Class for MutationObserverHost {
 
 fn history_object(context: &mut Context) -> JsResult<JsObject> {
     let length = native(context, "get length", 0, history_length);
+    let state = native(context, "get state", 0, history_state);
     let mut object = ObjectInitializer::new(context);
     object
         .accessor(js_string!("length"), Some(length), None, ATTR)
+        .accessor(js_string!("state"), Some(state), None, ATTR)
         .function(
             NativeFunction::from_fn_ptr(history_push),
             js_string!("pushState"),
@@ -1035,11 +1137,41 @@ fn history_url(args: &[JsValue], context: &mut Context) -> JsResult<Option<Strin
     Ok(Some(next.to_display()))
 }
 
-fn history_push(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn history_state(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::null());
+    };
+    let value = object.get(js_string!("__mithuState"), context)?;
+    if value.is_undefined() {
+        Ok(JsValue::null())
+    } else {
+        Ok(value)
+    }
+}
+
+fn remember_history_state(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<()> {
+    let Some(object) = this.as_object() else {
+        return Ok(());
+    };
+    let state = args.first().cloned().unwrap_or(JsValue::null());
+    let state = if state.is_undefined() {
+        JsValue::null()
+    } else {
+        state
+    };
+    object.set(js_string!("__mithuState"), state, false, context)?;
+    Ok(())
+}
+
+fn history_push(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    remember_history_state(this, args, context)?;
     let Some(next) = history_url(args, context)? else {
         return Ok(JsValue::undefined());
     };
     let host = host(context)?;
+    if host.location.borrow().as_str() == next {
+        return Ok(JsValue::undefined());
+    }
     *host.location.borrow_mut() = next.clone();
     let mut history = host.history.borrow_mut();
     let mut index = host.history_index.get();
@@ -1052,11 +1184,15 @@ fn history_push(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     Ok(JsValue::undefined())
 }
 
-fn history_replace(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn history_replace(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    remember_history_state(this, args, context)?;
     let Some(next) = history_url(args, context)? else {
         return Ok(JsValue::undefined());
     };
     let host = host(context)?;
+    if host.location.borrow().as_str() == next {
+        return Ok(JsValue::undefined());
+    }
     *host.location.borrow_mut() = next.clone();
     let mut history = host.history.borrow_mut();
     let index = host.history_index.get();
@@ -1371,6 +1507,14 @@ fn deliver_one_batch(records: &[mithu_dom::DomMutation], context: &mut Context) 
     Ok(())
 }
 
+fn node_list(ids: &[mithu_dom::NodeId], context: &mut Context) -> JsResult<JsValue> {
+    let nodes = ids
+        .iter()
+        .map(|id| crate::element_value(id.0, context))
+        .collect::<Vec<_>>();
+    Ok(JsArray::from_iter(nodes, context).into())
+}
+
 fn record_array(records: &[mithu_dom::DomMutation], context: &mut Context) -> JsResult<JsValue> {
     let mut values = Vec::new();
     for record in records {
@@ -1379,18 +1523,21 @@ fn record_array(records: &[mithu_dom::DomMutation], context: &mut Context) -> Js
             None => JsValue::null(),
         };
         let target = crate::element_value(record.target.0, context);
+        let added = node_list(&record.added, context)?;
+        let removed = node_list(&record.removed, context)?;
         let mut item = ObjectInitializer::new(context);
         item.property(js_string!("type"), js_string!(record.kind.clone()), ATTR)
             .property(js_string!("attributeName"), attribute, ATTR)
-            .property(js_string!("target"), target, ATTR);
+            .property(js_string!("target"), target, ATTR)
+            .property(js_string!("addedNodes"), added, ATTR)
+            .property(js_string!("removedNodes"), removed, ATTR);
         values.push(JsValue::from(item.build()));
     }
     Ok(JsArray::from_iter(values, context).into())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct HtmlImage {
-    #[unsafe_ignore_trace]
     src: String,
 }
 
@@ -1463,7 +1610,7 @@ fn image_set_src(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     Ok(JsValue::undefined())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct DomEvent;
 
 impl Class for DomEvent {
@@ -1515,7 +1662,7 @@ impl Class for DomEvent {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct CustomEventHost;
 
 impl Class for CustomEventHost {
@@ -1559,7 +1706,7 @@ impl Class for CustomEventHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct DocumentHost;
 
 impl Class for DocumentHost {
@@ -1603,7 +1750,7 @@ impl Class for DocumentHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct HtmlElementHost;
 
 thread_local! {
@@ -1664,17 +1811,14 @@ impl Class for HtmlElementHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct MessagePortHost {
-    #[unsafe_ignore_trace]
     id: u32,
-    #[unsafe_ignore_trace]
     peer: u32,
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct MessageChannelHost {
-    #[unsafe_ignore_trace]
     _private: u8,
 }
 
@@ -1696,7 +1840,7 @@ impl Class for MessagePortHost {
         class.method(
             js_string!("start"),
             0,
-            NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+            NativeFunction::from_fn_ptr(port_start),
         );
         class.method(
             js_string!("close"),
@@ -1734,6 +1878,10 @@ impl Class for MessagePortHost {
             .map(|port| port.id)
             .unwrap_or(0);
         remember_port(context, id, instance.clone().upcast().into())?;
+        let object = instance.clone().upcast();
+        let get = crate::native(context, "get onmessage", 0, port_onmessage_get);
+        let set = crate::native(context, "set onmessage", 1, port_onmessage_set);
+        let _ = crate::define_accessor(&object, context, "onmessage", get, Some(set));
         Ok(())
     }
 }
@@ -1787,7 +1935,7 @@ impl Class for MessageChannelHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct AbortSignalHost;
 
 impl Class for AbortSignalHost {
@@ -1843,7 +1991,7 @@ impl Class for AbortSignalHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct AbortControllerHost;
 
 impl Class for AbortControllerHost {
@@ -1884,7 +2032,7 @@ impl Class for AbortControllerHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct HtmlTemplateHost;
 
 impl Class for HtmlTemplateHost {
@@ -1903,7 +2051,7 @@ impl Class for HtmlTemplateHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct EventTargetHost;
 
 impl Class for EventTargetHost {
@@ -1937,7 +2085,7 @@ impl Class for EventTargetHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct NodeHost;
 
 impl Class for NodeHost {
@@ -1953,6 +2101,36 @@ impl Class for NodeHost {
             JsValue::from(11),
             ATTR,
         );
+        class.static_property(
+            js_string!("DOCUMENT_TYPE_NODE"),
+            JsValue::from(10),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_DISCONNECTED"),
+            JsValue::from(1),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_PRECEDING"),
+            JsValue::from(2),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_FOLLOWING"),
+            JsValue::from(4),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_CONTAINS"),
+            JsValue::from(8),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_CONTAINED_BY"),
+            JsValue::from(16),
+            ATTR,
+        );
         Ok(())
     }
 
@@ -1965,7 +2143,7 @@ impl Class for NodeHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct ElementHost;
 
 impl Class for ElementHost {
@@ -2043,6 +2221,16 @@ impl Class for ElementHost {
             NativeFunction::from_fn_ptr(super::query_selector_all),
         );
         class.method(
+            js_string!("closest"),
+            1,
+            NativeFunction::from_fn_ptr(super::closest_selector),
+        );
+        class.method(
+            js_string!("matches"),
+            1,
+            NativeFunction::from_fn_ptr(super::matches_selector),
+        );
+        class.method(
             js_string!("prepend"),
             0,
             NativeFunction::from_fn_ptr(super::prepend_nodes),
@@ -2093,7 +2281,7 @@ impl Class for ElementHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct DocumentFragmentHost;
 
 impl Class for DocumentFragmentHost {
@@ -2132,7 +2320,7 @@ impl Class for DocumentFragmentHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct ShadowRootHost;
 
 impl Class for ShadowRootHost {
@@ -2187,7 +2375,7 @@ fn element_animate(_this: &JsValue, _args: &[JsValue], context: &mut Context) ->
 macro_rules! html_class {
     ($($struct:ident => $name:literal),+ $(,)?) => {
         $(
-            #[derive(Debug, Trace, Finalize, JsData)]
+            #[derive(Debug)]
             struct $struct;
 
             impl Class for $struct {
@@ -2251,9 +2439,42 @@ html_class! {
     HtmlUListElement => "HTMLUListElement",
     HtmlVideoElement => "HTMLVideoElement",
     HtmlAudioElement => "HTMLAudioElement",
+    HtmlAreaElement => "HTMLAreaElement",
+    HtmlBaseElement => "HTMLBaseElement",
+    HtmlBrElement => "HTMLBRElement",
+    HtmlDataElement => "HTMLDataElement",
+    HtmlDataListElement => "HTMLDataListElement",
+    HtmlDetailsElement => "HTMLDetailsElement",
+    HtmlDialogElement => "HTMLDialogElement",
+    HtmlDirectoryElement => "HTMLDirectoryElement",
+    HtmlDListElement => "HTMLDListElement",
+    HtmlEmbedElement => "HTMLEmbedElement",
+    HtmlFieldSetElement => "HTMLFieldSetElement",
+    HtmlFontElement => "HTMLFontElement",
+    HtmlFrameElement => "HTMLFrameElement",
+    HtmlFrameSetElement => "HTMLFrameSetElement",
+    HtmlHrElement => "HTMLHRElement",
+    HtmlLegendElement => "HTMLLegendElement",
+    HtmlMapElement => "HTMLMapElement",
+    HtmlMarqueeElement => "HTMLMarqueeElement",
+    HtmlMediaElement => "HTMLMediaElement",
+    HtmlMenuElement => "HTMLMenuElement",
+    HtmlMeterElement => "HTMLMeterElement",
+    HtmlModElement => "HTMLModElement",
+    HtmlObjectElement => "HTMLObjectElement",
+    HtmlOptGroupElement => "HTMLOptGroupElement",
+    HtmlOutputElement => "HTMLOutputElement",
+    HtmlParamElement => "HTMLParamElement",
+    HtmlPreElement => "HTMLPreElement",
+    HtmlProgressElement => "HTMLProgressElement",
+    HtmlQuoteElement => "HTMLQuoteElement",
+    HtmlTableCaptionElement => "HTMLTableCaptionElement",
+    HtmlTableColElement => "HTMLTableColElement",
+    HtmlTimeElement => "HTMLTimeElement",
+    HtmlTrackElement => "HTMLTrackElement",
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct IntersectionObserverHost;
 
 impl Class for IntersectionObserverHost {
@@ -2298,7 +2519,7 @@ impl Class for IntersectionObserverHost {
     }
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct ResizeObserverHost;
 
 impl Class for ResizeObserverHost {
@@ -2344,33 +2565,24 @@ impl Class for ResizeObserverHost {
 }
 
 fn resize_observe(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let Some(object) = this.as_object() else {
-        return Ok(JsValue::undefined());
-    };
-    let callback = object.get(js_string!("callback"), context)?;
     let target = args.first().cloned().unwrap_or(JsValue::undefined());
+    let id = observed_node(&target, context);
+    let (width, height) = observer_size(id, context);
     let rect = ObjectInitializer::new(context)
         .property(js_string!("x"), JsValue::from(0), ATTR)
         .property(js_string!("y"), JsValue::from(0), ATTR)
         .property(js_string!("top"), JsValue::from(0), ATTR)
         .property(js_string!("left"), JsValue::from(0), ATTR)
-        .property(js_string!("width"), JsValue::from(800), ATTR)
-        .property(js_string!("height"), JsValue::from(600), ATTR)
-        .property(js_string!("right"), JsValue::from(800), ATTR)
-        .property(js_string!("bottom"), JsValue::from(600), ATTR)
+        .property(js_string!("width"), JsValue::from(width), ATTR)
+        .property(js_string!("height"), JsValue::from(height), ATTR)
+        .property(js_string!("right"), JsValue::from(width), ATTR)
+        .property(js_string!("bottom"), JsValue::from(height), ATTR)
         .build();
     let entry = ObjectInitializer::new(context)
         .property(js_string!("target"), target, ATTR)
         .property(js_string!("contentRect"), rect, ATTR)
         .build();
-    let records = JsArray::from_iter([JsValue::from(entry)], context);
-    if let Some(function) = callback
-        .as_object()
-        .filter(|function| function.is_callable())
-    {
-        let _ = function.call(this, &[JsValue::from(records), this.clone()], context);
-    }
-    Ok(JsValue::undefined())
+    queue_layout_observer(this, JsValue::from(entry), id, context)
 }
 
 fn intersection_observe(
@@ -2378,27 +2590,113 @@ fn intersection_observe(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let Some(object) = this.as_object() else {
-        return Ok(JsValue::undefined());
-    };
-    let callback = object.get(js_string!("callback"), context)?;
     let target = args.first().cloned().unwrap_or(JsValue::undefined());
+    let id = observed_node(&target, context);
     let entry = ObjectInitializer::new(context)
         .property(js_string!("isIntersecting"), JsValue::from(true), ATTR)
         .property(js_string!("intersectionRatio"), JsValue::from(1), ATTR)
         .property(js_string!("target"), target, ATTR)
         .build();
-    let records = JsArray::from_iter([JsValue::from(entry)], context);
-    if let Some(function) = callback
-        .as_object()
-        .filter(|function| function.is_callable())
+    queue_layout_observer(this, JsValue::from(entry), id, context)
+}
+
+fn observer_size(id: Option<usize>, context: &mut Context) -> (f64, f64) {
+    let Some(id) = id else {
+        return (1280.0, 800.0);
+    };
+    let Ok(host) = crate::host(context) else {
+        return (1280.0, 800.0);
+    };
+    let metrics = host.geometry.borrow().get(&id).copied();
+    match metrics {
+        Some(metrics) if metrics.width > 0.0 && metrics.height > 0.0 => {
+            (f64::from(metrics.width), f64::from(metrics.height))
+        }
+        _ => (1280.0, 800.0),
+    }
+}
+
+/// Deliver one observation per target, as a macrotask. Calling the callback
+/// inside `observe` re-enters React during render and hits the nested-update limit.
+fn queue_layout_observer(
+    this: &JsValue,
+    entry: JsValue,
+    target: Option<usize>,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let seen = object.get(js_string!("__seen"), context)?;
+    let seen = if let Some(seen) = seen.as_object() {
+        seen.clone()
+    } else {
+        let seen = ObjectInitializer::new(context).build();
+        object.set(js_string!("__seen"), seen.clone(), true, context)?;
+        seen
+    };
+    if let Some(id) = target {
+        let key = js_string!(id.to_string());
+        if seen.get(key.clone(), context)?.as_boolean() == Some(true) {
+            return Ok(JsValue::undefined());
+        }
+        seen.set(key, JsValue::from(true), true, context)?;
+    }
+    let records = object.get(js_string!("__records"), context)?;
+    let records = if records.is_object() {
+        records
+    } else {
+        let records = JsValue::from(JsArray::from_iter([], context));
+        object.set(js_string!("__records"), records.clone(), true, context)?;
+        records
+    };
+    let Some(records) = records.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let len = records
+        .get(js_string!("length"), context)?
+        .to_u32(context)
+        .unwrap_or(0);
+    records.set(len, entry, true, context)?;
+    if object
+        .get(js_string!("__scheduled"), context)?
+        .as_boolean()
+        != Some(true)
     {
-        let _ = function.call(this, &[JsValue::from(records), this.clone()], context);
+        object.set(js_string!("__scheduled"), JsValue::from(true), true, context)?;
+        crate::schedule_callback(context, this.clone(), 4, 0)?;
     }
     Ok(JsValue::undefined())
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+pub(crate) fn deliver_layout_observer(value: &JsValue, context: &mut Context) -> JsResult<()> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    object.set(
+        js_string!("__scheduled"),
+        JsValue::from(false),
+        true,
+        context,
+    )?;
+    let records = object.get(js_string!("__records"), context)?;
+    object.set(
+        js_string!("__records"),
+        JsArray::from_iter([], context),
+        true,
+        context,
+    )?;
+    let callback = object.get(js_string!("callback"), context)?;
+    if let Some(function) = callback
+        .as_object()
+        .filter(|function| function.is_callable())
+    {
+        function.call(value, &[records, value.clone()], context)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
 struct RangeHost;
 
 impl Class for RangeHost {
@@ -2494,7 +2792,7 @@ fn range_clone(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsR
     constructor.construct(&[], None, context).map(JsValue::from)
 }
 
-#[derive(Debug, Trace, Finalize, JsData)]
+#[derive(Debug)]
 struct FontFaceHost;
 
 impl Class for FontFaceHost {
@@ -2689,17 +2987,94 @@ fn port_post(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     let Some(peer_object) = peer_value.as_object() else {
         return Ok(JsValue::undefined());
     };
-    let mut event = ObjectInitializer::new(context);
-    event.property(js_string!("data"), data, ATTR);
-    let event = JsValue::from(event.build());
-    let handler = peer_object.get(js_string!("onmessage"), context)?;
+    let event = ObjectInitializer::new(context)
+        .property(js_string!("data"), data, ATTR)
+        .property(js_string!("target"), peer_value.clone(), ATTR)
+        .build();
+    let event = JsValue::from(event);
+    let started = peer_object
+        .get(js_string!("__started"), context)?
+        .as_boolean()
+        .unwrap_or(false);
+    if started {
+        crate::schedule_callback(context, event, 3, 0)?;
+        return Ok(JsValue::undefined());
+    }
+    let existing = peer_object.get(js_string!("__queue"), context)?;
+    let list = if let Some(list) = existing.as_object() {
+        list
+    } else {
+        let list = JsObject::from(JsArray::from_iter([], context));
+        peer_object.set(js_string!("__queue"), list.clone(), true, context)?;
+        list
+    };
+    let len = list
+        .get(js_string!("length"), context)?
+        .to_u32(context)
+        .unwrap_or(0);
+    list.set(len, event, true, context)?;
+    Ok(JsValue::undefined())
+}
+
+fn port_onmessage_get(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::null());
+    };
+    object.get(js_string!("__onmessage"), context)
+}
+
+fn port_onmessage_set(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let handler = args.first().cloned().unwrap_or(JsValue::null());
+    if let Some(object) = this.as_object() {
+        object.set(js_string!("__onmessage"), handler.clone(), true, context)?;
+    }
+    port_start(this, &[], context)?;
+    Ok(handler)
+}
+
+fn port_start(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let already = object
+        .get(js_string!("__started"), context)?
+        .as_boolean()
+        .unwrap_or(false);
+    object.set(js_string!("__started"), JsValue::from(true), true, context)?;
+    if already {
+        return Ok(JsValue::undefined());
+    }
+    let queue = object.get(js_string!("__queue"), context)?;
+    object.set(js_string!("__queue"), JsValue::undefined(), true, context)?;
+    if let Some(list) = queue.as_object() {
+        let len = list
+            .get(js_string!("length"), context)?
+            .to_u32(context)
+            .unwrap_or(0);
+        for index in 0..len {
+            let event = list.get(index, context)?;
+            crate::schedule_callback(context, event, 3, 0)?;
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+pub(crate) fn deliver_port_message(event: &JsValue, context: &mut Context) -> JsResult<()> {
+    let Some(event_object) = event.as_object() else {
+        return Ok(());
+    };
+    let target = event_object.get(js_string!("target"), context)?;
+    let Some(peer) = target.as_object() else {
+        return Ok(());
+    };
+    let handler = peer.get(js_string!("onmessage"), context)?;
     if let Some(function) = handler
         .as_object()
         .filter(|function| function.is_callable())
     {
-        let _ = function.call(&peer_value, &[event.clone()], context);
+        function.call(&target, &[event.clone()], context)?;
     }
-    let listeners = peer_object.get(js_string!("__listeners"), context)?;
+    let listeners = peer.get(js_string!("__listeners"), context)?;
     if let Some(listeners) = listeners.as_object() {
         let len = listeners
             .get(js_string!("length"), context)?
@@ -2711,11 +3086,15 @@ fn port_post(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
                 .as_object()
                 .filter(|function| function.is_callable())
             {
-                let _ = function.call(&peer_value, &[event.clone()], context);
+                function.call(&target, &[event.clone()], context)?;
             }
         }
     }
-    Ok(JsValue::undefined())
+    Ok(())
+}
+
+pub(crate) fn clone_message_value(value: &JsValue, context: &mut Context) -> JsResult<JsValue> {
+    clone_message(value, context)
 }
 
 fn port_listen(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

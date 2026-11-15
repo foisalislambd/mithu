@@ -67,7 +67,7 @@ struct Parser {
 
 pub fn parse_html(input: &str) -> Document {
     let mut parser = Parser {
-        chars: input.chars().collect(),
+        chars: normalize_newlines(input).chars().collect(),
         pos: 0,
         mode: Mode::BeforeHtml,
         return_mode: Mode::InBody,
@@ -1326,6 +1326,17 @@ impl Parser {
             self.doc.append_child(fragment, child);
         }
         self.doc.template_contents.push((id, fragment));
+        let declarative = self.doc.attr(id, "shadowrootmode").is_some()
+            || self.doc.attr(id, "shadowroot").is_some();
+        if declarative
+            && let Some(parent) = self.doc.nodes[id.0].parent
+        {
+            self.doc
+                .set_attr(fragment, "mithu-host", &parent.0.to_string());
+            self.doc
+                .set_attr(parent, "mithu-shadow", &fragment.0.to_string());
+            self.doc.detach(id);
+        }
     }
 
     fn capture_raw_element(&mut self, id: NodeId, name: &str) {
@@ -1582,6 +1593,24 @@ fn collapse_ws(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// HTML preprocessing: a CR LF pair and a lone CR both become LF. A hydration
+/// client that emits `\n` then disagrees with a DOM that kept the CR.
+fn normalize_newlines(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn named_entity(name: &str) -> Option<char> {
     Some(match name {
         "amp" => '&',
@@ -1709,6 +1738,21 @@ mod tests {
             .find(|id| doc.element_name(*id) == Some("body"))
             .unwrap();
         assert!(doc.text_content(body).contains("<x>"));
+    }
+
+    #[test]
+    fn carriage_returns_and_nbsp_match_the_client_text() {
+        let doc = parse_html("<p id='t'>A\r\nB&nbsp;C&#160;D</p>");
+        let p = doc.get_element_by_id("t").unwrap();
+        assert_eq!(doc.text_content(p), "A\nB\u{00A0}C\u{00A0}D");
+        assert_eq!(
+            doc.node(p)
+                .children
+                .iter()
+                .filter(|id| matches!(doc.node(**id).data, mithu_dom::NodeData::Text(_)))
+                .count(),
+            1
+        );
     }
 
     #[test]
