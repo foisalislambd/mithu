@@ -1354,6 +1354,29 @@ mod tests {
         assert!(painted.rect.width >= 8.0 && painted.rect.height >= 8.0);
     }
 
+    #[test]
+    fn a_webkit_mask_on_before_is_applied_to_the_element() {
+        let doc = parse_html(r#"<span class="icon"></span>"#);
+        let styles = style_document(
+            &doc,
+            r#".icon{display:inline-block;width:8px;height:8px}
+               .icon:before{content:"";display:block;width:8px;height:8px;background:#202122;-webkit-mask-image:url(icon.svg);-webkit-mask-size:contain}"#,
+        );
+        let icon = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("span")).then_some(NodeId(index))
+            })
+            .unwrap();
+        let mask = styles[icon.0].mask_image.as_deref().unwrap_or("");
+        assert!(
+            mask.ends_with("icon.svg"),
+            "prefixed ::before mask should land on the span, got {mask}"
+        );
+    }
+
     fn line_text(box_: &LayoutBox) -> String {
         let mut text = String::new();
         text.push_str(&box_

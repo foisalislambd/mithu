@@ -114,6 +114,12 @@ pub fn resolve(
     fonts: &[(String, Vec<u8>)],
 ) -> Frame {
     let _guard = RESOLVE_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    // Stylo parses `mask` and not the prefixed form. Vector icons set
+    // `-webkit-mask-image` (and the shorthand) on `::before`.
+    let aliased = author_css
+        .contains("-webkit-mask")
+        .then(|| author_css.replace("-webkit-mask", "mask"));
+    let author_css = aliased.as_deref().unwrap_or(author_css);
     let key = frame_key(doc, author_css, state, viewport_height, images, fonts);
     if let Some(frame) = FRAME_CACHE.with(|slot| {
         slot.borrow()
@@ -340,6 +346,21 @@ fn read_frame(blitz: &BaseDocument, mirror: &[Option<blitz_dom::NodeId>], doc: &
         };
         if let Some(values) = node.primary_styles() {
             styles[index] = project(&values);
+        }
+        // A mask painted on `::before` (Wikipedia's search icon) has no Mithu
+        // node of its own. The element's box is the one the painter fills.
+        if styles[index].mask_image.is_none()
+            && let Some(before_id) = node.before()
+            && let Some(before) = blitz.get_node(before_id)
+            && let Some(values) = before.primary_styles()
+        {
+            let pseudo = project(&values);
+            if pseudo.mask_image.is_some() {
+                styles[index].mask_image = pseudo.mask_image;
+                if styles[index].background.a == 0 {
+                    styles[index].background = pseudo.background;
+                }
+            }
         }
         let Some(element) = node.element_data() else {
             continue;

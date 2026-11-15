@@ -938,6 +938,7 @@ fn install_host(context: &mut Context) -> JsResult<()> {
         NativeFunction::from_fn_ptr(record_rejection),
     )?;
     context.eval(Source::from_bytes(READABLE_STREAM))?;
+    context.eval(Source::from_bytes(include_str!("platform.js")))?;
     Ok(())
 }
 
@@ -1079,6 +1080,9 @@ fn wire_prototype_chain(context: &mut Context) -> JsResult<()> {
     for name in crate::web::HTML_ELEMENT_CLASSES {
         link_prototype(context, name, "HTMLElement")?;
     }
+    link_prototype(context, "HTMLMediaElement", "HTMLElement")?;
+    link_prototype(context, "HTMLAudioElement", "HTMLMediaElement")?;
+    link_prototype(context, "HTMLVideoElement", "HTMLMediaElement")?;
     install_node_methods(context)?;
     install_canvas_methods(context)?;
     expose_shady_natives(context)?;
@@ -1935,7 +1939,27 @@ fn location_object(context: &mut Context) -> JsResult<JsObject> {
         .accessor(js_string!("pathname"), Some(path_get), None, ATTR)
         .accessor(js_string!("search"), Some(search_get), None, ATTR)
         .accessor(js_string!("hash"), Some(hash_get), None, ATTR)
-        .accessor(js_string!("origin"), Some(origin_get), None, ATTR);
+        .accessor(js_string!("origin"), Some(origin_get), None, ATTR)
+        .function(
+            NativeFunction::from_fn_ptr(set_location),
+            js_string!("assign"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(set_location),
+            js_string!("replace"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(reload_location),
+            js_string!("reload"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(get_location),
+            js_string!("toString"),
+            0,
+        );
     Ok(object.build())
 }
 
@@ -3222,8 +3246,34 @@ pub(crate) fn element_value(id: usize, context: &mut Context) -> JsValue {
 
 fn element_interface(tag: &str) -> &'static str {
     match tag {
-        "a" | "area" => "HTMLAnchorElement",
+        "a" => "HTMLAnchorElement",
+        "area" => "HTMLAreaElement",
         "audio" => "HTMLAudioElement",
+        "base" => "HTMLBaseElement",
+        "br" => "HTMLBRElement",
+        "blockquote" | "q" => "HTMLQuoteElement",
+        "caption" => "HTMLTableCaptionElement",
+        "col" | "colgroup" => "HTMLTableColElement",
+        "data" => "HTMLDataElement",
+        "datalist" => "HTMLDataListElement",
+        "del" | "ins" => "HTMLModElement",
+        "details" => "HTMLDetailsElement",
+        "dialog" => "HTMLDialogElement",
+        "dl" => "HTMLDListElement",
+        "embed" => "HTMLEmbedElement",
+        "fieldset" => "HTMLFieldSetElement",
+        "hr" => "HTMLHRElement",
+        "legend" => "HTMLLegendElement",
+        "map" => "HTMLMapElement",
+        "menu" => "HTMLMenuElement",
+        "meter" => "HTMLMeterElement",
+        "object" => "HTMLObjectElement",
+        "optgroup" => "HTMLOptGroupElement",
+        "output" => "HTMLOutputElement",
+        "pre" => "HTMLPreElement",
+        "progress" => "HTMLProgressElement",
+        "time" => "HTMLTimeElement",
+        "track" => "HTMLTrackElement",
         "body" => "HTMLBodyElement",
         "button" => "HTMLButtonElement",
         "canvas" => "HTMLCanvasElement",
@@ -5291,6 +5341,12 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
         .collect();
+    let method = fetch_method(args, context);
+    let body_bytes = fetch_body(args, context)?;
+    let content_type = extra.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            .then_some(value.clone())
+    });
     let outcome = resolve_request(&location, &spec).and_then(|url| {
         let initiator = mithu_url::Url::parse(&location)
             .ok()
@@ -5298,14 +5354,15 @@ fn fetch_resource(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
             .filter(|host| !host.is_empty());
         let page = mithu_url::Url::parse(&location).ok();
         let origin = page.as_ref().map(serialized_origin);
-        let response = if let (Some(host), Some(origin)) = (initiator.as_deref(), origin.as_deref())
-        {
-            mithu_net::get_with_origin_headers(&url, host, origin, &extra_refs)
-        } else if let Some(host) = initiator.as_deref() {
-            mithu_net::get_from(&url, host)
-        } else {
-            mithu_net::get(&url)
-        };
+        let response = mithu_net::send(
+            &method,
+            &url,
+            content_type.as_deref(),
+            &body_bytes,
+            initiator.as_deref(),
+            origin.as_deref(),
+            &extra_refs,
+        );
         let mode = fetch_mode(args, context);
         response
             .map_err(|error| error.to_string())
@@ -5402,6 +5459,50 @@ fn fetch_headers(args: &[JsValue], context: &mut Context) -> JsResult<Vec<(Strin
         out.push((name.to_string(), value));
     }
     Ok(out)
+}
+
+fn fetch_method(args: &[JsValue], context: &mut Context) -> String {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let Ok(method) = object.get(js_string!("method"), context) else {
+            continue;
+        };
+        if let Some(text) = method.as_string() {
+            let method = text.to_std_string_lossy();
+            if !method.is_empty() {
+                return method.to_ascii_uppercase();
+            }
+        }
+    }
+    "GET".to_string()
+}
+
+fn fetch_body(args: &[JsValue], context: &mut Context) -> JsResult<Vec<u8>> {
+    for candidate in [args.get(1), args.first()] {
+        let Some(object) = candidate.and_then(JsValue::as_object) else {
+            continue;
+        };
+        let body = object.get(js_string!("body"), context)?;
+        if body.is_undefined() || body.is_null() {
+            continue;
+        }
+        if let Some(object) = body.as_object()
+            && let Ok(text) = object.get(js_string!("_body"), context)
+            && text.is_string()
+        {
+            return Ok(text.to_string(context)?.to_std_string_escaped().into_bytes());
+        }
+        if let Some(object) = body.as_object()
+            && let Ok(text) = object.get(js_string!("_text"), context)
+            && text.is_string()
+        {
+            return Ok(text.to_string(context)?.to_std_string_escaped().into_bytes());
+        }
+        return Ok(body.to_string(context)?.to_std_string_escaped().into_bytes());
+    }
+    Ok(Vec::new())
 }
 
 fn fetch_mode(args: &[JsValue], context: &mut Context) -> String {
@@ -5754,6 +5855,24 @@ fn response_object(
     headers: String,
     context: &mut Context,
 ) -> JsValue {
+    if let Ok(ctor) = context.global_object().get(js_string!("Response"), context)
+        && let Some(ctor) = ctor.as_object().filter(|object| object.is_constructor())
+    {
+        let status_text = if ok { "OK" } else { "" };
+        let init = ObjectInitializer::new(context)
+            .property(js_string!("status"), JsValue::from(i32::from(status)), ATTR)
+            .property(js_string!("statusText"), js_string!(status_text), ATTR)
+            .property(js_string!("url"), js_string!(url.clone()), ATTR)
+            .property(js_string!("headers"), js_string!(headers.clone()), ATTR)
+            .build();
+        if let Ok(value) = ctor.construct(
+            &[js_string!(body.clone()).into(), JsValue::from(init)],
+            None,
+            context,
+        ) {
+            return value.into();
+        }
+    }
     let headers_object = {
         let mut headers_object = ObjectInitializer::with_native_data(
             ResponseKey {
@@ -6142,6 +6261,13 @@ fn set_location(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
         *host.navigation.borrow_mut() = Some(next.clone());
         *host.location.borrow_mut() = next;
     }
+    Ok(JsValue::undefined())
+}
+
+fn reload_location(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let current = host.location.borrow().clone();
+    *host.navigation.borrow_mut() = Some(current);
     Ok(JsValue::undefined())
 }
 
@@ -8162,5 +8288,65 @@ mod tests {
         let session = Session::open_at(doc, "https://react.dev/", |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
         assert_eq!(session.document().title, "hydrated");
+    }
+
+    #[test]
+    fn the_common_window_surface_is_constructable() {
+        let doc = parse_html(
+            r#"<dialog id="ask"></dialog><span id="icon"></span>
+            <script>
+              var dialog = document.getElementById("ask");
+              if (!(dialog instanceof HTMLDialogElement)) throw new Error("dialog type");
+              if (!(document.createElement("br") instanceof HTMLBRElement)) throw new Error("br");
+              if (!(document.createElement("audio") instanceof HTMLMediaElement)) throw new Error("media");
+              dialog.showModal();
+              if (!dialog.open) throw new Error("open");
+              dialog.close("yes");
+              if (dialog.open || dialog.returnValue !== "yes") throw new Error("close:" + dialog.returnValue);
+              var slot = document.createElement("slot");
+              slot.appendChild(document.createElement("b"));
+              if (slot.assignedElements().length !== 1) throw new Error("slot");
+              if (CSS.supports("display", "grid") !== true) throw new Error("supports");
+              if (CSS.escape("a b") !== "a\\ b") throw new Error("escape:" + CSS.escape("a b"));
+              if (String(CSS.px(12)) !== "12px" || String(CSS.number(2)) !== "2") throw new Error("css unit");
+              if (typeof navigation.navigate !== "function") throw new Error("navigation");
+              if (typeof navigation.currentEntry.getState !== "function") throw new Error("entry");
+              var any = AbortSignal.any([AbortSignal.abort("stop")]);
+              if (!any.aborted) throw new Error("any");
+              if (typeof AbortSignal.timeout(1000).aborted !== "boolean") throw new Error("timeout");
+              var cloned = structuredClone({ n: 1, list: [2] });
+              if (cloned.n !== 1 || cloned.list[0] !== 2) throw new Error("clone");
+              var headers = new Headers("Accept: text/html\nX-QT-AUTH: token");
+              if (headers.get("x-qt-auth") !== "token") throw new Error("headers");
+              var response = new Response("{\"ok\":1}", { status: 201, headers: headers, url: "https://example.com/a" });
+              if (response.status !== 201 || !response.ok || response.headers.get("accept") !== "text/html") throw new Error("response");
+              if (Response.json({ a: 1 }).headers.get("content-type") !== "application/json") throw new Error("json");
+              var request = new Request("/path", { method: "post", body: "hi", headers: { "content-type": "text/plain" } });
+              if (request.method !== "POST" || request.headers.get("content-type") !== "text/plain") throw new Error("request");
+              if (!request.url.endsWith("/path")) throw new Error("request url " + request.url);
+              var blob = new Blob(["ab"]);
+              if (blob.size !== 2) throw new Error("blob");
+              if (!(new File(["a"], "a.txt") instanceof Blob)) throw new Error("file");
+              var form = new FormData();
+              form.append("q", "1");
+              if (form.get("q") !== "1") throw new Error("form");
+              if (!URL.canParse("https://example.com") || URL.canParse("http://[")) throw new Error("canParse");
+              if ([1, 2, 3].findLast(function (n) { return n < 3; }) !== 2) throw new Error("findLast");
+              if ([3, 1, 2].toSorted().join() !== "1,2,3") throw new Error("toSorted");
+              var grouped = Object.groupBy(["aa", "b"], function (item) { return item.length; });
+              if (grouped[2].length !== 1) throw new Error("groupBy");
+              var pair = Promise.withResolvers();
+              if (typeof pair.resolve !== "function") throw new Error("withResolvers");
+              if (new WeakRef({ id: 7 }).deref().id !== 7) throw new Error("weak");
+              new FinalizationRegistry(function () {});
+              if (typeof location.assign !== "function" || location.toString().indexOf("example.com") < 0) throw new Error("location");
+              document.title = "platform";
+            </script>"#,
+        );
+        let session = Session::open_at(doc, "https://example.com/docs", |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "platform");
+        let dialog = session.document().get_element_by_id("ask").unwrap();
+        assert!(session.document().attr(dialog, "open").is_none());
     }
 }

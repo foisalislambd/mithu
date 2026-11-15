@@ -224,6 +224,40 @@ pub fn get_with_origin(url: &Url, initiator_host: &str, origin: &str) -> Result<
 }
 
 /// Like [`get_with_origin`], with request headers from `fetch` init.
+/// A scripted `fetch`. `method` and `body` come from the `Request`, and the
+/// cookie jar is applied the same way as a subresource GET.
+pub fn send(
+    method: &str,
+    url: &Url,
+    content_type: Option<&str>,
+    body: &[u8],
+    initiator_host: Option<&str>,
+    origin: Option<&str>,
+    headers: &[(&str, &str)],
+) -> Result<Response, NetError> {
+    let cache = if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+        CacheMode::Use
+    } else {
+        CacheMode::Bypass
+    };
+    fetch(
+        method,
+        url,
+        content_type,
+        if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+            &[]
+        } else {
+            body
+        },
+        0,
+        cache,
+        initiator_host,
+        false,
+        origin,
+        headers,
+    )
+}
+
 pub fn get_with_origin_headers(
     url: &Url,
     initiator_host: &str,
