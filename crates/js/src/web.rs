@@ -998,9 +998,11 @@ impl Class for MutationObserverHost {
 
 fn history_object(context: &mut Context) -> JsResult<JsObject> {
     let length = native(context, "get length", 0, history_length);
+    let state = native(context, "get state", 0, history_state);
     let mut object = ObjectInitializer::new(context);
     object
         .accessor(js_string!("length"), Some(length), None, ATTR)
+        .accessor(js_string!("state"), Some(state), None, ATTR)
         .function(
             NativeFunction::from_fn_ptr(history_push),
             js_string!("pushState"),
@@ -1048,11 +1050,41 @@ fn history_url(args: &[JsValue], context: &mut Context) -> JsResult<Option<Strin
     Ok(Some(next.to_display()))
 }
 
-fn history_push(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn history_state(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::null());
+    };
+    let value = object.get(js_string!("__mithuState"), context)?;
+    if value.is_undefined() {
+        Ok(JsValue::null())
+    } else {
+        Ok(value)
+    }
+}
+
+fn remember_history_state(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<()> {
+    let Some(object) = this.as_object() else {
+        return Ok(());
+    };
+    let state = args.first().cloned().unwrap_or(JsValue::null());
+    let state = if state.is_undefined() {
+        JsValue::null()
+    } else {
+        state
+    };
+    object.set(js_string!("__mithuState"), state, false, context)?;
+    Ok(())
+}
+
+fn history_push(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    remember_history_state(this, args, context)?;
     let Some(next) = history_url(args, context)? else {
         return Ok(JsValue::undefined());
     };
     let host = host(context)?;
+    if host.location.borrow().as_str() == next {
+        return Ok(JsValue::undefined());
+    }
     *host.location.borrow_mut() = next.clone();
     let mut history = host.history.borrow_mut();
     let mut index = host.history_index.get();
@@ -1065,11 +1097,15 @@ fn history_push(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     Ok(JsValue::undefined())
 }
 
-fn history_replace(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn history_replace(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    remember_history_state(this, args, context)?;
     let Some(next) = history_url(args, context)? else {
         return Ok(JsValue::undefined());
     };
     let host = host(context)?;
+    if host.location.borrow().as_str() == next {
+        return Ok(JsValue::undefined());
+    }
     *host.location.borrow_mut() = next.clone();
     let mut history = host.history.borrow_mut();
     let index = host.history_index.get();
@@ -2416,33 +2452,24 @@ impl Class for ResizeObserverHost {
 }
 
 fn resize_observe(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let Some(object) = this.as_object() else {
-        return Ok(JsValue::undefined());
-    };
-    let callback = object.get(js_string!("callback"), context)?;
     let target = args.first().cloned().unwrap_or(JsValue::undefined());
+    let id = observed_node(&target, context);
+    let (width, height) = observer_size(id, context);
     let rect = ObjectInitializer::new(context)
         .property(js_string!("x"), JsValue::from(0), ATTR)
         .property(js_string!("y"), JsValue::from(0), ATTR)
         .property(js_string!("top"), JsValue::from(0), ATTR)
         .property(js_string!("left"), JsValue::from(0), ATTR)
-        .property(js_string!("width"), JsValue::from(800), ATTR)
-        .property(js_string!("height"), JsValue::from(600), ATTR)
-        .property(js_string!("right"), JsValue::from(800), ATTR)
-        .property(js_string!("bottom"), JsValue::from(600), ATTR)
+        .property(js_string!("width"), JsValue::from(width), ATTR)
+        .property(js_string!("height"), JsValue::from(height), ATTR)
+        .property(js_string!("right"), JsValue::from(width), ATTR)
+        .property(js_string!("bottom"), JsValue::from(height), ATTR)
         .build();
     let entry = ObjectInitializer::new(context)
         .property(js_string!("target"), target, ATTR)
         .property(js_string!("contentRect"), rect, ATTR)
         .build();
-    let records = JsArray::from_iter([JsValue::from(entry)], context);
-    if let Some(function) = callback
-        .as_object()
-        .filter(|function| function.is_callable())
-    {
-        let _ = function.call(this, &[JsValue::from(records), this.clone()], context);
-    }
-    Ok(JsValue::undefined())
+    queue_layout_observer(this, JsValue::from(entry), id, context)
 }
 
 fn intersection_observe(
@@ -2450,24 +2477,110 @@ fn intersection_observe(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let Some(object) = this.as_object() else {
-        return Ok(JsValue::undefined());
-    };
-    let callback = object.get(js_string!("callback"), context)?;
     let target = args.first().cloned().unwrap_or(JsValue::undefined());
+    let id = observed_node(&target, context);
     let entry = ObjectInitializer::new(context)
         .property(js_string!("isIntersecting"), JsValue::from(true), ATTR)
         .property(js_string!("intersectionRatio"), JsValue::from(1), ATTR)
         .property(js_string!("target"), target, ATTR)
         .build();
-    let records = JsArray::from_iter([JsValue::from(entry)], context);
+    queue_layout_observer(this, JsValue::from(entry), id, context)
+}
+
+fn observer_size(id: Option<usize>, context: &mut Context) -> (f64, f64) {
+    let Some(id) = id else {
+        return (1280.0, 800.0);
+    };
+    let Ok(host) = crate::host(context) else {
+        return (1280.0, 800.0);
+    };
+    let metrics = host.geometry.borrow().get(&id).copied();
+    match metrics {
+        Some(metrics) if metrics.width > 0.0 && metrics.height > 0.0 => {
+            (f64::from(metrics.width), f64::from(metrics.height))
+        }
+        _ => (1280.0, 800.0),
+    }
+}
+
+/// Deliver one observation per target, as a macrotask. Calling the callback
+/// inside `observe` re-enters React during render and hits the nested-update limit.
+fn queue_layout_observer(
+    this: &JsValue,
+    entry: JsValue,
+    target: Option<usize>,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let seen = object.get(js_string!("__seen"), context)?;
+    let seen = if let Some(seen) = seen.as_object() {
+        seen.clone()
+    } else {
+        let seen = ObjectInitializer::new(context).build();
+        object.set(js_string!("__seen"), seen.clone(), true, context)?;
+        seen
+    };
+    if let Some(id) = target {
+        let key = js_string!(id.to_string());
+        if seen.get(key.clone(), context)?.as_boolean() == Some(true) {
+            return Ok(JsValue::undefined());
+        }
+        seen.set(key, JsValue::from(true), true, context)?;
+    }
+    let records = object.get(js_string!("__records"), context)?;
+    let records = if records.is_object() {
+        records
+    } else {
+        let records = JsValue::from(JsArray::from_iter([], context));
+        object.set(js_string!("__records"), records.clone(), true, context)?;
+        records
+    };
+    let Some(records) = records.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let len = records
+        .get(js_string!("length"), context)?
+        .to_u32(context)
+        .unwrap_or(0);
+    records.set(len, entry, true, context)?;
+    if object
+        .get(js_string!("__scheduled"), context)?
+        .as_boolean()
+        != Some(true)
+    {
+        object.set(js_string!("__scheduled"), JsValue::from(true), true, context)?;
+        crate::schedule_callback(context, this.clone(), 4, 0)?;
+    }
+    Ok(JsValue::undefined())
+}
+
+pub(crate) fn deliver_layout_observer(value: &JsValue, context: &mut Context) -> JsResult<()> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    object.set(
+        js_string!("__scheduled"),
+        JsValue::from(false),
+        true,
+        context,
+    )?;
+    let records = object.get(js_string!("__records"), context)?;
+    object.set(
+        js_string!("__records"),
+        JsArray::from_iter([], context),
+        true,
+        context,
+    )?;
+    let callback = object.get(js_string!("callback"), context)?;
     if let Some(function) = callback
         .as_object()
         .filter(|function| function.is_callable())
     {
-        let _ = function.call(this, &[JsValue::from(records), this.clone()], context);
+        let _ = function.call(value, &[records, value.clone()], context);
     }
-    Ok(JsValue::undefined())
+    Ok(())
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]

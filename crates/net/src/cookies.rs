@@ -80,12 +80,14 @@ impl CookieJar {
             if name != "set-cookie" {
                 continue;
             }
-            let Some(parsed) = parse_set_cookie(value, url, now, top_level_host) else {
-                continue;
-            };
-            self.cookies.retain(|cookie| !same_slot(cookie, &parsed));
-            if parsed.expires_at != Some(0) {
-                self.cookies.push(parsed);
+            for piece in split_combined_cookies(value) {
+                let Some(parsed) = parse_set_cookie(piece, url, now, top_level_host) else {
+                    continue;
+                };
+                self.cookies.retain(|cookie| !same_slot(cookie, &parsed));
+                if parsed.expires_at != Some(0) {
+                    self.cookies.push(parsed);
+                }
             }
         }
     }
@@ -363,6 +365,46 @@ fn default_path(path: &str) -> String {
     }
 }
 
+/// A single header line sometimes carries two cookies joined by a comma.
+/// An `Expires` date also contains a comma, and that comma is followed by a
+/// day number rather than another `name=value` pair.
+fn split_combined_cookies(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b',' {
+            let rest = value[index + 1..].trim_start();
+            if cookie_pair_starts(rest) {
+                let piece = value[start..index].trim();
+                if !piece.is_empty() {
+                    parts.push(piece);
+                }
+                start = value.len() - rest.len();
+                index = start;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    let tail = value[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    parts
+}
+
+fn cookie_pair_starts(value: &str) -> bool {
+    let end = value.find(['=', ';', ',']).unwrap_or(value.len());
+    let name = &value[..end];
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        && value[end..].starts_with('=')
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -492,6 +534,39 @@ mod tests {
             Some("theme=light")
         );
         assert!(jar.header_for(&url("https://example.org/")).is_none());
+    }
+
+    #[test]
+    fn each_set_cookie_is_stored_including_a_leading_dot() {
+        let mut jar = CookieJar::new();
+        let home = url("https://www.prothomalo.com/");
+        jar.ingest(
+            &home,
+            &[
+                (
+                    "set-cookie".into(),
+                    "qt-auth=one; Domain=.prothomalo.com; Path=/".into(),
+                ),
+                (
+                    "set-cookie".into(),
+                    "sid=two; Path=/, theme=dark; Path=/blog".into(),
+                ),
+            ],
+        );
+        let header = jar
+            .header_for(&url("https://www.prothomalo.com/"))
+            .unwrap_or_default();
+        assert!(header.contains("qt-auth=one"), "{header}");
+        assert!(header.contains("sid=two"), "{header}");
+        assert!(!header.contains("theme=dark"), "{header}");
+        let blog = jar
+            .header_for(&url("https://www.prothomalo.com/blog"))
+            .unwrap_or_default();
+        assert!(blog.contains("theme=dark"), "{blog}");
+        let joined = jar
+            .header_for(&url("https://prothomalo.com/"))
+            .unwrap_or_default();
+        assert!(joined.contains("qt-auth=one"), "{joined}");
     }
 
     #[test]

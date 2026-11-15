@@ -14,7 +14,7 @@ use winit::window::{Window, WindowId};
 fn main() {
     let run = std::thread::Builder::new()
         .name("mithu".into())
-        .stack_size(16 * 1024 * 1024)
+        .stack_size(32 * 1024 * 1024)
         .spawn(run)
         .expect("start mithu");
     if let Err(payload) = run.join() {

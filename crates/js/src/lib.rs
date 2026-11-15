@@ -200,7 +200,10 @@ impl Session {
         // large expression (Google's interstitial) hits that before it finishes.
         let mut limits = boa_engine::vm::RuntimeLimits::default();
         limits.set_stack_size_limit(1024 * 1024);
-        limits.set_recursion_limit(4_096);
+        // Each Boa frame is several kilobytes of native stack. 4,096 frames
+        // overflow the UI thread before Boa can throw. 1,536 still covers a
+        // deep render and turns a runaway constructor into a catchable error.
+        limits.set_recursion_limit(1_536);
         context.set_runtime_limits(limits);
         context.insert_data(Host {
             doc: Rc::clone(&shared),
@@ -829,6 +832,11 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     context.register_global_property(js_string!("navigator"), navigator, flags)?;
     let screen = screen_object(context)?;
     context.register_global_property(js_string!("screen"), screen, flags)?;
+    context.register_global_property(js_string!("innerWidth"), JsValue::from(1280), flags)?;
+    context.register_global_property(js_string!("innerHeight"), JsValue::from(800), flags)?;
+    context.register_global_property(js_string!("outerWidth"), JsValue::from(1280), flags)?;
+    context.register_global_property(js_string!("outerHeight"), JsValue::from(800), flags)?;
+    context.register_global_property(js_string!("devicePixelRatio"), JsValue::from(1), flags)?;
     context.register_global_property(js_string!("location"), location.clone(), flags)?;
     if let Ok(document) = context.global_object().get(js_string!("document"), context)
         && let Some(document) = document.as_object()
@@ -2130,6 +2138,16 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(create_comment),
+            js_string!("createComment"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_document_fragment),
+            js_string!("createDocumentFragment"),
+            0,
+        )
+        .function(
             NativeFunction::from_fn_ptr(get_elements_by_tag_name),
             js_string!("getElementsByTagName"),
             1,
@@ -2589,6 +2607,16 @@ fn create_html_document(
             NativeFunction::from_fn_ptr(create_text_node),
             js_string!("createTextNode"),
             1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_comment),
+            js_string!("createComment"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(create_document_fragment),
+            js_string!("createDocumentFragment"),
+            0,
         )
         .build();
     Ok(doc.into())
@@ -3374,6 +3402,21 @@ fn get_bounding_rect(
     let y = f64::from(metrics.y - scroll);
     let width = f64::from(metrics.width);
     let height = f64::from(metrics.height);
+    let stamp = format!("{x}:{y}:{width}:{height}");
+    if let Some(object) = this.as_object() {
+        let cached = object.get(js_string!("__mithuRect"), context)?;
+        if let Some(cached_object) = cached.as_object() {
+            let cached_stamp = cached_object
+                .get(js_string!("__stamp"), context)
+                .ok()
+                .and_then(|value| value.as_string())
+                .map(|value| value.to_std_string_escaped())
+                .unwrap_or_default();
+            if cached_stamp == stamp {
+                return Ok(cached);
+            }
+        }
+    }
     let mut object = ObjectInitializer::new(context);
     object
         .property(js_string!("x"), JsValue::from(x), ATTR)
@@ -3383,8 +3426,13 @@ fn get_bounding_rect(
         .property(js_string!("left"), JsValue::from(x), ATTR)
         .property(js_string!("top"), JsValue::from(y), ATTR)
         .property(js_string!("right"), JsValue::from(x + width), ATTR)
-        .property(js_string!("bottom"), JsValue::from(y + height), ATTR);
-    Ok(object.build().into())
+        .property(js_string!("bottom"), JsValue::from(y + height), ATTR)
+        .property(js_string!("__stamp"), js_string!(stamp), ATTR);
+    let rect = JsValue::from(object.build());
+    if let Some(object) = this.as_object() {
+        let _ = object.set(js_string!("__mithuRect"), rect.clone(), true, context);
+    }
+    Ok(rect)
 }
 
 fn metric_number(
@@ -3506,10 +3554,23 @@ fn note_mutation(
 
 fn match_media(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let query = arg_string(args, 0, context).unwrap_or_default();
+    let global = context.global_object();
+    let existing = global.get(js_string!("__mithuMql"), context)?;
+    let bag = if let Some(object) = existing.as_object() {
+        object.clone()
+    } else {
+        let object = ObjectInitializer::new(context).build();
+        global.set(js_string!("__mithuMql"), object.clone(), true, context)?;
+        object
+    };
+    let cached = bag.get(js_string!(query.clone()), context)?;
+    if cached.is_object() {
+        return Ok(cached);
+    }
     let mut object = ObjectInitializer::new(context);
     object
-        .property(js_string!("media"), js_string!(query), ATTR)
-        .property(js_string!("matches"), JsValue::from(false), ATTR)
+        .property(js_string!("media"), js_string!(query.clone()), ATTR)
+        .property(js_string!("matches"), JsValue::from(media_matches(&query)), ATTR)
         .function(
             NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
             js_string!("addListener"),
@@ -3530,7 +3591,50 @@ fn match_media(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
             js_string!("removeEventListener"),
             2,
         );
-    Ok(object.build().into())
+    let list = JsValue::from(object.build());
+    bag.set(js_string!(query), list.clone(), true, context)?;
+    Ok(list)
+}
+
+/// Viewport is 1280×800. A query is answered once and then cached, so a
+/// `useSyncExternalStore` snapshot keeps the same boolean.
+fn media_matches(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    if query.contains("prefers-color-scheme") && query.contains("dark") {
+        return false;
+    }
+    if query.contains("prefers-reduced-motion") {
+        return false;
+    }
+    if let Some(px) = media_length(&query, "min-width") {
+        return 1280.0 >= px;
+    }
+    if let Some(px) = media_length(&query, "max-width") {
+        return 1280.0 <= px;
+    }
+    if let Some(px) = media_length(&query, "min-height") {
+        return 800.0 >= px;
+    }
+    if let Some(px) = media_length(&query, "max-height") {
+        return 800.0 <= px;
+    }
+    false
+}
+
+fn media_length(query: &str, feature: &str) -> Option<f32> {
+    let rest = query.split(feature).nth(1)?;
+    let rest = rest.trim_start().trim_start_matches(':').trim_start();
+    let digits: String = rest
+        .chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
+    let px = digits.parse::<f32>().ok()?;
+    if rest.contains("em") {
+        Some(px * 16.0)
+    } else {
+        Some(px)
+    }
 }
 
 fn get_computed_style(
@@ -3887,6 +3991,30 @@ fn upgrade_custom(_this: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
     if !tag.contains('-') {
+        return;
+    }
+    // A constructor that creates another instance of itself would recurse
+    // until the native stack aborts. Stop that chain and keep the element.
+    const MAX_UPGRADE_DEPTH: u32 = 64;
+    thread_local! {
+        static UPGRADE_DEPTH: Cell<u32> = const { Cell::new(0) };
+    }
+    let depth = UPGRADE_DEPTH.with(|slot| {
+        let depth = slot.get();
+        slot.set(depth.saturating_add(1));
+        depth
+    });
+    struct UpgradeGuard;
+    impl Drop for UpgradeGuard {
+        fn drop(&mut self) {
+            UPGRADE_DEPTH.with(|slot| slot.set(slot.get().saturating_sub(1)));
+        }
+    }
+    let _guard = UpgradeGuard;
+    if depth >= MAX_UPGRADE_DEPTH {
+        if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+            eprintln!("custom element upgrade nested too deep: {tag}");
+        }
         return;
     }
     let Ok(bag) = context
@@ -5213,6 +5341,7 @@ fn run_due_timers(context: &mut Context, ms: u64) -> JsResult<bool> {
             }
             2 => crate::web::finish_xhr(&item, context)?,
             3 => deliver_macrotask_message(&item, context)?,
+            4 => crate::web::deliver_layout_observer(&item, context)?,
             _ => {
                 if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
                     function.call(&JsValue::undefined(), &[], context)?;
@@ -6317,6 +6446,23 @@ fn create_text_node(_this: &JsValue, args: &[JsValue], context: &mut Context) ->
     let text = arg_string(args, 0, context)?;
     let id = host.doc.borrow_mut().create_text_detached(&text);
     Ok(node_value(id.0, context))
+}
+
+fn create_comment(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let text = arg_string(args, 0, context).unwrap_or_default();
+    let id = host.doc.borrow_mut().create_comment_detached(&text);
+    Ok(node_value(id.0, context))
+}
+
+fn create_document_fragment(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let host = host(context)?;
+    let id = host.doc.borrow_mut().create_element_detached("mithu-fragment");
+    fragment_value(id.0, context)
 }
 
 fn node_value(id: usize, context: &mut Context) -> JsValue {
@@ -7944,6 +8090,42 @@ mod tests {
             session.document().title,
             "/docs|mithu browser|#top|Hi|mithu|https://example.com/replaced"
         );
+    }
+
+    #[test]
+    fn snapshots_stay_stable_and_comments_can_be_created() {
+        let doc = parse_html(
+            r#"<body></body><script>
+              var state = { __NA: true };
+              history.replaceState(state, "", location.href);
+              if (history.state !== state) throw new Error("state");
+              var list = matchMedia("(min-width: 800px)");
+              if (matchMedia("(min-width: 800px)") !== list || list.matches !== true) {
+                throw new Error("mql");
+              }
+              if (innerWidth !== 1280) throw new Error("width");
+              var mark = document.createComment("$?");
+              if (mark.nodeType !== 8 || mark.data !== "$?") throw new Error("comment");
+              var fragment = document.createDocumentFragment();
+              fragment.appendChild(mark);
+              if (fragment.nodeType !== 11 || fragment.firstChild !== mark) throw new Error("fragment");
+              var box = document.createElement("div");
+              document.body.appendChild(box);
+              var seen = 0;
+              new ResizeObserver(function () { seen += 1; }).observe(box);
+              new IntersectionObserver(function () { seen += 1; }).observe(box);
+              if (seen !== 0) throw new Error("sync observer " + seen);
+              var rect = box.getBoundingClientRect();
+              if (box.getBoundingClientRect() !== rect) throw new Error("rect");
+              document.title = "stable";
+            </script>"#,
+        );
+        let mut session = Session::open_at(doc, "https://example.com/docs", |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "stable");
+        assert!(session.take_navigation().is_none());
+        session.advance(0);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
     }
 
     #[test]

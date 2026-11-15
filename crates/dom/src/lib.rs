@@ -295,6 +295,16 @@ impl Document {
         id
     }
 
+    pub fn create_comment_detached(&mut self, text: &str) -> NodeId {
+        let id = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            parent: None,
+            children: Vec::new(),
+            data: NodeData::Comment(text.to_string()),
+        });
+        id
+    }
+
     pub fn create_element_detached(&mut self, name: &str) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node {
