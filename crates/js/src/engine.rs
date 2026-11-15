@@ -2660,6 +2660,16 @@ unsafe extern "C" fn rejection_tracker(
             return;
         };
         let previous = enter(context);
+        // The tracker runs inside the promise job. A pending exception left
+        // by the hook makes SpiderMonkey fail the job, so a `throw` that
+        // Chrome turns into a rejection escapes and skips later tasks.
+        let cx = (*context).js();
+        let pending = wrappers2::JS_IsExceptionPending(cx);
+        rooted!(in((*context).raw) let mut saved = UndefinedValue());
+        if pending {
+            wrappers2::JS_GetPendingException(cx, saved.handle_mut());
+            wrappers2::JS_ClearPendingException(cx);
+        }
         let ptr = *promise.ptr;
         let object = (*context).wrap_object(ptr);
         let promise = JsPromise { object: object.clone() };
@@ -2670,6 +2680,16 @@ unsafe extern "C" fn rejection_tracker(
         };
         if let Some(hooks) = (*context).hooks.clone() {
             hooks.promise_rejection_tracker(&promise, operation, &mut *context);
+        }
+        if wrappers2::JS_IsExceptionPending(cx) {
+            wrappers2::JS_ClearPendingException(cx);
+        }
+        if pending {
+            wrappers2::JS_SetPendingException(
+                cx,
+                saved.handle().into(),
+                jsapi::ExceptionStackBehavior::DoNotCapture,
+            );
         }
         leave(previous);
     }

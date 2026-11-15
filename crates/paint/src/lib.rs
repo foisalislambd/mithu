@@ -1,4 +1,7 @@
-//! Software rasterizer. Pixels are packed `0x00RRGGBB`.
+//! Page painter. The software rasterizer packs pixels as `0x00RRGGBB`.
+//! The same draw calls can be recorded into a Vello scene for wgpu, or into
+//! vello_cpu when no GPU is available.
+mod vello_scene;
 
 use mithu_base::{Color, Rect};
 use mithu_image::Bitmap;
@@ -363,7 +366,7 @@ impl Canvas<'_> {
 }
 
 fn stroke_polyline(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut dyn Draw,
     points: &[(f32, f32)],
     width: f32,
     color: Color,
@@ -387,8 +390,162 @@ fn stroke_polyline(
     }
 }
 
+pub use vello_scene::{VelloTarget, render_vello_cpu};
+
+/// Draw commands shared by the software rasterizer and the Vello backends.
+pub trait Draw {
+    fn width(&self) -> i32;
+    fn height(&self) -> i32;
+    fn fill(&mut self, rect: Rect, color: Color, clip: Rect);
+    fn fill_vertical(&mut self, rect: Rect, top: Color, bottom: Color, clip: Rect);
+    fn fill_round(&mut self, rect: Rect, color: Color, radius: f32, clip: Rect);
+    fn fill_contours(
+        &mut self,
+        contours: &[Vec<(f32, f32)>],
+        color: Color,
+        clip: Rect,
+        even_odd: bool,
+    );
+    fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color, clip: Rect);
+    fn mask(&mut self, dest: Rect, bitmap: &Bitmap, tint: Color, clip: Rect);
+    fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect);
+    fn text(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        clip: Rect,
+    );
+    fn text_family(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        clip: Rect,
+    );
+    fn text_fitted(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        slot_width: f32,
+        clip: Rect,
+    );
+}
+
+impl Draw for Canvas<'_> {
+    fn width(&self) -> i32 {
+        self.width
+    }
+    fn height(&self) -> i32 {
+        self.height
+    }
+    fn fill(&mut self, rect: Rect, color: Color, clip: Rect) {
+        Canvas::fill(self, rect, color, clip);
+    }
+    fn fill_vertical(&mut self, rect: Rect, top: Color, bottom: Color, clip: Rect) {
+        Canvas::fill_vertical(self, rect, top, bottom, clip);
+    }
+    fn fill_round(&mut self, rect: Rect, color: Color, radius: f32, clip: Rect) {
+        Canvas::fill_round(self, rect, color, radius, clip);
+    }
+    fn fill_contours(
+        &mut self,
+        contours: &[Vec<(f32, f32)>],
+        color: Color,
+        clip: Rect,
+        even_odd: bool,
+    ) {
+        Canvas::fill_contours(self, contours, color, clip, even_odd);
+    }
+    fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color, clip: Rect) {
+        Canvas::fill_circle(self, cx, cy, radius, color, clip);
+    }
+    fn mask(&mut self, dest: Rect, bitmap: &Bitmap, tint: Color, clip: Rect) {
+        Canvas::mask(self, dest, bitmap, tint, clip);
+    }
+    fn image(&mut self, dest: Rect, bitmap: &Bitmap, clip: Rect) {
+        Canvas::image(self, dest, bitmap, clip);
+    }
+    fn text(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        clip: Rect,
+    ) {
+        Canvas::text(
+            self, fonts, x, baseline, text, size, color, bold, mono, underline, clip,
+        );
+    }
+    fn text_family(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        clip: Rect,
+    ) {
+        Canvas::text_family(
+            self, fonts, x, baseline, text, size, color, bold, mono, underline, family, clip,
+        );
+    }
+    fn text_fitted(
+        &mut self,
+        fonts: &FontBook,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+        bold: bool,
+        mono: bool,
+        underline: bool,
+        family: &str,
+        slot_width: f32,
+        clip: Rect,
+    ) {
+        Canvas::text_fitted(
+            self, fonts, x, baseline, text, size, color, bold, mono, underline, family,
+            slot_width, clip,
+        );
+    }
+}
+
 pub fn paint_layout(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut dyn Draw,
     tree: &LayoutTree,
     fonts: &FontBook,
     clip: Rect,
@@ -399,7 +556,7 @@ pub fn paint_layout(
 }
 
 fn paint_box(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut dyn Draw,
     box_: &LayoutBox,
     fonts: &FontBook,
     clip: Rect,
@@ -421,7 +578,7 @@ fn paint_box(
 }
 
 fn paint_box_with_opacity(
-    canvas: &mut Canvas<'_>,
+    canvas: &mut dyn Draw,
     box_: &LayoutBox,
     fonts: &FontBook,
     clip: Rect,
@@ -698,7 +855,7 @@ fn shift_box(box_: &mut LayoutBox, dx: f32, dy: f32) {
     }
 }
 
-fn paint_shadow(canvas: &mut Canvas<'_>, screen: Rect, shadow: mithu_style::BoxShadow, clip: Rect) {
+fn paint_shadow(canvas: &mut dyn Draw, screen: Rect, shadow: mithu_style::BoxShadow, clip: Rect) {
     let layers = 4;
     for layer in 1..=layers {
         let t = layer as f32 / layers as f32;
@@ -792,7 +949,7 @@ fn winding(px: f32, py: f32, contours: &[Vec<(f32, f32)>]) -> i32 {
     wind
 }
 
-fn intersect(rect: Rect, clip: Rect) -> Option<Rect> {
+pub(crate) fn intersect(rect: Rect, clip: Rect) -> Option<Rect> {
     let x0 = rect.x.max(clip.x);
     let y0 = rect.y.max(clip.y);
     let x1 = rect.right().min(clip.right());

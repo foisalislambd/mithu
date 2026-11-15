@@ -14,7 +14,7 @@ use mithu_image::Bitmap;
 use mithu_js::{Session, Submission};
 use mithu_layout::{LayoutBox, LayoutTree, hit_test, layout_tree};
 use mithu_net::{get, post};
-use mithu_paint::{Canvas, paint_layout};
+use mithu_paint::{Canvas, Draw, paint_layout};
 use mithu_style::{ComputedStyle, StyleState, font_faces, style_with};
 use mithu_text::{FontBook, MeasureText};
 use mithu_url::{Url, UrlError};
@@ -1680,6 +1680,66 @@ impl Browser {
         ran
     }
 
+    /// Runs due timers, but at most `max_frames` animation callbacks.
+    /// `kind` limits the pass to one timer kind when it is set.
+    pub fn advance_limited(&mut self, ms: u64, kind: Option<u8>, max_frames: u32) -> bool {
+        let (ran, next) = {
+            let Some(session) = self.page_mut().session.as_mut() else {
+                return false;
+            };
+            (
+                session.advance_limited(ms, kind, max_frames),
+                session.take_navigation(),
+            )
+        };
+        if ran
+            || self
+                .page()
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.logs().is_empty())
+        {
+            self.pull_page();
+        }
+        if let Some(next) = next {
+            self.navigate(&next);
+            return true;
+        }
+        ran
+    }
+
+    /// One animation frame at the real elapsed time. The live window calls
+    /// this about every 16ms while a frame is scheduled.
+    pub fn advance_frame(&mut self, ms: u64) -> bool {
+        let (ran, next) = {
+            let Some(session) = self.page_mut().session.as_mut() else {
+                return false;
+            };
+            (session.advance_frame(ms), session.take_navigation())
+        };
+        if ran
+            || self
+                .page()
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.logs().is_empty())
+        {
+            self.pull_page();
+        }
+        if let Some(next) = next {
+            self.navigate(&next);
+            return true;
+        }
+        ran
+    }
+
+    pub fn animation_frames_pending(&self) -> bool {
+        self.page()
+            .session
+            .as_ref()
+            .is_some_and(mithu_js::Session::animation_frames_pending)
+    }
+
     pub fn next_timer_ms(&self) -> Option<u64> {
         self.page()
             .session
@@ -2097,22 +2157,31 @@ impl Browser {
     fn paint(&self, width: u32, height: u32) -> Vec<u32> {
         let background = self.page().layout.background;
         let mut pixels = vec![background.to_u32(); width as usize * height as usize];
-        let zoom = self.page().zoom;
-        if (zoom - 1.0).abs() < 0.001 {
-            self.paint_page(&mut pixels, width, height, CONTENT_TOP);
-        } else {
-            self.paint_zoomed_page(&mut pixels, width, height, zoom);
-        }
         let mut canvas = Canvas {
             pixels: &mut pixels,
             width: width as i32,
             height: height as i32,
         };
-        self.paint_chrome(&mut canvas);
+        self.record(&mut canvas, width, height);
         pixels
     }
 
-    fn paint_page(&self, pixels: &mut [u32], width: u32, height: u32, origin_y: f32) {
+    /// Paint chrome and the page into any backend. The window records a Vello
+    /// scene here. Screenshots keep using the software canvas.
+    pub fn record(&self, canvas: &mut dyn Draw, width: u32, height: u32) {
+        let background = self.page().layout.background;
+        let full = Rect::new(0.0, 0.0, width as f32, height as f32);
+        canvas.fill(full, background, full);
+        let zoom = self.page().zoom;
+        if (zoom - 1.0).abs() < 0.001 {
+            self.paint_page(canvas, width, height, CONTENT_TOP);
+        } else {
+            self.paint_zoomed_page(canvas, width, height, zoom);
+        }
+        self.paint_chrome(canvas);
+    }
+
+    fn paint_page(&self, canvas: &mut dyn Draw, width: u32, height: u32, origin_y: f32) {
         let scroll = self.page().scroll;
         let find = if self.page().find_open { FIND_H } else { 0.0 };
         let clip = Rect::new(
@@ -2121,14 +2190,9 @@ impl Browser {
             width as f32,
             (height as f32 - origin_y - STATUS_H - PAGE_GAP - find).max(1.0),
         );
-        let mut canvas = Canvas {
-            pixels,
-            width: width as i32,
-            height: height as i32,
-        };
-        self.paint_find_hits(&mut canvas, scroll, clip, origin_y);
+        self.paint_find_hits(canvas, scroll, clip, origin_y);
         paint_layout(
-            &mut canvas,
+            canvas,
             &self.tabs.page().layout,
             &self.fonts,
             clip,
@@ -2137,7 +2201,7 @@ impl Browser {
         );
     }
 
-    fn paint_zoomed_page(&self, pixels: &mut [u32], width: u32, height: u32, zoom: f32) {
+    fn paint_zoomed_page(&self, target: &mut dyn Draw, width: u32, height: u32, zoom: f32) {
         let scroll = self.page().scroll;
         let find = if self.page().find_open { FIND_H } else { 0.0 };
         let device_h = (height as f32 - CONTENT_TOP - STATUS_H - PAGE_GAP - find).max(1.0);
@@ -2162,19 +2226,24 @@ impl Browser {
                 0.0,
             );
         }
-        blit_nearest(
-            pixels,
-            width as i32,
-            &page_pixels,
-            css_w,
-            css_h,
+        let bitmap = Bitmap {
+            width: css_w as u32,
+            height: css_h as u32,
+            pixels: page_pixels
+                .into_iter()
+                .map(|pixel| pixel | 0xFF00_0000)
+                .collect(),
+        };
+        target.image(
             Rect::new(0.0, CONTENT_TOP, width as f32, device_h),
+            &bitmap,
+            Rect::new(0.0, 0.0, width as f32, height as f32),
         );
     }
 
-    fn paint_chrome(&self, canvas: &mut Canvas<'_>) {
-        let width = canvas.width as f32;
-        let height = canvas.height as f32;
+    fn paint_chrome(&self, canvas: &mut dyn Draw) {
+        let width = canvas.width() as f32;
+        let height = canvas.height() as f32;
         let colors = chrome_colors(self.dark);
         let full = Rect::new(0.0, 0.0, width, height);
         canvas.fill(Rect::new(0.0, 0.0, width, TAB_H), colors.strip, full);
@@ -2364,9 +2433,9 @@ impl Browser {
         }
     }
 
-    fn paint_menu(&self, canvas: &mut Canvas<'_>, menu: &Menu) {
-        let bounds = menu_bounds(menu, canvas.width as f32, canvas.height as f32);
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_menu(&self, canvas: &mut dyn Draw, menu: &Menu) {
+        let bounds = menu_bounds(menu, canvas.width() as f32, canvas.height() as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         canvas.fill(bounds, SEPARATOR, full);
         for (index, (label, action)) in menu.items.iter().enumerate() {
             let row = Rect::new(
@@ -2400,13 +2469,13 @@ impl Browser {
         }
     }
 
-    fn paint_suggestions(&self, canvas: &mut Canvas<'_>) {
+    fn paint_suggestions(&self, canvas: &mut dyn Draw) {
         let items = self.suggestions();
         if items.is_empty() {
             return;
         }
-        let panel = suggestion_panel(canvas.width as f32, items.len());
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let panel = suggestion_panel(canvas.width() as f32, items.len());
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         canvas.fill(panel, SEPARATOR, full);
         for (index, item) in items.iter().enumerate() {
             let row = Rect::new(
@@ -2443,10 +2512,10 @@ impl Browser {
         }
     }
 
-    fn paint_bookmarks(&self, canvas: &mut Canvas<'_>) {
-        let width = canvas.width as f32;
+    fn paint_bookmarks(&self, canvas: &mut dyn Draw) {
+        let width = canvas.width() as f32;
         let panel = bookmark_panel(width, self.bookmarks.len());
-        let full = Rect::new(0.0, 0.0, width, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, width, canvas.height() as f32);
         canvas.fill(panel, SEPARATOR, full);
         if self.bookmarks.is_empty() {
             canvas.text(
@@ -2486,7 +2555,7 @@ impl Browser {
         }
     }
 
-    fn paint_find_hits(&self, canvas: &mut Canvas<'_>, scroll: f32, clip: Rect, origin_y: f32) {
+    fn paint_find_hits(&self, canvas: &mut dyn Draw, scroll: f32, clip: Rect, origin_y: f32) {
         let hits = self.find_hits();
         let active = self.page().find_at;
         for (index, hit) in hits.iter().enumerate() {
@@ -2505,9 +2574,9 @@ impl Browser {
         }
     }
 
-    fn paint_find_bar(&self, canvas: &mut Canvas<'_>) {
-        let width = canvas.width as f32;
-        let height = canvas.height as f32;
+    fn paint_find_bar(&self, canvas: &mut dyn Draw) {
+        let width = canvas.width() as f32;
+        let height = canvas.height() as f32;
         let bar = find_bar_rect(width, height);
         let full = Rect::new(0.0, 0.0, width, height);
         let border = if self.find_focused {
@@ -2547,10 +2616,10 @@ impl Browser {
         );
     }
 
-    fn paint_bookmarks_bar(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
-        let width = canvas.width as f32;
+    fn paint_bookmarks_bar(&self, canvas: &mut dyn Draw, colors: &ChromeColors) {
+        let width = canvas.width() as f32;
         let y = TAB_H + TOOLBAR_H;
-        let full = Rect::new(0.0, 0.0, width, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, width, canvas.height() as f32);
         canvas.fill(
             Rect::new(0.0, y + BOOKMARK_BAR_H - 1.0, width, 1.0),
             colors.chip,
@@ -2594,9 +2663,9 @@ impl Browser {
         }
     }
 
-    fn paint_tabs(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
+    fn paint_tabs(&self, canvas: &mut dyn Draw, colors: &ChromeColors) {
         let strip = self.tab_strip();
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         for (index, rect) in strip.tabs.iter().enumerate() {
             let page = &self.tabs.pages[index];
             let active = index == self.tabs.active;
@@ -2699,9 +2768,9 @@ impl Browser {
         self.paint_caption(canvas, colors);
     }
 
-    fn paint_caption(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
-        let [minimize, maximize, close] = caption_rects(canvas.width as f32);
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_caption(&self, canvas: &mut dyn Draw, colors: &ChromeColors) {
+        let [minimize, maximize, close] = caption_rects(canvas.width() as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         for (rect, kind) in [
             (minimize, icons::Kind::Minimize),
             (maximize, icons::Kind::Maximize),
@@ -2733,12 +2802,12 @@ impl Browser {
 
     fn paint_round_icon(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut dyn Draw,
         rect: Rect,
         kind: icons::Kind,
         colors: &ChromeColors,
     ) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
         canvas.fill_round(
             rect,
@@ -2757,13 +2826,13 @@ impl Browser {
 
     fn paint_toolbar_button(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut dyn Draw,
         rect: Rect,
         kind: icons::Kind,
         enabled: bool,
         colors: &ChromeColors,
     ) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let hovered = enabled && self.hovering && rect.contains(self.cursor.0, self.cursor.1);
         let pressed = self.ripple.is_some_and(|(x, y, started)| {
             rect.contains(x, y) && started.elapsed().as_millis() < 280
@@ -2797,8 +2866,8 @@ impl Browser {
         icons::draw(canvas, kind, glyph, color, full);
     }
 
-    fn paint_more(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_more(&self, canvas: &mut dyn Draw, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
         if hovered {
             canvas.fill_circle(
@@ -2816,8 +2885,8 @@ impl Browser {
         }
     }
 
-    fn paint_extensions(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_extensions(&self, canvas: &mut dyn Draw, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let hovered = self.hovering && rect.contains(self.cursor.0, self.cursor.1);
         if hovered {
             canvas.fill_circle(
@@ -2853,8 +2922,8 @@ impl Browser {
         );
     }
 
-    fn paint_profile(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_profile(&self, canvas: &mut dyn Draw, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let cx = rect.x + rect.width / 2.0;
         let cy = rect.y + rect.height / 2.0;
         canvas.fill_circle(cx, cy, 12.0, colors.chip, full);
@@ -2874,11 +2943,11 @@ impl Browser {
         );
     }
 
-    fn paint_chip(&self, canvas: &mut Canvas<'_>, rect: Rect, chip: &Chip, colors: &ChromeColors) {
+    fn paint_chip(&self, canvas: &mut dyn Draw, rect: Rect, chip: &Chip, colors: &ChromeColors) {
         if rect.width <= 0.0 {
             return;
         }
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         match chip {
             Chip::Hidden => {}
             Chip::Lock => {
@@ -2915,8 +2984,8 @@ impl Browser {
         }
     }
 
-    fn paint_throbber(&self, canvas: &mut Canvas<'_>, rect: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_throbber(&self, canvas: &mut dyn Draw, rect: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         let cx = rect.x + rect.width / 2.0;
         let cy = rect.y + rect.height / 2.0;
         let shift = (self.opened.elapsed().as_millis() / 80) as usize;
@@ -2937,8 +3006,8 @@ impl Browser {
         }
     }
 
-    fn paint_shelf(&self, canvas: &mut Canvas<'_>, shelf: Rect, colors: &ChromeColors) {
-        let full = Rect::new(0.0, 0.0, canvas.width as f32, canvas.height as f32);
+    fn paint_shelf(&self, canvas: &mut dyn Draw, shelf: Rect, colors: &ChromeColors) {
+        let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
         canvas.fill_round(shelf, colors.menu, 12.0, full);
         canvas.fill(
             Rect::new(shelf.x, shelf.y, shelf.width, 1.0),
@@ -2979,7 +3048,7 @@ impl Browser {
         );
     }
 
-    fn paint_tooltip(&self, canvas: &mut Canvas<'_>, colors: &ChromeColors) {
+    fn paint_tooltip(&self, canvas: &mut dyn Draw, colors: &ChromeColors) {
         if !self.hovering || self.menu.is_some() {
             return;
         }
@@ -2990,13 +3059,13 @@ impl Browser {
         let height = 24.0;
         let mut x = self.cursor.0 - width / 2.0;
         let mut y = self.cursor.1 + 18.0;
-        let limit = canvas.width as f32;
+        let limit = canvas.width() as f32;
         x = x.clamp(4.0, (limit - width - 4.0).max(4.0));
-        if y + height > canvas.height as f32 - 4.0 {
+        if y + height > canvas.height() as f32 - 4.0 {
             y = self.cursor.1 - height - 8.0;
         }
         let rect = Rect::new(x, y, width, height);
-        let full = Rect::new(0.0, 0.0, limit, canvas.height as f32);
+        let full = Rect::new(0.0, 0.0, limit, canvas.height() as f32);
         canvas.fill_round(rect, colors.tooltip_bg, 4.0, full);
         canvas.text(
             &self.fonts,
@@ -3070,27 +3139,6 @@ impl Browser {
 impl Default for Browser {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn blit_nearest(dst: &mut [u32], dst_w: i32, src: &[u32], src_w: i32, src_h: i32, dest: Rect) {
-    if src_w <= 0 || src_h <= 0 || dest.width <= 0.0 || dest.height <= 0.0 || dst_w <= 0 {
-        return;
-    }
-    let x0 = dest.x.floor().max(0.0) as i32;
-    let y0 = dest.y.floor().max(0.0) as i32;
-    let dst_h = dst.len() as i32 / dst_w;
-    let x1 = dest.right().ceil().min(dst_w as f32) as i32;
-    let y1 = dest.bottom().ceil().min(dst_h as f32) as i32;
-    for y in y0..y1 {
-        let v = (((y as f32 + 0.5 - dest.y) / dest.height) * src_h as f32).floor() as i32;
-        let v = v.clamp(0, src_h - 1) as usize;
-        let row = y as usize * dst_w as usize;
-        for x in x0..x1 {
-            let u = (((x as f32 + 0.5 - dest.x) / dest.width) * src_w as f32).floor() as i32;
-            let u = u.clamp(0, src_w - 1) as usize;
-            dst[row + x as usize] = src[v * src_w as usize + u];
-        }
     }
 }
 
@@ -3722,7 +3770,6 @@ fn load_images(
     styles: &[mithu_style::ComputedStyle],
 ) -> HashMap<NodeId, Arc<Bitmap>> {
     let mut wanted: Vec<(NodeId, String)> = Vec::new();
-    let mut network = Vec::new();
     for id in (0..document.nodes.len()).map(NodeId) {
         if wanted.len() >= 80 {
             break;
@@ -3739,9 +3786,6 @@ fn load_images(
         let Some(src) = src else {
             continue;
         };
-        if !src.starts_with("data:") {
-            network.push(src.clone());
-        }
         wanted.push((id, src));
     }
     for (index, style) in styles.iter().enumerate() {
@@ -3758,9 +3802,6 @@ fn load_images(
         if wanted.iter().any(|(seen, _)| *seen == id) {
             continue;
         }
-        if !url.starts_with("data:") {
-            network.push(url.to_string());
-        }
         wanted.push((id, url.to_string()));
     }
     let mut masks = 0;
@@ -3775,27 +3816,45 @@ fn load_images(
         if wanted.iter().any(|(seen, _)| *seen == id) {
             continue;
         }
-        if !url.starts_with("data:") {
-            network.push(url.to_string());
-        }
         wanted.push((id, url.to_string()));
         masks += 1;
     }
-    let fetched = fetch_parallel(base, network);
-    let mut images = HashMap::new();
-    for (id, src) in wanted {
-        let bitmap = cached_bitmap(&src, || {
-            if src.starts_with("data:") {
-                mithu_image::decode_data_url(&src).or_else(|| rasterize_svg_url(&src))
-            } else {
-                fetched.get(&src).and_then(|bytes| decode_image_bytes(bytes))
-            }
-        });
-        if let Some(bitmap) = bitmap {
-            images.insert(id, bitmap);
+    // Fetch and decode away from the calling thread. Layout still waits for
+    // the batch, because intrinsic image sizes are needed before paint.
+    let pending = std::sync::Mutex::new(wanted);
+    let images = std::sync::Mutex::new(HashMap::new());
+    let base = base.clone();
+    let workers = 8
+        .min(pending.lock().map(|guard| guard.len()).unwrap_or(1))
+        .max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let pending = &pending;
+            let images = &images;
+            let base = &base;
+            scope.spawn(move || {
+                loop {
+                    let next = pending.lock().ok().and_then(|mut guard| guard.pop());
+                    let Some((id, src)) = next else {
+                        break;
+                    };
+                    let bitmap = cached_bitmap(&src, || {
+                        if src.starts_with("data:") {
+                            mithu_image::decode_data_url(&src).or_else(|| rasterize_svg_url(&src))
+                        } else {
+                            fetch_bytes(base, &src).and_then(|bytes| decode_image_bytes(&bytes))
+                        }
+                    });
+                    if let Some(bitmap) = bitmap
+                        && let Ok(mut map) = images.lock()
+                    {
+                        map.insert(id, bitmap);
+                    }
+                }
+            });
         }
-    }
-    images
+    });
+    images.into_inner().unwrap_or_default()
 }
 
 fn bitmap_cache() -> &'static Mutex<HashMap<String, Arc<Bitmap>>> {

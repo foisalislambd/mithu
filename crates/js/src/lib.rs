@@ -349,11 +349,23 @@ impl Session {
 
     /// Moves the page clock forward and runs timers whose delay has elapsed.
     pub fn advance(&mut self, ms: u64) -> bool {
+        self.advance_limited(ms, None, 90)
+    }
+
+    /// One animation frame. `ms` is real time since the previous frame, and
+    /// only one callback runs so a tween sees that gap instead of a batch.
+    pub fn advance_frame(&mut self, ms: u64) -> bool {
+        self.advance_limited(ms.max(1), None, 1)
+    }
+
+    /// `only` limits the timer kind. `max_frames` caps animation callbacks in
+    /// this pass. A live frame uses 1. A screenshot batch uses more.
+    pub fn advance_limited(&mut self, ms: u64, only: Option<u8>, max_frames: u32) -> bool {
         let _bound = self.context.as_mut().map(|context| context.bind());
         let Some(context) = self.context.as_mut() else {
             return false;
         };
-        match run_due_timers(context, ms, None) {
+        match run_due_timers(context, ms, only, max_frames) {
             Ok(ran) => ran,
             Err(error) => {
                 self.log
@@ -362,6 +374,13 @@ impl Session {
                 false
             }
         }
+    }
+
+    pub fn animation_frames_pending(&self) -> bool {
+        let Some(host) = self.context.as_ref().and_then(|context| context.get_data::<Host>().cloned()) else {
+            return false;
+        };
+        host.clock.borrow().queue.iter().any(|timer| timer.kind == 6)
     }
 
     pub fn next_timer_ms(&self) -> Option<u64> {
@@ -763,7 +782,53 @@ fn note_error(context: &Context, error: &dyn std::fmt::Display) {
         };
         let message = format!("JavaScript error: {prefix}{error}");
         let extra = debug_source_window(host, &message);
-        host.log.borrow_mut().push(format!("{message}{extra}"));
+        let sample = if message.contains("418") {
+            hydration_text_sample(host)
+        } else {
+            String::new()
+        };
+        host.log
+            .borrow_mut()
+            .push(format!("{message}{extra}{sample}"));
+    }
+}
+
+/// Server text nodes at a React hydration mismatch. Whitespace, NBSP, and
+/// CR are visible in the debug format so they can be compared with the client.
+fn hydration_text_sample(host: &Host) -> String {
+    let doc = host.doc.borrow();
+    let mut lines = Vec::new();
+    for (index, node) in doc.nodes.iter().enumerate() {
+        let NodeData::Text(text) = &node.data else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let parent = node
+            .parent
+            .and_then(|id| doc.element_name(id))
+            .unwrap_or("");
+        if parent == "script" || parent == "style" || parent == "noscript" {
+            continue;
+        }
+        let odd = text.chars().any(|ch| {
+            ch == '\u{00A0}' || ch == '\r' || ch == '\t' || ch == '\n'
+        }) || text.starts_with(' ')
+            || text.ends_with(' ')
+            || text.contains("  ");
+        if !odd && parent != "h1" && parent != "h2" {
+            continue;
+        }
+        lines.push(format!("text#{index}<{parent}> {text:?}"));
+        if lines.len() >= 16 {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("\nhydration text {}", lines.join(" | "))
     }
 }
 
@@ -880,11 +945,11 @@ fn drive_scripts(
             // Script-inserted external scripts are tasks of their own. Drain
             // them before the next classic script so a stub can finish
             // installing `window.clarity.q` before the tag reads it.
-            if let Err(error) = run_due_timers(&mut context, 0, Some(5)) {
+            if let Err(error) = run_due_timers(&mut context, 0, Some(5), 90) {
                 note_error(&context, &error);
             }
         }
-        if let Err(error) = run_due_timers(&mut context, 0, None) {
+        if let Err(error) = run_due_timers(&mut context, 0, None, 90) {
             note_error(&context, &error);
         }
         signal_document_loaded(&mut context);
@@ -3187,7 +3252,13 @@ fn console_log(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         }
         parts.push(text);
     }
-    host.log.borrow_mut().push(parts.join(" "));
+    let message = parts.join(" ");
+    let sample = if message.contains("418") {
+        hydration_text_sample(&host)
+    } else {
+        String::new()
+    };
+    host.log.borrow_mut().push(format!("{message}{sample}"));
     Ok(JsValue::undefined())
 }
 
@@ -4461,7 +4532,7 @@ fn apply_custom_prototype(tag: &str, value: &JsValue, context: &mut Context) {
     }
     // A constructor that creates another instance of itself would recurse
     // until the native stack aborts. Stop that chain and keep the element.
-    const MAX_UPGRADE_DEPTH: u32 = 64;
+    const MAX_UPGRADE_DEPTH: u32 = 256;
     thread_local! {
         static UPGRADE_DEPTH: Cell<u32> = const { Cell::new(0) };
     }
@@ -4854,31 +4925,43 @@ fn set_html(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
     let html = arg_string(args, 0, context)?;
-    let mut doc = host.doc.borrow_mut();
-    let id = if doc.element_name(id) == Some("template") {
-        ensure_template_content(&mut doc, id)
-    } else {
-        id
-    };
-    doc.clear_children(id);
-    // `<script>` and `<style>` are raw text elements. `r<t` in a script is a
-    // comparison, and parsing it as markup turns the script into a syntax error.
-    if matches!(
-        doc.element_name(id),
-        Some("script" | "style" | "textarea" | "title" | "noscript")
-    ) {
-        if !html.is_empty() {
+    let children = {
+        let mut doc = host.doc.borrow_mut();
+        let id = if doc.element_name(id) == Some("template") {
+            ensure_template_content(&mut doc, id)
+        } else {
+            id
+        };
+        doc.clear_children(id);
+        // `<script>` and `<style>` are raw text elements. `r<t` in a script is a
+        // comparison, and parsing it as markup turns the script into a syntax error.
+        if matches!(
+            doc.element_name(id),
+            Some("script" | "style" | "textarea" | "title" | "noscript")
+        ) {
+            if !html.is_empty() {
+                doc.append_text(id, &html);
+            }
+            return Ok(JsValue::undefined());
+        }
+        if html.contains('<') {
+            let parsed = parse_html(&format!("<div id=\"mithu-root\">{html}</div>"));
+            if let Some(root) = parsed.get_element_by_id("mithu-root") {
+                copy_children(&parsed, root, &mut doc, id);
+            }
+        } else if !html.is_empty() {
             doc.append_text(id, &html);
         }
-        return Ok(JsValue::undefined());
-    }
-    if html.contains('<') {
-        let parsed = parse_html(&format!("<div id=\"mithu-root\">{html}</div>"));
-        if let Some(root) = parsed.get_element_by_id("mithu-root") {
-            copy_children(&parsed, root, &mut doc, id);
+        // Template contents stay inert. A connected parent, including a shadow
+        // root, upgrades the new custom elements.
+        if doc.is_connected(id) {
+            doc.node(id).children.clone()
+        } else {
+            Vec::new()
         }
-    } else if !html.is_empty() {
-        doc.append_text(id, &html);
+    };
+    for child in children {
+        notify_connected(child, context);
     }
     Ok(JsValue::undefined())
 }
@@ -5539,6 +5622,7 @@ fn insert_mixed(
     for arg in args {
         if let Some(child) = node_of(arg) {
             host.doc.borrow_mut().insert_before(parent, child, anchor);
+            notify_connected(child, context);
         } else if !arg.is_null_or_undefined() {
             let text = arg.to_string(context)?.to_std_string_lossy();
             if text.is_empty() {
@@ -5748,6 +5832,7 @@ fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         let children = host.doc.borrow().node(NodeId(holder)).children.clone();
         for child in children {
             host.doc.borrow_mut().append_child(parent, child);
+            notify_connected(child, context);
             execute_inserted_script(child, context);
         }
         return Ok(child_value);
@@ -5981,7 +6066,12 @@ fn settle_fonts(context: &mut Context) {
     }
 }
 
-fn run_due_timers(context: &mut Context, ms: u64, only: Option<u8>) -> JsResult<bool> {
+fn run_due_timers(
+    context: &mut Context,
+    ms: u64,
+    only: Option<u8>,
+    max_frames: u32,
+) -> JsResult<bool> {
     let _bound = context.bind();
     settle_fonts(context);
     let host = host(context)?;
@@ -6006,7 +6096,7 @@ fn run_due_timers(context: &mut Context, ms: u64, only: Option<u8>) -> JsResult<
                     timer.due <= clock.now
                         && !fired_repeat.contains(&timer.id)
                         && only.is_none_or(|kind| timer.kind == kind)
-                        && !(timer.kind == 6 && frames >= 90)
+                        && !(timer.kind == 6 && frames >= max_frames)
                 })
                 .min_by_key(|timer| timer.due)
                 .map(|timer| timer.id)
@@ -6037,25 +6127,44 @@ fn run_due_timers(context: &mut Context, ms: u64, only: Option<u8>) -> JsResult<
         if repeat.is_some() {
             fired_repeat.push(id);
         }
-        let item = timer_value(context, id)?;
-        match kind {
+        let item = match timer_value(context, id) {
+            Ok(item) => item,
+            Err(error) => {
+                note_error(context, &error);
+                continue;
+            }
+        };
+        // A throw inside one callback used to abort the rest of the pass, so
+        // a handled fetch error never reached its catch and later frames and
+        // observers never ran. Log it and keep the queue moving.
+        let step = match kind {
             1 => {
                 if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
-                    let deadline = idle_deadline(context)?;
-                    function.call(&JsValue::undefined(), &[deadline], context)?;
+                    match idle_deadline(context) {
+                        Ok(deadline) => {
+                            function.call(&JsValue::undefined(), &[deadline], context)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    Ok(JsValue::undefined())
                 }
             }
-            2 => crate::web::finish_xhr(&item, context)?,
-            3 => deliver_macrotask_message(&item, context)?,
-            4 => crate::web::deliver_layout_observer(&item, context)?,
+            2 => crate::web::finish_xhr(&item, context).map(|()| JsValue::undefined()),
+            3 => deliver_macrotask_message(&item, context).map(|()| JsValue::undefined()),
+            4 => crate::web::deliver_layout_observer(&item, context).map(|()| JsValue::undefined()),
             5 => {
                 if let Some(id) = item.as_number() {
                     finish_inserted_script(NodeId(id as usize), context);
                 }
+                Ok(JsValue::undefined())
             }
             6 => {
                 frames += 1;
-                {
+                // A live frame already moved the clock by the real elapsed
+                // time. A screenshot batch passes 0 and steps 16ms so a tween
+                // can finish before the pump stops.
+                if max_frames > 1 {
                     let mut clock = host.clock.borrow_mut();
                     clock.now = clock.now.saturating_add(16);
                 }
@@ -6064,20 +6173,33 @@ fn run_due_timers(context: &mut Context, ms: u64, only: Option<u8>) -> JsResult<
                         let clock = host.clock.borrow();
                         clock.now as f64 + clock.wall.elapsed().as_secs_f64() * 1000.0
                     };
-                    function.call(&JsValue::undefined(), &[JsValue::from(now)], context)?;
+                    function.call(&JsValue::undefined(), &[JsValue::from(now)], context)
+                } else {
+                    Ok(JsValue::undefined())
                 }
             }
             _ => {
                 if let Some(function) = item.as_object().filter(|object| object.is_callable()) {
-                    function.call(&JsValue::undefined(), &[], context)?;
+                    function.call(&JsValue::undefined(), &[], context)
+                } else {
+                    Ok(JsValue::undefined())
                 }
             }
+        };
+        if let Err(error) = step {
+            note_error(context, &error);
         }
         if repeat.is_none() {
-            forget_timer(context, id)?;
+            if let Err(error) = forget_timer(context, id) {
+                note_error(context, &error);
+            }
         }
-        context.run_jobs()?;
-        deliver_mutations(context)?;
+        if let Err(error) = context.run_jobs() {
+            note_error(context, &error);
+        }
+        if let Err(error) = deliver_mutations(context) {
+            note_error(context, &error);
+        }
     }
     Ok(ran)
 }
@@ -7626,6 +7748,7 @@ fn insert_before_child(
             host.doc
                 .borrow_mut()
                 .insert_before(parent, child, reference);
+            notify_connected(child, context);
             execute_inserted_script(child, context);
             reference = Some(child);
         }
@@ -8764,6 +8887,61 @@ mod tests {
         let session = Session::open(doc, |_| None);
         assert!(session.logs().is_empty(), "{:?}", session.logs());
         assert_eq!(session.document().title, "ok");
+    }
+
+    #[test]
+    fn a_thrown_fetch_error_is_caught_and_later_timers_still_run() {
+        let doc = parse_html(
+            r#"<html><body><script>
+              var later = false;
+              Promise.resolve(1).then(function () {
+                throw new Error("logged-out");
+              }).catch(function () { later = true; });
+              setTimeout(function () {
+                document.documentElement.setAttribute("data-caught", later ? "yes" : "no");
+              }, 0);
+            </script></body></html>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(
+            session.document().attr(
+                session
+                    .document()
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, _)| {
+                        (session.document().element_name(mithu_dom::NodeId(index)) == Some("html"))
+                            .then_some(mithu_dom::NodeId(index))
+                    })
+                    .unwrap(),
+                "data-caught",
+            ),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn a_shadow_template_stamp_connects_the_custom_element() {
+        let doc = parse_html(
+            r#"<body><script>
+              class Item extends HTMLElement {
+                connectedCallback() { this.textContent = "Video title"; }
+              }
+              customElements.define("ytd-rich-item", Item);
+              var host = document.createElement("div");
+              document.body.appendChild(host);
+              var root = host.attachShadow({ mode: "open" });
+              var template = document.createElement("template");
+              template.innerHTML = "<ytd-rich-item></ytd-rich-item>";
+              root.appendChild(template.content);
+              document.title = root.textContent === "Video title" ? "stamped" : ("stamp:" + root.textContent);
+            </script></body>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        assert_eq!(session.document().title, "stamped");
     }
 
     #[test]

@@ -116,14 +116,30 @@ impl Document {
     }
 
     /// True when `id` is in the document tree. Template contents and other
-    /// detached nodes are not.
+    /// detached nodes are not. A shadow tree is connected when its host is:
+    /// the shadow root has no parent, and `mithu-host` points at the host.
     pub fn is_connected(&self, id: NodeId) -> bool {
         let mut current = Some(id);
+        let mut guard = 0u32;
         while let Some(node) = current {
             if node == self.root {
                 return true;
             }
-            current = self.nodes.get(node.0).and_then(|item| item.parent);
+            guard += 1;
+            if guard > 10_000 {
+                return false;
+            }
+            if let Some(parent) = self.nodes.get(node.0).and_then(|item| item.parent) {
+                current = Some(parent);
+                continue;
+            }
+            current = self
+                .attr(node, "mithu-host")
+                .and_then(|host| host.parse().ok())
+                .map(NodeId);
+            if current.is_none() {
+                return false;
+            }
         }
         false
     }
