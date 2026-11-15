@@ -735,6 +735,8 @@ struct Xhr {
     status: u16,
     #[unsafe_ignore_trace]
     body: String,
+    #[unsafe_ignore_trace]
+    headers: Vec<(String, String)>,
 }
 
 impl Class for Xhr {
@@ -770,6 +772,7 @@ impl Class for Xhr {
             asynchronous: true,
             status: 0,
             body: String::new(),
+            headers: Vec::new(),
         })
     }
 
@@ -812,7 +815,18 @@ fn xhr_open(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     Ok(JsValue::undefined())
 }
 
-fn xhr_header(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+fn xhr_header(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(mut xhr) = object.downcast_mut::<Xhr>() else {
+        return Ok(JsValue::undefined());
+    };
+    let name = arg_string(args, 0, context)?;
+    let value = arg_string(args, 1, context)?;
+    if !name.is_empty() {
+        xhr.headers.push((name, value));
+    }
     Ok(JsValue::undefined())
 }
 
@@ -820,14 +834,22 @@ fn xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let object = this.as_object().ok_or_else(|| {
         JsNativeError::typ().with_message("XMLHttpRequest method called on the wrong object")
     })?;
-    let (method, url, asynchronous) = {
+    let (method, url, asynchronous, headers) = {
         let Some(xhr) = object.downcast_ref::<Xhr>() else {
             return Err(JsNativeError::typ()
                 .with_message("XMLHttpRequest method called on the wrong object")
                 .into());
         };
-        (xhr.method.clone(), xhr.url.clone(), xhr.asynchronous)
+        (
+            xhr.method.clone(),
+            xhr.url.clone(),
+            xhr.asynchronous,
+            xhr.headers.clone(),
+        )
     };
+    if std::env::var_os("MITHU_JS_DEBUG").is_some() {
+        eprintln!("xhr {method} {url}");
+    }
     let body = args
         .first()
         .filter(|value| !value.is_undefined() && !value.is_null())
@@ -835,7 +857,7 @@ fn xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
         .transpose()?
         .map(|value| value.to_std_string_lossy())
         .unwrap_or_default();
-    let (status, text) = xhr_roundtrip(&method, &url, &body, context);
+    let (status, text) = xhr_roundtrip(&method, &url, &body, &headers, context);
     if asynchronous {
         if let Some(mut xhr) = object.downcast_mut::<Xhr>() {
             xhr.status = status;
@@ -884,7 +906,27 @@ fn apply_xhr(object: &JsObject, status: u16, text: &str, context: &mut Context) 
         true,
         context,
     )?;
-    object.set(js_string!("response"), js_string!(text), true, context)?;
+    let response_type = object
+        .get(js_string!("responseType"), context)?
+        .to_string(context)?
+        .to_std_string_lossy();
+    let response = if response_type == "json" {
+        let json = context.global_object().get(js_string!("JSON"), context)?;
+        match json.as_object().and_then(|value| {
+            value
+                .get(js_string!("parse"), context)
+                .ok()
+                .and_then(|parse| parse.as_object())
+        }) {
+            Some(parse) if parse.is_callable() => parse
+                .call(&json, &[js_string!(text).into()], context)
+                .unwrap_or(JsValue::null()),
+            _ => JsValue::null(),
+        }
+    } else {
+        js_string!(text).into()
+    };
+    object.set(js_string!("response"), response, true, context)?;
     object.set(js_string!("readyState"), JsValue::from(4), true, context)?;
     call_handler(object, "onreadystatechange", context)?;
     if (200..300).contains(&status) || status == 0 {
@@ -906,7 +948,13 @@ fn call_handler(object: &JsObject, name: &str, context: &mut Context) -> JsResul
     Ok(())
 }
 
-fn xhr_roundtrip(method: &str, spec: &str, body: &str, context: &mut Context) -> (u16, String) {
+fn xhr_roundtrip(
+    method: &str,
+    spec: &str,
+    body: &str,
+    headers: &[(String, String)],
+    context: &mut Context,
+) -> (u16, String) {
     let Ok(host) = host(context) else {
         return (0, String::new());
     };
@@ -919,15 +967,34 @@ fn xhr_roundtrip(method: &str, spec: &str, body: &str, context: &mut Context) ->
     }
     let initiator = mithu_url::Url::parse(&location).ok();
     let origin = initiator.as_ref().map(super::serialized_origin);
-    let result = if method == "POST" {
-        mithu_net::post(&url, "application/x-www-form-urlencoded", body.as_bytes())
-    } else if let (Some(page), Some(origin)) = (initiator.as_ref(), origin.as_deref()) {
-        mithu_net::get_with_origin(&url, &page.host, origin)
-    } else if let Some(page) = initiator.as_ref() {
-        mithu_net::get_from(&url, &page.host)
+    let content_type = headers.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            .then_some(value.as_str())
+    });
+    let header_refs: Vec<(&str, &str)> = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("content-type"))
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let fallback = if method.eq_ignore_ascii_case("POST") && !body.is_empty() {
+        let trimmed = body.trim_start();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            Some("application/json")
+        } else {
+            Some("application/x-www-form-urlencoded")
+        }
     } else {
-        mithu_net::get(&url)
+        None
     };
+    let result = mithu_net::send(
+        method,
+        &url,
+        content_type.or(fallback),
+        body.as_bytes(),
+        initiator.as_ref().map(|page| page.host.as_str()),
+        origin.as_deref(),
+        &header_refs,
+    );
     match result {
         Ok(response) => {
             if let Some(page) = initiator.as_ref()

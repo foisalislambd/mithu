@@ -601,6 +601,11 @@ fn https_once(
         let cookie = header_value_from_request(request, "cookie");
         let origin = header_value_from_request(request, "origin");
         let referer = header_value_from_request(request, "referer");
+        let (extra, body) = split_request(request);
+        let extra_refs: Vec<(&str, &str)> = extra
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
         return http2::roundtrip(
             &mut tls,
             method,
@@ -608,6 +613,8 @@ fn https_once(
             cookie.as_deref(),
             origin.as_deref(),
             referer.as_deref(),
+            &extra_refs,
+            body,
         )
             .map(|message| RawHttp {
                 status: message.status,
@@ -618,6 +625,22 @@ fn https_once(
     }
     let raw = exchange(&mut tls, request)?;
     parse_http_message(&raw)
+}
+
+fn split_request(request: &[u8]) -> (Vec<(String, String)>, &[u8]) {
+    let Some(split) = request.windows(4).position(|mark| mark == b"\r\n\r\n") else {
+        return (Vec::new(), b"");
+    };
+    let head = std::str::from_utf8(&request[..split]).unwrap_or("");
+    let body = &request[split + 4..];
+    let mut headers = Vec::new();
+    for line in head.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        headers.push((name.trim().to_string(), value.trim().to_string()));
+    }
+    (headers, body)
 }
 
 fn header_value_from_request(request: &[u8], name: &str) -> Option<String> {

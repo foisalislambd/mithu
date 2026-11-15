@@ -99,7 +99,7 @@ pub fn decode_data_url(url: &str) -> Option<Bitmap> {
     } else {
         percent_decode_bytes(data)
     };
-    decode(&bytes)
+    decode(&bytes).or_else(|| decode_svg(&bytes))
 }
 
 fn from_dynamic(image: DynamicImage) -> Option<Bitmap> {

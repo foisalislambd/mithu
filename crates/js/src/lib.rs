@@ -901,8 +901,11 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     )?;
     let local_storage = storage_object(context, false)?;
     let session_storage = storage_object(context, true)?;
+    install_storage_interface(context, &local_storage, &session_storage)?;
     context.register_global_property(js_string!("localStorage"), local_storage, flags)?;
     context.register_global_property(js_string!("sessionStorage"), session_storage, flags)?;
+    let time_zone = system_time_zone();
+    context.register_global_property(js_string!("__mithuTimeZone"), js_string!(time_zone), flags)?;
     crate::web::register(context)?;
     context.register_global_callable(
         js_string!("requestIdleCallback"),
@@ -1650,6 +1653,71 @@ fn deliver_mutations(context: &mut Context) -> JsResult<()> {
     crate::web::deliver_mutations(context)
 }
 
+fn system_time_zone() -> String {
+    if let Ok(zone) = std::env::var("TZ")
+        && !zone.is_empty()
+        && zone != "localtime"
+    {
+        return zone;
+    }
+    if let Ok(path) = std::fs::read_link("/etc/localtime")
+        && let Some(text) = path.to_str()
+        && let Some(zone) = text.split("zoneinfo/").nth(1)
+        && !zone.is_empty()
+    {
+        return zone.to_string();
+    }
+    "UTC".to_string()
+}
+
+/// `localStorage instanceof Storage` needs a real constructor. The stores keep
+/// their own methods; the prototype is what `instanceof` walks.
+fn install_storage_interface(
+    context: &mut Context,
+    local_storage: &JsObject,
+    session_storage: &JsObject,
+) -> JsResult<()> {
+    let prototype = ObjectInitializer::new(context).build();
+    let constructor = FunctionObjectBuilder::new(
+        context.realm(),
+        NativeFunction::from_fn_ptr(storage_construct),
+    )
+    .name(js_string!("Storage"))
+    .length(0)
+    .constructor(true)
+    .build();
+    constructor.set(
+        js_string!("prototype"),
+        JsValue::from(prototype.clone()),
+        false,
+        context,
+    )?;
+    prototype.set(
+        js_string!("constructor"),
+        JsValue::from(constructor.clone()),
+        false,
+        context,
+    )?;
+    local_storage.set_prototype(Some(prototype.clone()));
+    session_storage.set_prototype(Some(prototype));
+    context.register_global_property(
+        js_string!("Storage"),
+        JsValue::from(constructor),
+        ATTR,
+    )?;
+    Ok(())
+}
+
+fn storage_construct(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Err(JsNativeError::typ()
+        .with_message("Illegal constructor")
+        .into())
+}
+
 fn storage_object(context: &mut Context, session: bool) -> JsResult<JsObject> {
     let mut object = ObjectInitializer::new(context);
     if session {
@@ -2112,7 +2180,8 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
     let fonts = font_set(context)?;
     let implementation = implementation_object(context)?;
     let window = context.global_object().clone();
-    let mut object = ObjectInitializer::new(context);
+    let root = host(context)?.doc.borrow().root.0;
+    let mut object = ObjectInitializer::with_native_data(NodeKey { id: root }, context);
     object
         .function(
             NativeFunction::from_fn_ptr(get_element_by_id),
@@ -6616,13 +6685,20 @@ fn elements_under_point(args: &[JsValue], context: &mut Context) -> JsResult<Vec
 }
 
 fn node_value(id: usize, context: &mut Context) -> JsValue {
-    let element = host(context)
-        .ok()
-        .is_some_and(|host| host.doc.borrow().element_name(NodeId(id)).is_some());
-    if element {
-        element_value(id, context)
-    } else {
-        text_node(id, context)
+    let kind = host(context).ok().and_then(|host| {
+        host.doc.borrow().nodes.get(id).map(|node| match &node.data {
+            NodeData::Element(_) => 1u16,
+            NodeData::Document => 9,
+            _ => 0,
+        })
+    });
+    match kind {
+        Some(1) => element_value(id, context),
+        Some(9) => context
+            .global_object()
+            .get(js_string!("document"), context)
+            .unwrap_or(JsValue::null()),
+        _ => text_node(id, context),
     }
 }
 
@@ -7060,15 +7136,11 @@ fn sibling_node(this: &JsValue, context: &mut Context, next: bool) -> JsResult<J
 fn get_parent_node(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let id = node_of(this).ok_or_else(type_error)?;
-    let parent = {
-        let doc = host.doc.borrow();
-        doc.node(id)
-            .parent
-            .filter(|parent| doc.element_name(*parent).is_some())
-    };
-    Ok(parent
-        .map(|id| element_value(id.0, context))
-        .unwrap_or(JsValue::null()))
+    let parent = host.doc.borrow().node(id).parent;
+    Ok(match parent {
+        Some(parent) => node_value(parent.0, context),
+        None => JsValue::null(),
+    })
 }
 
 fn get_current_target(
@@ -8375,6 +8447,47 @@ mod tests {
         assert!(
             session.logs().iter().all(|line| !line.contains("not js")),
             "a data block must not be evaluated"
+        );
+    }
+
+    #[test]
+    fn storage_intl_and_document_parent_match_the_host() {
+        let mut doc = parse_html(
+            r#"<html><body>
+            <script>
+              if (!(localStorage instanceof Storage)) throw new Error("localStorage");
+              if (!(sessionStorage instanceof Storage)) throw new Error("sessionStorage");
+              try {
+                new Storage();
+                throw new Error("constructed");
+              } catch (error) {
+                if (String(error.message || error).indexOf("Illegal") < 0) throw error;
+              }
+              var html = document.documentElement;
+              if (html.parentNode !== document) throw new Error("html parent");
+              if (document.parentNode !== null) throw new Error("document parent");
+              var stamp = new Date(Date.UTC(2020, 0, 2, 15, 4, 5));
+              var local = stamp.toLocaleString("en-US");
+              if (local.indexOf("2020") < 0 || local.indexOf("GMT") >= 0) throw new Error(local);
+              var bangla = (1234).toLocaleString("bn");
+              if (bangla.indexOf("১") < 0) throw new Error(bangla);
+              if ((1234.5).toLocaleString("en-US") !== "1,234.5") throw new Error("group");
+              if (new Intl.PluralRules("en").select(1) !== "one") throw new Error("plural");
+              if (new Intl.RelativeTimeFormat("en").format(-1, "day") !== "1 day ago") throw new Error("relative");
+              if (new Intl.Collator("en", { sensitivity: "base" }).compare("A", "a") !== 0) throw new Error("collator");
+              var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+              if (!zone) throw new Error("zone");
+              if ((zone === "UTC" || zone === "Etc/UTC") && new Date(2020, 0, 1).getTimezoneOffset() !== 0) {
+                throw new Error("offset " + zone);
+              }
+            </script>
+            </body></html>"#,
+        );
+        let session = Session::open(std::mem::take(&mut doc), |_| None);
+        let logs = session.logs();
+        assert!(
+            logs.iter().all(|line| !line.contains("JavaScript error")),
+            "{logs:?}"
         );
     }
 

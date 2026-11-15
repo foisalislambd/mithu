@@ -345,6 +345,8 @@ pub fn roundtrip(
     cookie: Option<&str>,
     origin: Option<&str>,
     referer: Option<&str>,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
 ) -> Result<Message, String> {
     let mut out = Vec::new();
     out.extend_from_slice(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
@@ -352,16 +354,26 @@ pub fn roundtrip(
     settings.extend_from_slice(&4u16.to_be_bytes());
     settings.extend_from_slice(&(1024u32 * 1024).to_be_bytes());
     out.extend(frame(4, 0, 0, &settings));
-    let block = encode_request(method, url, cookie, origin, referer);
-    let flags = if method.eq_ignore_ascii_case("GET") {
-        0x5
-    } else {
-        0x4
-    };
+    let block = encode_request(method, url, cookie, origin, referer, extra_headers);
+    // END_HEADERS, plus END_STREAM when there is no body. A POST body follows
+    // as a DATA frame so YouTube and other JSON APIs receive it.
+    let flags = if body.is_empty() { 0x5 } else { 0x4 };
     out.extend(frame(1, flags, 1, &block));
     let window = (16u32 * 1024 * 1024).to_be_bytes();
     out.extend(frame(8, 0, 0, &window));
     out.extend(frame(8, 0, 1, &window));
+    if !body.is_empty() {
+        // The default MAX_FRAME_SIZE is 16 KiB. One oversized DATA frame is a
+        // protocol error, so a JSON body is split and only the last frame ends
+        // the stream.
+        let mut offset = 0;
+        while offset < body.len() {
+            let end = (offset + 16_384).min(body.len());
+            let flags = if end == body.len() { 0x1 } else { 0 };
+            out.extend(frame(0, flags, 1, &body[offset..end]));
+            offset = end;
+        }
+    }
     stream.write_all(&out).map_err(|error| error.to_string())?;
     stream.flush().map_err(|error| error.to_string())?;
 
@@ -466,7 +478,7 @@ pub(crate) fn encode_request_for_test(
     cookie: Option<&str>,
     origin: Option<&str>,
 ) -> Vec<u8> {
-    encode_request(method, url, cookie, origin, None)
+    encode_request(method, url, cookie, origin, None, &[])
 }
 
 fn encode_request(
@@ -475,6 +487,7 @@ fn encode_request(
     cookie: Option<&str>,
     origin: Option<&str>,
     referer: Option<&str>,
+    extra_headers: &[(&str, &str)],
 ) -> Vec<u8> {
     let mut block = Vec::new();
     if method.eq_ignore_ascii_case("GET") {
@@ -519,7 +532,26 @@ fn encode_request(
     if let Some(referer) = referer {
         block.extend(literal("referer", referer));
     }
+    for (name, value) in extra_headers {
+        if header_already_sent(name) || value.is_empty() {
+            continue;
+        }
+        block.extend(literal(&name.to_ascii_lowercase(), value));
+    }
     block
+}
+
+fn header_already_sent(name: &str) -> bool {
+    name.eq_ignore_ascii_case("host")
+        || name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("cookie")
+        || name.eq_ignore_ascii_case("origin")
+        || name.eq_ignore_ascii_case("referer")
+        || name.eq_ignore_ascii_case("accept")
+        || name.eq_ignore_ascii_case("accept-encoding")
+        || name.eq_ignore_ascii_case("user-agent")
+        || name.to_ascii_lowercase().starts_with("sec-ch-ua")
 }
 
 fn literal(name: &str, value: &str) -> Vec<u8> {

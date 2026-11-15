@@ -1323,6 +1323,31 @@ mod tests {
     }
 
     #[test]
+    fn a_data_svg_mask_survives_the_cascade() {
+        let doc = parse_html(r#"<span class="icon"></span>"#);
+        let svg = "data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"%23000\"><path d=\"M0 0h8v8z\"/></svg>";
+        let styles = style_document(
+            &doc,
+            &format!(
+                ".icon{{display:inline-block;width:8px;height:8px;background:#202122;-webkit-mask-image:url('{svg}');mask-image:url('{svg}')}}"
+            ),
+        );
+        let icon = doc
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (doc.element_name(NodeId(index)) == Some("span")).then_some(NodeId(index))
+            })
+            .unwrap();
+        let mask = styles[icon.0].mask_image.as_deref().unwrap_or("");
+        assert!(
+            mask.contains("data:image/svg+xml"),
+            "data svg mask should stay on the element, got {mask}"
+        );
+    }
+
+    #[test]
     fn a_mask_image_is_applied_to_the_element_box() {
         let doc = parse_html(r#"<span class="icon"></span>"#);
         let styles = style_document(

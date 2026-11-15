@@ -1482,6 +1482,7 @@ impl Browser {
                 .unwrap_or_else(|_| fetched.url.clone()),
             None => fetched.url.clone(),
         };
+        prefetch_page(&document, &base);
         let module_base = base.clone();
         let origin = origin_key(&fetched.url);
         let local = self.local_data.get(&origin).cloned().unwrap_or_default();
@@ -3497,6 +3498,75 @@ fn find_box_mut(box_: &mut LayoutBox, id: NodeId) -> Option<&mut LayoutBox> {
         }
     }
     None
+}
+
+/// Warm the disk cache for scripts, stylesheets, images, and preload links.
+/// Eight connections run at once. Later loads of the same URL reuse the cache
+/// instead of opening another TLS session.
+fn prefetch_page(document: &Document, base: &Url) {
+    let mut hrefs = Vec::new();
+    for script in &document.scripts {
+        if let Some(src) = &script.src {
+            hrefs.push(src.clone());
+        }
+    }
+    for href in &document.stylesheet_links {
+        hrefs.push(href.clone());
+    }
+    for index in 0..document.nodes.len() {
+        let id = NodeId(index);
+        let Some(name) = document.element_name(id) else {
+            continue;
+        };
+        if name == "link" {
+            let rel = document.attr(id, "rel").unwrap_or("").to_ascii_lowercase();
+            let preload = rel.split_whitespace().any(|part| {
+                part == "preload" || part == "modulepreload" || part == "prefetch"
+            });
+            if preload && let Some(href) = document.attr(id, "href") {
+                hrefs.push(href.to_string());
+            }
+        } else if name == "img"
+            && hrefs.len() < 160
+            && let Some(src) = document.attr(id, "src")
+        {
+            hrefs.push(src.to_string());
+        }
+    }
+    let mut urls = Vec::new();
+    for href in hrefs {
+        if href.starts_with("data:") {
+            continue;
+        }
+        let Ok(url) = base.resolve(&href) else {
+            continue;
+        };
+        if url.scheme != "http" && url.scheme != "https" {
+            continue;
+        }
+        if urls.iter().any(|seen: &Url| seen.to_display() == url.to_display()) {
+            continue;
+        }
+        urls.push(url);
+    }
+    if urls.is_empty() {
+        return;
+    }
+    let queue = std::sync::Mutex::new(urls);
+    let workers = 8.min(queue.lock().map(|guard| guard.len()).unwrap_or(1)).max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut guard| guard.pop());
+                    let Some(url) = next else {
+                        break;
+                    };
+                    let _ = get(&url);
+                }
+            });
+        }
+    });
 }
 
 fn author_css(document: &Document, base: &Url) -> String {

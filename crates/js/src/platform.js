@@ -496,3 +496,288 @@
     });
   }
 })();
+
+// Compact Intl for en and bn. Boa is built without its ICU feature, so
+// Date and Number locale methods would otherwise fall through to toString.
+(function () {
+  var BN = "০১২৩৪৫৬৭৮৯";
+  var EN_MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  var EN_MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  var EN_DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  var EN_DAYS_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  var BN_MONTHS = ["জানুয়ারি","ফেব্রুয়ারি","মার্চ","এপ্রিল","মে","জুন","জুলাই","আগস্ট","সেপ্টেম্বর","অক্টোবর","নভেম্বর","ডিসেম্বর"];
+  var BN_DAYS = ["রবিবার","সোমবার","মঙ্গলবার","বুধবার","বৃহস্পতিবার","শুক্রবার","শনিবার"];
+
+  function localeTag(locales) {
+    var value = locales;
+    if (Array.isArray(value)) value = value[0];
+    if (value == null || value === "") value = "en";
+    return String(value);
+  }
+  function isBn(locales) {
+    return localeTag(locales).toLowerCase().indexOf("bn") === 0;
+  }
+  function banglaDigits(text) {
+    var out = "";
+    var raw = String(text);
+    for (var i = 0; i < raw.length; i++) {
+      var code = raw.charCodeAt(i);
+      out += code >= 48 && code <= 57 ? BN.charAt(code - 48) : raw.charAt(i);
+    }
+    return out;
+  }
+  function pad(value, width) {
+    var text = String(value);
+    while (text.length < width) text = "0" + text;
+    return text;
+  }
+  function show(text, locales) {
+    return isBn(locales) ? banglaDigits(text) : text;
+  }
+  function timeZone() {
+    if (typeof __mithuTimeZone === "string" && __mithuTimeZone) return __mithuTimeZone;
+    return "UTC";
+  }
+
+  function DateTimeFormat(locales, options) {
+    if (!(this instanceof DateTimeFormat)) return new DateTimeFormat(locales, options);
+    this._locales = locales;
+    this._options = options || {};
+  }
+  DateTimeFormat.prototype.resolvedOptions = function () {
+    return {
+      locale: isBn(this._locales) ? "bn" : "en",
+      calendar: "gregory",
+      numberingSystem: isBn(this._locales) ? "beng" : "latn",
+      timeZone: this._options.timeZone || timeZone()
+    };
+  };
+  DateTimeFormat.prototype.formatToParts = function (value) {
+    var formatted = this.format(value);
+    return [{ type: "literal", value: formatted }];
+  };
+  DateTimeFormat.prototype.format = function (value) {
+    var date = value instanceof Date ? value : new Date(value == null ? Date.now() : value);
+    if (isNaN(date.getTime())) return "Invalid Date";
+    var options = this._options;
+    var locales = this._locales;
+    var bn = isBn(locales);
+    var year = options.year;
+    var month = options.month;
+    var day = options.day;
+    var weekday = options.weekday;
+    var hour = options.hour;
+    var minute = options.minute;
+    var second = options.second;
+    if (options.dateStyle || options.timeStyle) {
+      if (options.dateStyle) {
+        year = year || "numeric";
+        month = month || (options.dateStyle === "long" || options.dateStyle === "full" ? "long" : "numeric");
+        day = day || "numeric";
+        if (options.dateStyle === "full") weekday = weekday || "long";
+      }
+      if (options.timeStyle) {
+        hour = hour || "numeric";
+        minute = minute || "numeric";
+        if (options.timeStyle !== "short") second = second || "numeric";
+      }
+    } else if (!year && !month && !day && !weekday && !hour && !minute && !second) {
+      year = "numeric";
+      month = "numeric";
+      day = "numeric";
+      hour = "numeric";
+      minute = "numeric";
+      second = "numeric";
+    }
+    var parts = [];
+    if (weekday) {
+      var names = bn ? BN_DAYS : (weekday === "short" || weekday === "narrow" ? EN_DAYS_SHORT : EN_DAYS);
+      parts.push(names[date.getDay()]);
+    }
+    var dateParts = [];
+    if (month) {
+      var monthText;
+      if (month === "long") monthText = (bn ? BN_MONTHS : EN_MONTHS)[date.getMonth()];
+      else if (month === "short" || month === "narrow") monthText = (bn ? BN_MONTHS : EN_MONTHS_SHORT)[date.getMonth()];
+      else monthText = show(month === "2-digit" ? pad(date.getMonth() + 1, 2) : String(date.getMonth() + 1), locales);
+      dateParts.push(monthText);
+    }
+    if (day) dateParts.push(show(day === "2-digit" ? pad(date.getDate(), 2) : String(date.getDate()), locales));
+    if (year) dateParts.push(show(year === "2-digit" ? pad(date.getFullYear() % 100, 2) : String(date.getFullYear()), locales));
+    if (dateParts.length) {
+      var numericDate = !month || month === "numeric" || month === "2-digit";
+      if (numericDate && bn && dateParts.length === 3) parts.push(dateParts[1] + "/" + dateParts[0] + "/" + dateParts[2]);
+      else if (numericDate) parts.push(dateParts.join("/"));
+      else parts.push(dateParts.join(" "));
+    }
+    if (hour || minute || second) {
+      var hours = date.getHours();
+      var hour12 = options.hour12 !== false && options.hourCycle !== "h23" && options.hourCycle !== "h24";
+      var suffix = "";
+      var shownHour = hours;
+      if (hour12) {
+        suffix = hours < 12 ? " AM" : " PM";
+        shownHour = hours % 12;
+        if (shownHour === 0) shownHour = 12;
+      }
+      var time = [];
+      if (hour) time.push(show(hour === "2-digit" ? pad(shownHour, 2) : String(shownHour), locales));
+      if (minute) time.push(show(minute === "2-digit" || hour ? pad(date.getMinutes(), 2) : String(date.getMinutes()), locales));
+      if (second) time.push(show(second === "2-digit" || minute ? pad(date.getSeconds(), 2) : String(date.getSeconds()), locales));
+      parts.push(time.join(":") + (bn ? banglaDigits(suffix) : suffix));
+    }
+    return parts.join(", ");
+  };
+  DateTimeFormat.supportedLocalesOf = function () { return ["en", "bn"]; };
+
+  function groupDigits(text) {
+    var sign = "";
+    if (text.charAt(0) === "-") {
+      sign = "-";
+      text = text.slice(1);
+    }
+    var dot = text.indexOf(".");
+    var whole = dot < 0 ? text : text.slice(0, dot);
+    var frac = dot < 0 ? "" : text.slice(dot);
+    var grouped = "";
+    for (var i = 0; i < whole.length; i++) {
+      if (i > 0 && (whole.length - i) % 3 === 0) grouped += ",";
+      grouped += whole.charAt(i);
+    }
+    return sign + grouped + frac;
+  }
+  function NumberFormat(locales, options) {
+    if (!(this instanceof NumberFormat)) return new NumberFormat(locales, options);
+    this._locales = locales;
+    this._options = options || {};
+  }
+  NumberFormat.prototype.resolvedOptions = function () {
+    return {
+      locale: isBn(this._locales) ? "bn" : "en",
+      numberingSystem: isBn(this._locales) ? "beng" : "latn",
+      style: this._options.style || "decimal"
+    };
+  };
+  NumberFormat.prototype.format = function (value) {
+    var options = this._options;
+    var number = Number(value);
+    if (!isFinite(number)) return String(number);
+    var style = options.style || "decimal";
+    if (style === "percent") number *= 100;
+    var max = options.maximumFractionDigits;
+    var min = options.minimumFractionDigits;
+    if (style === "currency" && max == null && min == null) {
+      min = 2;
+      max = 2;
+    }
+    if (max == null) max = style === "percent" ? 0 : 3;
+    var text = max === 0 ? String(Math.round(number)) : number.toFixed(Math.min(max, 20));
+    if (min != null) {
+      var dot = text.indexOf(".");
+      var frac = dot < 0 ? "" : text.slice(dot + 1);
+      while (frac.length < min) frac += "0";
+      text = (dot < 0 ? text : text.slice(0, dot)) + (frac ? "." + frac : "");
+    } else if (text.indexOf(".") >= 0) {
+      text = text.replace(/\.?0+$/, "");
+    }
+    if (options.useGrouping !== false) text = groupDigits(text);
+    text = show(text, this._locales);
+    if (style === "percent") text += "%";
+    if (style === "currency") {
+      var currency = options.currency || "USD";
+      var symbol = currency === "USD" ? "$" : currency === "BDT" ? "৳" : currency + " ";
+      text = symbol + text;
+    }
+    return text;
+  };
+  NumberFormat.supportedLocalesOf = function () { return ["en", "bn"]; };
+
+  function PluralRules(locales) {
+    if (!(this instanceof PluralRules)) return new PluralRules(locales);
+    this._locales = locales;
+  }
+  PluralRules.prototype.select = function (value) {
+    return Math.abs(Number(value)) === 1 ? "one" : "other";
+  };
+  PluralRules.prototype.resolvedOptions = function () {
+    return { locale: isBn(this._locales) ? "bn" : "en", type: "cardinal" };
+  };
+  PluralRules.supportedLocalesOf = function () { return ["en", "bn"]; };
+
+  var RELATIVE = {
+    en: { second: ["second", "seconds"], minute: ["minute", "minutes"], hour: ["hour", "hours"], day: ["day", "days"], week: ["week", "weeks"], month: ["month", "months"], year: ["year", "years"] },
+    bn: { second: ["সেকেন্ড", "সেকেন্ড"], minute: ["মিনিট", "মিনিট"], hour: ["ঘণ্টা", "ঘণ্টা"], day: ["দিন", "দিন"], week: ["সপ্তাহ", "সপ্তাহ"], month: ["মাস", "মাস"], year: ["বছর", "বছর"] }
+  };
+  function RelativeTimeFormat(locales) {
+    if (!(this instanceof RelativeTimeFormat)) return new RelativeTimeFormat(locales);
+    this._locales = locales;
+  }
+  RelativeTimeFormat.prototype.format = function (value, unit) {
+    var number = Number(value);
+    var table = isBn(this._locales) ? RELATIVE.bn : RELATIVE.en;
+    var names = table[unit] || [unit, unit];
+    var word = Math.abs(number) === 1 ? names[0] : names[1];
+    var amount = show(String(Math.abs(number)), this._locales);
+    if (isBn(this._locales)) return amount + " " + word + (number < 0 ? " আগে" : " পরে");
+    return number < 0 ? amount + " " + word + " ago" : "in " + amount + " " + word;
+  };
+  RelativeTimeFormat.prototype.resolvedOptions = function () {
+    return { locale: isBn(this._locales) ? "bn" : "en", numeric: "always", style: "long" };
+  };
+  RelativeTimeFormat.supportedLocalesOf = function () { return ["en", "bn"]; };
+
+  function Collator(locales, options) {
+    if (!(this instanceof Collator)) return new Collator(locales, options);
+    this._options = options || {};
+  }
+  Collator.prototype.compare = function (left, right) {
+    var a = String(left);
+    var b = String(right);
+    var sensitivity = this._options.sensitivity || "variant";
+    if (sensitivity === "base" || sensitivity === "accent") {
+      a = a.toLowerCase();
+      b = b.toLowerCase();
+    }
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+  };
+  Collator.prototype.resolvedOptions = function () {
+    return { locale: "en", sensitivity: this._options.sensitivity || "variant", collation: "default" };
+  };
+  Collator.supportedLocalesOf = function () { return ["en", "bn"]; };
+
+  globalThis.Intl = {
+    DateTimeFormat: DateTimeFormat,
+    NumberFormat: NumberFormat,
+    PluralRules: PluralRules,
+    RelativeTimeFormat: RelativeTimeFormat,
+    Collator: Collator
+  };
+  Date.prototype.toLocaleString = function (locales, options) {
+    return new DateTimeFormat(locales, options).format(this);
+  };
+  Date.prototype.toLocaleDateString = function (locales, options) {
+    var fields = options ? Object.assign({}, options) : {};
+    if (!fields.dateStyle && !fields.year && !fields.month && !fields.day) fields.dateStyle = "short";
+    delete fields.hour;
+    delete fields.minute;
+    delete fields.second;
+    return new DateTimeFormat(locales, fields).format(this);
+  };
+  Date.prototype.toLocaleTimeString = function (locales, options) {
+    var fields = options ? Object.assign({}, options) : {};
+    if (!fields.timeStyle && !fields.hour && !fields.minute && !fields.second) fields.timeStyle = "medium";
+    delete fields.year;
+    delete fields.month;
+    delete fields.day;
+    delete fields.weekday;
+    return new DateTimeFormat(locales, fields).format(this);
+  };
+  Number.prototype.toLocaleString = function (locales, options) {
+    return new NumberFormat(locales, options).format(Number(this));
+  };
+  String.prototype.localeCompare = function (other, locales, options) {
+    return new Collator(locales, options).compare(String(this), String(other));
+  };
+})();
