@@ -2163,6 +2163,16 @@ fn document_object(context: &mut Context) -> JsResult<JsObject> {
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(element_from_point),
+            js_string!("elementFromPoint"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(elements_from_point),
+            js_string!("elementsFromPoint"),
+            2,
+        )
+        .function(
             NativeFunction::from_fn_ptr(document_listener),
             js_string!("addEventListener"),
             2,
@@ -6465,6 +6475,68 @@ fn create_document_fragment(
     fragment_value(id.0, context)
 }
 
+fn element_from_point(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let hits = elements_under_point(args, context)?;
+    Ok(hits.into_iter().next().unwrap_or(JsValue::null()))
+}
+
+fn elements_from_point(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let hits = elements_under_point(args, context)?;
+    Ok(JsArray::from_iter(hits, context).into())
+}
+
+/// Deepest laid-out element first. GPT's viewability check calls this.
+fn elements_under_point(args: &[JsValue], context: &mut Context) -> JsResult<Vec<JsValue>> {
+    let x = args
+        .first()
+        .map(|value| value.to_number(context))
+        .transpose()?
+        .unwrap_or(f64::NAN);
+    let y = args
+        .get(1)
+        .map(|value| value.to_number(context))
+        .transpose()?
+        .unwrap_or(f64::NAN);
+    if !x.is_finite() || !y.is_finite() {
+        return Ok(Vec::new());
+    }
+    let host = host(context)?;
+    let scroll = f64::from(host.scroll.get());
+    let geometry = host.geometry.borrow().clone();
+    let mut hits: Vec<(f32, usize)> = geometry
+        .into_iter()
+        .filter(|(_, metrics)| {
+            let left = f64::from(metrics.x);
+            let top = f64::from(metrics.y) - scroll;
+            let right = left + f64::from(metrics.width);
+            let bottom = top + f64::from(metrics.height);
+            metrics.width > 0.0
+                && metrics.height > 0.0
+                && x >= left
+                && x < right
+                && y >= top
+                && y < bottom
+        })
+        .map(|(id, metrics)| (metrics.width * metrics.height, id))
+        .collect();
+    hits.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut values = Vec::new();
+    for (_, id) in hits {
+        if host.doc.borrow().element_name(NodeId(id)).is_some() {
+            values.push(element_value(id, context));
+        }
+    }
+    Ok(values)
+}
+
 fn node_value(id: usize, context: &mut Context) -> JsValue {
     let element = host(context)
         .ok()
@@ -8117,6 +8189,8 @@ mod tests {
               if (seen !== 0) throw new Error("sync observer " + seen);
               var rect = box.getBoundingClientRect();
               if (box.getBoundingClientRect() !== rect) throw new Error("rect");
+              if (document.elementFromPoint(10, 10) !== null) throw new Error("hit");
+              if (document.elementsFromPoint(10, 10).length !== 0) throw new Error("hits");
               document.title = "stable";
             </script>"#,
         );
