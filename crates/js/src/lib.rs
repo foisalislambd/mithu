@@ -4,7 +4,7 @@
 //! window, document, and node tree. Timers and `location` report back to the browser.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -50,6 +50,9 @@ struct Host {
     scroll: Rc<Cell<f32>>,
     /// Script source by the path Boa prints in a stack, for `MITHU_JS_DEBUG`.
     sources: Rc<RefCell<HashMap<String, String>>>,
+    loader: Rc<PageLoader>,
+    /// Parser-inserted scripts, so a later move does not run them again.
+    ran_scripts: Rc<RefCell<HashSet<usize>>>,
 }
 
 /// Border box of a laid-out element, in CSS pixels.
@@ -190,6 +193,7 @@ impl Session {
         let session_store = Rc::new(RefCell::new(session_store));
         let mut context = Context::builder()
             .module_loader(Rc::clone(&loader))
+            .host_hooks(Rc::new(RejectionHooks))
             .build()
             .unwrap_or_else(|_| Context::default());
         // Boa's default stack is 10,240 slots. A page script that builds a
@@ -216,6 +220,8 @@ impl Session {
             geometry: Rc::new(RefCell::new(HashMap::new())),
             scroll: Rc::new(Cell::new(0.0)),
             sources: Rc::new(RefCell::new(HashMap::new())),
+            loader: Rc::clone(&loader),
+            ran_scripts: Rc::new(RefCell::new(HashSet::new())),
         });
         let mut jobs = Vec::new();
         if let Err(error) = install_host(&mut context) {
@@ -607,6 +613,56 @@ fn script_jobs(
     jobs
 }
 
+struct RejectionHooks;
+
+impl boa_engine::context::HostHooks for RejectionHooks {
+    fn promise_rejection_tracker(
+        &self,
+        promise: &JsObject<boa_engine::builtins::promise::Promise>,
+        operation: boa_engine::builtins::promise::OperationType,
+        context: &mut Context,
+    ) {
+        let promise = JsValue::from(promise.clone());
+        let Some(object) = promise.as_object() else {
+            return;
+        };
+        let unhandled = operation == boa_engine::builtins::promise::OperationType::Reject;
+        let _ = object.set(
+            js_string!("__mithuUnhandled"),
+            JsValue::from(unhandled),
+            false,
+            context,
+        );
+        if !unhandled {
+            return;
+        }
+        // A handler may attach before the current turn ends. Report only if
+        // the rejection is still unhandled when that turn's microtasks run.
+        let Ok(report) = context
+            .global_object()
+            .get(js_string!("__mithuReportRejection"), context)
+        else {
+            return;
+        };
+        if let Some(report) = report.as_object() {
+            let _ = report.call(&JsValue::undefined(), &[promise], context);
+        }
+    }
+}
+
+fn record_rejection(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let reason = args.first().cloned().unwrap_or(JsValue::undefined());
+    let mut message = reason.display().to_string();
+    if let Some(object) = reason.as_object()
+        && let Ok(stack) = object.get(js_string!("stack"), context)
+    {
+        message.push('\n');
+        message.push_str(&stack.display().to_string());
+    }
+    note_error(context, &message);
+    Ok(JsValue::undefined())
+}
+
 fn note_error(context: &Context, error: &dyn std::fmt::Display) {
     if let Some(host) = context.get_data::<Host>() {
         let message = format!("JavaScript error: {error}");
@@ -685,6 +741,7 @@ fn drive_scripts(
         for job in jobs {
             if let Some(host) = context.get_data::<Host>() {
                 *host.current_script.borrow_mut() = Some(job.node);
+                host.ran_scripts.borrow_mut().insert(job.node.0);
                 remember_source(host, &job.path, &job.code);
             }
             if std::env::var_os("MITHU_JS_DEBUG").is_some() {
@@ -875,8 +932,117 @@ fn install_host(context: &mut Context) -> JsResult<()> {
     let _ = wire_document_prototype(context);
     let _ = wire_prototype_chain(context);
     let _ = install_group(context);
+    context.register_global_callable(
+        js_string!("__mithuRecordRejection"),
+        1,
+        NativeFunction::from_fn_ptr(record_rejection),
+    )?;
+    context.eval(Source::from_bytes(READABLE_STREAM))?;
     Ok(())
 }
+
+/// Enough of `ReadableStream` for a React flight stream: enqueue, close,
+/// `getReader().read()`, and `tee()`.
+const READABLE_STREAM: &str = r#"
+class ReadableStream {
+  constructor(underlying) {
+    this._queue = [];
+    this._closed = false;
+    this._error = undefined;
+    this._wait = null;
+    var stream = this;
+    this._controller = {
+      enqueue: function (chunk) {
+        stream._queue.push(chunk);
+        stream._wake();
+      },
+      close: function () {
+        stream._closed = true;
+        stream._wake();
+      },
+      error: function (err) {
+        stream._error = err;
+        stream._closed = true;
+        stream._wake();
+      },
+      get desiredSize() {
+        return stream._closed ? 0 : 1;
+      }
+    };
+    if (underlying && typeof underlying.start === "function") {
+      underlying.start(this._controller);
+    }
+  }
+  _wake() {
+    var wait = this._wait;
+    if (!wait) return;
+    if (this._error) {
+      this._wait = null;
+      wait.reject(this._error);
+      return;
+    }
+    if (this._queue.length) {
+      this._wait = null;
+      wait.resolve({ value: this._queue.shift(), done: false });
+      return;
+    }
+    if (this._closed) {
+      this._wait = null;
+      wait.resolve({ value: undefined, done: true });
+    }
+  }
+  getReader() {
+    var stream = this;
+    return {
+      read: function () {
+        if (stream._error) return Promise.reject(stream._error);
+        if (stream._queue.length) {
+          return Promise.resolve({ value: stream._queue.shift(), done: false });
+        }
+        if (stream._closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise(function (resolve, reject) {
+          stream._wait = { resolve: resolve, reject: reject };
+        });
+      },
+      releaseLock: function () {},
+      cancel: function () {
+        stream._controller.close();
+        return Promise.resolve();
+      }
+    };
+  }
+  tee() {
+    var reader = this.getReader();
+    var first, second;
+    var left = new ReadableStream({ start: function (controller) { first = controller; } });
+    var right = new ReadableStream({ start: function (controller) { second = controller; } });
+    var pump = function () {
+      reader.read().then(function (result) {
+        if (result.done) {
+          first.close();
+          second.close();
+          return;
+        }
+        first.enqueue(result.value);
+        second.enqueue(result.value);
+        pump();
+      }, function (err) {
+        first.error(err);
+        second.error(err);
+      });
+    };
+    pump();
+    return [left, right];
+  }
+}
+globalThis.__mithuReportRejection = function (promise) {
+  Promise.resolve().then(function () {
+    if (promise.__mithuUnhandled) {
+      promise.catch(function (reason) { globalThis.__mithuRecordRejection(reason); });
+    }
+  });
+};
+"#;
 
 fn wire_document_prototype(context: &mut Context) -> JsResult<()> {
     let document = context
@@ -4591,6 +4757,92 @@ fn graft(
     }
 }
 
+fn execute_inserted_script(id: NodeId, context: &mut Context) {
+    let Some(host) = context.get_data::<Host>().cloned() else {
+        return;
+    };
+    let (module, src, inline) = {
+        let doc = host.doc.borrow();
+        if doc.element_name(id) != Some("script") || !doc.is_connected(id) {
+            return;
+        }
+        let kind = doc
+            .attr(id, "type")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let javascript = kind.is_empty()
+            || kind == "module"
+            || matches!(
+                kind.as_str(),
+                "text/javascript"
+                    | "application/javascript"
+                    | "text/ecmascript"
+                    | "application/ecmascript"
+            );
+        if !javascript || doc.attr(id, "nomodule").is_some() {
+            return;
+        }
+        let src = doc
+            .attr(id, "src")
+            .map(str::to_string)
+            .filter(|value| !value.is_empty());
+        let inline = if src.is_none() {
+            doc.text_content(id)
+        } else {
+            String::new()
+        };
+        (kind == "module", src, inline)
+    };
+    if host.ran_scripts.borrow().contains(&id.0) {
+        return;
+    }
+    if src.is_none() && inline.trim().is_empty() {
+        return;
+    }
+    host.ran_scripts.borrow_mut().insert(id.0);
+    let code = if let Some(src) = src.as_deref() {
+        let base = host.location.borrow().clone();
+        let url = resolve_request(&base, src)
+            .map(|url| url.to_display())
+            .unwrap_or_else(|_| src.to_string());
+        match (host.loader.fetch.borrow_mut())(&url) {
+            Some(code) => code,
+            None => {
+                host.log
+                    .borrow_mut()
+                    .push(format!("JavaScript error: script not found: {url}"));
+                return;
+            }
+        }
+    } else {
+        inline
+    };
+    let path = src.unwrap_or_else(|| format!("inserted-{}.js", id.0));
+    let previous = host.current_script.replace(Some(id));
+    remember_source(&host, &path, &code);
+    let result = if module {
+        run_module(context, &code, &path)
+    } else {
+        let source_path = PathBuf::from(&path);
+        match Script::parse(
+            Source::from_bytes(code.as_str()).with_path(&source_path),
+            None,
+            context,
+        ) {
+            Ok(script) => script.evaluate(context).map(|_| ()),
+            Err(error) => Err(error),
+        }
+    };
+    if let Err(error) = result {
+        note_error(context, &error);
+    } else if let Err(error) = context.run_jobs() {
+        note_error(context, &error);
+    }
+    *host.current_script.borrow_mut() = previous;
+    fire_node_listeners(context, id, "load");
+}
+
 fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let host = host(context)?;
     let parent = node_of(this).ok_or_else(type_error)?;
@@ -4599,12 +4851,14 @@ fn append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         let children = host.doc.borrow().node(NodeId(holder)).children.clone();
         for child in children {
             host.doc.borrow_mut().append_child(parent, child);
+            execute_inserted_script(child, context);
         }
         return Ok(child_value);
     }
     let child = node_of(&child_value).ok_or_else(type_error)?;
     host.doc.borrow_mut().append_child(parent, child);
     notify_connected(child, context);
+    execute_inserted_script(child, context);
     Ok(child_value)
 }
 
@@ -5780,13 +6034,13 @@ fn deliver_macrotask_message(event: &JsValue, context: &mut Context) -> JsResult
     let functions = read_listeners(context, "win:message").unwrap_or_default();
     let this = JsValue::from(context.global_object().clone());
     for function in functions {
-        let _ = function.call(&this, &[event.clone()], context);
+        function.call(&this, &[event.clone()], context)?;
     }
     let onmessage = context
         .global_object()
         .get(js_string!("onmessage"), context)?;
     if let Some(function) = onmessage.as_object().filter(|object| object.is_callable()) {
-        let _ = function.call(&this, &[event.clone()], context);
+        function.call(&this, &[event.clone()], context)?;
     }
     Ok(())
 }
@@ -6081,7 +6335,11 @@ fn get_src(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult
 }
 
 fn set_src(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    write_attr(this, "src", args, context)
+    let written = write_attr(this, "src", args, context)?;
+    if let Some(id) = node_of(this) {
+        execute_inserted_script(id, context);
+    }
+    Ok(written)
 }
 
 fn get_href(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -6210,6 +6468,7 @@ fn insert_before_child(
             host.doc
                 .borrow_mut()
                 .insert_before(parent, child, reference);
+            execute_inserted_script(child, context);
             reference = Some(child);
         }
         return Ok(child_value);
@@ -6217,6 +6476,7 @@ fn insert_before_child(
     let child = node_of(&child_value).ok_or_else(type_error)?;
     host.doc.borrow_mut().insert_before(parent, child, before);
     notify_connected(child, context);
+    execute_inserted_script(child, context);
     Ok(child_value)
 }
 
@@ -6899,6 +7159,84 @@ mod tests {
             "{:?}",
             doc.stylesheets
         );
+    }
+
+    #[test]
+    fn a_readable_stream_tees_and_reads_enqueued_chunks() {
+        let doc = parse_html(
+            r#"<html><body><script>
+              var stream = new ReadableStream({
+                start: function (controller) {
+                  controller.enqueue("a");
+                  controller.enqueue("b");
+                  controller.close();
+                }
+              });
+              var branches = stream.tee();
+              var reader = branches[0].getReader();
+              reader.read().then(function (first) {
+                return reader.read().then(function (second) {
+                  return reader.read().then(function (end) {
+                    document.documentElement.setAttribute(
+                      "data-stream",
+                      first.value + second.value + (end.done ? "done" : "open")
+                    );
+                  });
+                });
+              });
+            </script></body></html>"#,
+        );
+        let session = Session::open(doc, |_| None);
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let html = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(NodeId(index)) == Some("html"))
+                    .then_some(NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(session.document().attr(html, "data-stream"), Some("abdone"));
+    }
+
+    #[test]
+    fn an_inserted_script_runs_when_it_is_connected() {
+        let doc = parse_html(
+            r#"<html><head></head><body>
+            <script>
+              var inline = document.createElement("script");
+              inline.textContent = "document.documentElement.setAttribute('data-inline','yes')";
+              document.body.appendChild(inline);
+              var external = document.createElement("script");
+              external.src = "/extra.js";
+              external.addEventListener("load", function () {
+                document.documentElement.setAttribute("data-load", "yes");
+              });
+              document.head.appendChild(external);
+            </script>
+            </body></html>"#,
+        );
+        let session = Session::open_at(doc, "https://example.test/", |src| {
+            src.ends_with("/extra.js").then(|| {
+                "document.documentElement.setAttribute('data-src','yes')".to_string()
+            })
+        });
+        assert!(session.logs().is_empty(), "{:?}", session.logs());
+        let html = session
+            .document()
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                (session.document().element_name(NodeId(index)) == Some("html"))
+                    .then_some(NodeId(index))
+            })
+            .unwrap();
+        assert_eq!(session.document().attr(html, "data-inline"), Some("yes"));
+        assert_eq!(session.document().attr(html, "data-src"), Some("yes"));
+        assert_eq!(session.document().attr(html, "data-load"), Some("yes"));
     }
 
     #[test]

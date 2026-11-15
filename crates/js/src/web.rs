@@ -2813,7 +2813,7 @@ pub(crate) fn deliver_port_message(event: &JsValue, context: &mut Context) -> Js
         .as_object()
         .filter(|function| function.is_callable())
     {
-        let _ = function.call(&target, &[event.clone()], context);
+        function.call(&target, &[event.clone()], context)?;
     }
     let listeners = peer.get(js_string!("__listeners"), context)?;
     if let Some(listeners) = listeners.as_object() {
@@ -2827,7 +2827,7 @@ pub(crate) fn deliver_port_message(event: &JsValue, context: &mut Context) -> Js
                 .as_object()
                 .filter(|function| function.is_callable())
             {
-                let _ = function.call(&target, &[event.clone()], context);
+                function.call(&target, &[event.clone()], context)?;
             }
         }
     }
