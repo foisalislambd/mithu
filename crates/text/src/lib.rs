@@ -69,6 +69,7 @@ pub struct FontBook {
     bold: Face,
     mono: Face,
     bengali: Face,
+    fallbacks: Vec<Face>,
     custom: Vec<(String, Face)>,
 }
 
@@ -91,6 +92,23 @@ impl FontBook {
                 "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
             ]),
             bengali: load_face(&["/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf"]),
+            fallbacks: [
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansArmenian-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansGeorgian-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            ]
+            .into_iter()
+            .filter_map(|path| match load_face(&[path]) {
+                face @ Face::Vector(_) => Some(face),
+                Face::Fallback => None,
+            })
+            .collect(),
             custom: Vec::new(),
         }
     }
@@ -106,7 +124,10 @@ impl FontBook {
             return;
         }
         let vector = VectorFace { font, bytes };
-        if let Some(glyphs) = shape_vector(&vector, "বাংলা", 16.0)
+        // A face that claims Bengali but shapes it into huge boxes is a broken
+        // subset. Latin and icon fonts do not cover those letters, so they stay.
+        if vector.font.lookup_glyph_index('ব') != 0
+            && let Some(glyphs) = shape_vector(&vector, "বাংলা", 16.0)
             && glyphs.iter().any(|glyph| {
                 !glyph.advance.is_finite() || glyph.advance.abs() > 64.0 || glyph.width > 128
             })
@@ -217,6 +238,11 @@ impl FontBook {
         }
         if covers(&self.bengali, ch) {
             return &self.bengali;
+        }
+        for face in &self.fallbacks {
+            if covers(face, ch) {
+                return face;
+            }
         }
         if covers(&self.sans, ch) {
             return &self.sans;

@@ -61,7 +61,7 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
         browser.navigate(url);
         // Let a short timer (Google's own fallback, for example) run before
         // the still is taken.
-        browser.advance_timers(2_500);
+        browser.advance_timers(8_000);
     }
     let width = 1280u32;
     let height = 800u32;

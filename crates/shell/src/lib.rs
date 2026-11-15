@@ -1505,7 +1505,7 @@ impl Browser {
                     ..StyleState::default()
                 },
             );
-            let images = load_images(&document, &base);
+            let images = load_images(&document, &base, &styles);
             let layout = layout_tree(
                 &document,
                 &styles,
@@ -1565,7 +1565,7 @@ impl Browser {
                 ..StyleState::default()
             },
         );
-        let images = load_images(&document, &base);
+        let images = load_images(&document, &base, &styles);
         let layout_height = self.layout_height();
         let layout = layout_tree(
             &document,
@@ -1790,7 +1790,7 @@ impl Browser {
                     ..StyleState::default()
                 },
             );
-            let images = load_images(&doc, &nested_base);
+            let images = load_images(&doc, &nested_base, &styles);
             let nested = layout_tree(&doc, &styles, width, height, &self.fonts, &images);
             if let Some(slot) = find_box_mut(&mut layout.root, id) {
                 slot.frame = Some(Box::new(nested));
@@ -1887,7 +1887,7 @@ impl Browser {
     }
 
     fn install_web_fonts(&mut self, css: &str, base: &Url) {
-        for (family, url) in font_faces(css).into_iter().take(8) {
+        for (family, url) in font_faces(css).into_iter().take(24) {
             if self.fonts.has_family(&family) {
                 continue;
             }
@@ -1919,7 +1919,7 @@ impl Browser {
                 ..StyleState::default()
             },
         );
-        let images = load_images(&document, &base);
+        let images = load_images(&document, &base, &styles);
         {
             let page = self.page_mut();
             if let Some(log) = logs.last() {
@@ -3575,11 +3575,15 @@ fn import_target(input: &str) -> Option<(String, usize)> {
     Some((raw, lead + close + semi))
 }
 
-fn load_images(document: &Document, base: &Url) -> HashMap<NodeId, Arc<Bitmap>> {
+fn load_images(
+    document: &Document,
+    base: &Url,
+    styles: &[mithu_style::ComputedStyle],
+) -> HashMap<NodeId, Arc<Bitmap>> {
     let mut images = HashMap::new();
     for id in (0..document.nodes.len()).map(NodeId) {
-        if images.len() >= 40 {
-            continue;
+        if images.len() >= 80 {
+            break;
         }
         let name = document.element_name(id);
         if name != Some("img") && name != Some("video") {
@@ -3597,6 +3601,29 @@ fn load_images(document: &Document, base: &Url) -> HashMap<NodeId, Arc<Bitmap>> 
             mithu_image::decode_data_url(&src)
         } else {
             fetch_bytes(base, &src).and_then(|bytes| mithu_image::decode(&bytes))
+        };
+        if let Some(bitmap) = bitmap {
+            images.insert(id, Arc::new(bitmap));
+        }
+    }
+    for (index, style) in styles.iter().enumerate() {
+        if images.len() >= 80 {
+            break;
+        }
+        let Some(url) = style.background_image.as_deref() else {
+            continue;
+        };
+        if url.contains("placeholder") {
+            continue;
+        }
+        let id = NodeId(index);
+        if images.contains_key(&id) {
+            continue;
+        }
+        let bitmap = if url.starts_with("data:") {
+            mithu_image::decode_data_url(url)
+        } else {
+            fetch_bytes(base, url).and_then(|bytes| mithu_image::decode(&bytes))
         };
         if let Some(bitmap) = bitmap {
             images.insert(id, Arc::new(bitmap));
@@ -3686,12 +3713,32 @@ fn set_field_text(document: &mut Document, id: NodeId, text: &str) {
 }
 
 fn image_source(document: &Document, id: NodeId) -> Option<String> {
-    if let Some(srcset) = document.attr(id, "srcset")
+    let src = document.attr(id, "src").map(str::to_string);
+    let lazy = [
+        "data-src",
+        "data-original",
+        "data-lazy-src",
+        "data-bg",
+        "data-image",
+    ]
+    .iter()
+    .find_map(|name| document.attr(id, name).map(str::to_string));
+    if let Some(lazy) = lazy.filter(|value| !value.is_empty()) {
+        let placeholder = src.as_deref().is_none_or(|value| {
+            value.contains("placeholder")
+                || value.starts_with("data:image/gif")
+                || value.starts_with("data:image/svg")
+        });
+        if placeholder {
+            return Some(lazy);
+        }
+    }
+    if let Some(srcset) = document.attr(id, "srcset").or_else(|| document.attr(id, "data-srcset"))
         && let Some(picked) = pick_srcset(srcset)
     {
         return Some(picked);
     }
-    document.attr(id, "src").map(str::to_string)
+    src
 }
 
 fn pick_srcset(value: &str) -> Option<String> {

@@ -170,6 +170,8 @@ pub struct ComputedStyle {
     /// SVG `fill` when a rule sets one. `None` leaves the paint default.
     pub fill: Option<Color>,
     pub background: Color,
+    /// First `url(...)` in `background-image`, when one is set.
+    pub background_image: Option<String>,
     pub font_size: f32,
     pub bold: bool,
     pub mono: bool,
@@ -247,6 +249,7 @@ impl ComputedStyle {
             color: Color::BLACK,
             fill: None,
             background: Color::TRANSPARENT,
+            background_image: None,
             font_size: 16.0,
             bold: false,
             mono: false,

@@ -481,6 +481,7 @@ fn project(values: &ComputedValues) -> ComputedStyle {
     style.font_family = font_family(values);
     style.underline = text_underline(values);
     style.background = background_color(values);
+    style.background_image = css_image_url(&css_of_prop(values, "background-image"));
     style.fill = fill_color(values);
     style.width = length_of(&css_of_prop(values, "width"));
     style.height = length_of(&css_of_prop(values, "height"));
@@ -670,6 +671,24 @@ fn css_of_prop(values: &ComputedValues, name: &str) -> String {
         return String::new();
     };
     values.computed_value_to_string(style::properties::PropertyDeclarationId::Longhand(longhand))
+}
+
+fn css_image_url(value: &str) -> Option<String> {
+    let start = value.find("url(")? + 4;
+    let rest = value[start..].trim_start();
+    let body = if let Some(rest) = rest.strip_prefix('"') {
+        rest.split('"').next()?
+    } else if let Some(rest) = rest.strip_prefix('\'') {
+        rest.split('\'').next()?
+    } else {
+        rest.split(')').next()?.trim()
+    };
+    let url = body.trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
 }
 
 fn css_of(value: &impl ToCss) -> String {
