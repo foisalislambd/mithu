@@ -6,7 +6,7 @@ The license is MIT. Anyone can use it, read it, and build on it. The source live
 
 HTML, CSS, the DOM, JavaScript, layout, paint, URLs, and HTTP are implemented here. The HTML parser builds the implied document, tables, and `select` lists, and it repairs mis-nested formatting tags. `white-space: nowrap` keeps a line from wrapping. JavaScript runs in this process on the [Boa](https://github.com/boa-dev/boa) virtual machine, including module scripts. Scripts can change the document, listen for events, set timers, call `fetch`, and assign `location.href`. Click, input, and submit events reach those scripts before the browser follows a link or sends a form. Each tab keeps its own page, history, and scroll. Ctrl+F finds text on the page, highlights every match, and scrolls the active match into view. Ctrl+Plus, Ctrl+Minus, and Ctrl+0 zoom the page and lay it out again at the new size. Ctrl+D saves or removes the current page as a bookmark, and Ctrl+B opens the list. The address bar suggests bookmarks and pages already visited. A right click opens a menu to follow a link, open it in a new tab, go back, reload, or bookmark the page. PNG, JPEG, GIF, and WebP images are decoded and painted. There is no WASM runtime and no imported browser engine. The other outside crates are the operating-system edges: a window (`winit`, `softbuffer`), TLS (`rustls`), TrueType rasterization (`fontdue`), image decoders (`image`), and content-encoding (`flate2`, `brotli`). Rewriting those would not make the browser stronger. JavaScript stays on Boa.
 
-CSS covers the box model, type, class, id, attribute, and structural selectors, sibling combinators, custom properties, `calc()`, `rem`, `vw`, and `vh`, width media queries, text transform, flex layout with wrapping and shrinking, floats, a basic grid, `:hover`, visibility, and z-index, plus relative, absolute, and fixed positioning. `::before` and `::after` generate text from `content`, and each border side can have its own width. `iframe` and `noscript` keep their contents as text. Scripts can use `classList`, element children, and `removeChild`. The engine keeps growing from this code.
+CSS and layout go through Servo's Stylo and the Taffy and Parley crates (the same path Dioxus Blitz uses). That covers the cascade, selectors, custom properties, `calc()`, media queries, `::before` and `::after`, flex, grid, floats, and inline line breaking. `getComputedStyle` reads the Stylo values. JavaScript stays on Boa. `iframe` and `noscript` keep their contents as text. Scripts can use `classList`, element children, and `removeChild`.
 
 The goal is a full browser that stays small: pages, navigation, network, layout, and the web platform people actually use. It does not add a bundled assistant or an ad system on top of that.
 
@@ -48,7 +48,7 @@ Folders are the browser layers. Package names keep a `mithu-` prefix so they sta
 | `crates/style` | `mithu-style` | Cascade and computed style |
 | `crates/image` | `mithu-image` | PNG, JPEG, GIF, and WebP decoding |
 | `crates/text` | `mithu-text` | Font measurement and glyphs |
-| `crates/layout` | `mithu-layout` | Block, inline, flex, float, and grid layout |
+| `crates/layout` | `mithu-layout` | Taffy block, flex, grid, and float layout, with Parley line breaking |
 | `crates/paint` | `mithu-paint` | Software framebuffer |
 | `crates/shell` | `mithu-shell` | History, chrome, page loading |
 | `app/mithu` | `mithu` | Window |

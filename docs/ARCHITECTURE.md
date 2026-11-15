@@ -39,9 +39,9 @@ Same order Chromium uses, with a much smaller implementation at each step:
 1. The omnibox text becomes a URL (`mithu-url`). A hostname without a scheme is HTTPS. Other text is a DuckDuckGo query.
 2. The browser process fetches it (`mithu-net`): HTTP/1.1, or HTTP/2 when TLS negotiates `h2`, redirects, `Cookie` / `Set-Cookie` (`Expires` and `SameSite`), gzip/deflate/brotli, a memory cache, and a disk cache for non-loopback `Cache-Control: max-age` responses.
 3. The renderer parses HTML into a DOM (`mithu-html`, `mithu-dom`).
-4. CSS is parsed (`mithu-css`) and cascaded (`mithu-style`), including the user-agent sheet.
+4. CSS is parsed and cascaded by Servo's Stylo (`mithu-style`, through the Blitz DOM). The user-agent sheet, author sheets, inline styles, and media queries all go through that cascade.
 5. Boa runs classic scripts and module scripts (`mithu-js`) against that DOM.
-6. Layout builds boxes (`mithu-layout`). Paint writes pixels (`mithu-paint`) with glyphs from `mithu-text` and decoded images from `mithu-image`.
+6. Layout builds boxes with Taffy and Parley (`mithu-layout`). Paint writes pixels (`mithu-paint`) with glyphs from `mithu-text` (rustybuzz, including Bengali) and decoded images from `mithu-image`.
 7. The shell composites the page under the browser frame and `softbuffer` presents it.
 
 ## Chromium component map
@@ -60,8 +60,8 @@ Same order Chromium uses, with a much smaller implementation at each step:
 | `net/socket/ssl_client_socket.h` | Rustls in `mithu-net` | Certificate check against the webpki root set. |
 | `third_party/blink/renderer/core/html` | `mithu-html` | Tokenizer and a tree builder, including tables and the adoption agency algorithm. Not a full HTML5 parser. |
 | `third_party/blink/renderer/core/dom/document.h` | `mithu-dom` | Arena DOM. Scripts can mutate it through Boa. |
-| `third_party/blink/renderer/core/css` | `mithu-css`, `mithu-style` | A subset: selectors, cascade, custom properties, media width queries. Not the full CSS engine. |
-| `third_party/blink/renderer/core/layout/layout_object.h` | `mithu-layout` | Block, inline, flex (including shrink), floats, and a row-major grid. |
+| `third_party/blink/renderer/core/css` | `mithu-style` (Stylo via Blitz) | Parsing, cascade, selectors, custom properties, media queries, and `getComputedStyle`. `querySelector` still uses Mithu's selector matcher. |
+| `third_party/blink/renderer/core/layout/layout_object.h` | `mithu-layout` (Taffy + Parley) | Block, flex, grid, floats, and inline line breaking. |
 | `cc/` and Skia `SkCanvas` | `mithu-paint` | Software framebuffer, `0x00RRGGBB`. |
 | `v8/src` | `mithu-js` (Boa) | DOM bindings, events, timers, `fetch`, modules. Boa, not V8. |
 | `chrome/browser/ui/views` widget tree | `winit` + `softbuffer` in `app/mithu` | One native window. Input is forwarded into `Browser`. |

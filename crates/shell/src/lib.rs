@@ -3578,10 +3578,18 @@ fn import_target(input: &str) -> Option<(String, usize)> {
 fn load_images(document: &Document, base: &Url) -> HashMap<NodeId, Arc<Bitmap>> {
     let mut images = HashMap::new();
     for id in (0..document.nodes.len()).map(NodeId) {
-        if images.len() >= 40 || document.element_name(id) != Some("img") {
+        if images.len() >= 40 {
             continue;
         }
-        let src = image_source(document, id);
+        let name = document.element_name(id);
+        if name != Some("img") && name != Some("video") {
+            continue;
+        }
+        let src = if name == Some("video") {
+            document.attr(id, "poster").map(str::to_string)
+        } else {
+            image_source(document, id)
+        };
         let Some(src) = src else {
             continue;
         };

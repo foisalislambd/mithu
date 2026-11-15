@@ -18,6 +18,11 @@ pub trait MeasureText {
         let _ = family;
         self.width(text, size, bold, mono)
     }
+
+    /// Web fonts registered on this measurer, as `(family, font bytes)`.
+    fn web_fonts(&self) -> Vec<(String, Vec<u8>)> {
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -264,6 +269,16 @@ impl MeasureText for FontBook {
                 .unwrap_or(size * 0.8),
             Face::Fallback => size * 0.8,
         }
+    }
+
+    fn web_fonts(&self) -> Vec<(String, Vec<u8>)> {
+        self.custom
+            .iter()
+            .filter_map(|(name, face)| match face {
+                Face::Vector(vector) => Some((name.clone(), vector.bytes.clone())),
+                Face::Fallback => None,
+            })
+            .collect()
     }
 }
 
