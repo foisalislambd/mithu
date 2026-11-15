@@ -88,7 +88,13 @@ impl Canvas<'_> {
     }
 
     /// Nonzero-winding fill. Each contour is closed from its last point to its first.
-    pub fn fill_contours(&mut self, contours: &[Vec<(f32, f32)>], color: Color, clip: Rect) {
+    pub fn fill_contours(
+        &mut self,
+        contours: &[Vec<(f32, f32)>],
+        color: Color,
+        clip: Rect,
+        even_odd: bool,
+    ) {
         if color.a == 0 || contours.is_empty() {
             return;
         }
@@ -121,7 +127,9 @@ impl Canvas<'_> {
             for x in x0..x1 {
                 let mut hits = 0;
                 for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
-                    if winding(x as f32 + ox, y as f32 + oy, contours) != 0 {
+                    let wind = winding(x as f32 + ox, y as f32 + oy, contours);
+                    let inside = if even_odd { wind.abs() % 2 == 1 } else { wind != 0 };
+                    if inside {
                         hits += 1;
                     }
                 }
@@ -443,16 +451,51 @@ fn paint_box_with_opacity(
             .map(|(x, y)| (screen.x + x, screen.y + y))
             .collect();
         if let Some(fill) = shape.fill {
-            canvas.fill_contours(&[moved.clone()], scale_alpha(fill, opacity), shape_clip);
+            let contours = if shape.contours.is_empty() {
+                vec![moved.clone()]
+            } else {
+                shape
+                    .contours
+                    .iter()
+                    .map(|contour| {
+                        contour
+                            .iter()
+                            .map(|(x, y)| (screen.x + x, screen.y + y))
+                            .collect()
+                    })
+                    .collect()
+            };
+            canvas.fill_contours(
+                &contours,
+                scale_alpha(fill, opacity),
+                shape_clip,
+                shape.even_odd,
+            );
         }
         if let Some(stroke) = shape.stroke {
-            stroke_polyline(
-                canvas,
-                &moved,
-                shape.stroke_width,
-                scale_alpha(stroke, opacity),
-                shape_clip,
-            );
+            let stroked = if shape.contours.is_empty() {
+                vec![moved]
+            } else {
+                shape
+                    .contours
+                    .iter()
+                    .map(|contour| {
+                        contour
+                            .iter()
+                            .map(|(x, y)| (screen.x + x, screen.y + y))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            for contour in &stroked {
+                stroke_polyline(
+                    canvas,
+                    contour,
+                    shape.stroke_width,
+                    scale_alpha(stroke, opacity),
+                    shape_clip,
+                );
+            }
         }
     }
     if let Some(bitmap) = &box_.image {

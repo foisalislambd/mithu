@@ -71,6 +71,11 @@ pub struct VectorShape {
     pub stroke: Option<mithu_base::Color>,
     pub stroke_width: f32,
     pub points: Vec<(f32, f32)>,
+    /// Every subpath of this shape. A fill uses them together so a hole
+    /// subtracts from the outer contour. Empty means `points` is the only one.
+    pub contours: Vec<Vec<(f32, f32)>>,
+    /// SVG `fill-rule="evenodd"`. Otherwise the fill is nonzero winding.
+    pub even_odd: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -119,6 +124,17 @@ pub fn layout_tree(
         measure,
         images,
     );
+}
+
+/// Contours for an inline `<svg>` painted into a box of `width` by `height`.
+pub fn svg_shapes(
+    doc: &Document,
+    id: NodeId,
+    width: f32,
+    height: f32,
+    color: mithu_base::Color,
+) -> Vec<VectorShape> {
+    svg::shapes(doc, &[], id, width, height, color)
 }
 
 pub fn hit_test(tree: &LayoutTree, x: f32, y: f32) -> Option<NodeId> {

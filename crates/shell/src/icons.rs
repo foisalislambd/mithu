@@ -37,7 +37,7 @@ pub fn draw(canvas: &mut Canvas<'_>, kind: Kind, dest: Rect, color: Color, clip:
                 .collect()
         })
         .collect();
-    canvas.fill_contours(&contours, color, clip);
+    canvas.fill_contours(&contours, color, clip, false);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

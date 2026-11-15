@@ -70,6 +70,7 @@ pub(crate) fn shapes(
             stroke: None,
             stroke_width: 1.0,
             color,
+            even_odd: false,
         },
         &mut out,
     );
@@ -99,6 +100,7 @@ struct Paint {
     stroke: Option<Color>,
     stroke_width: f32,
     color: Color,
+    even_odd: bool,
 }
 
 fn walk(
@@ -175,21 +177,35 @@ fn walk(
         "polyline" | "polygon" => poly_contour(doc, id, name == "polygon"),
         _ => Vec::new(),
     };
-    for points in contours {
-        if points.len() < 2 {
-            continue;
-        }
-        let mapped = points
-            .into_iter()
-            .map(|(x, y)| map_point(x + dx, y + dy, view, width, height))
-            .collect();
+    let mapped: Vec<Vec<(f32, f32)>> = contours
+        .into_iter()
+        .filter(|points| points.len() >= 2)
+        .map(|points| {
+            points
+                .into_iter()
+                .map(|(x, y)| map_point(x + dx, y + dy, view, width, height))
+                .collect()
+        })
+        .collect();
+    if !mapped.is_empty() {
         let scale = uniform_scale(view, width, height);
-        out.push(VectorShape {
-            fill: paint.fill,
-            stroke: paint.stroke,
-            stroke_width: paint.stroke_width * scale,
-            points: mapped,
-        });
+        // One path's subpaths share a fill so holes punch out of the outline.
+        // Basic shapes stay one contour each.
+        let groups: Vec<Vec<Vec<(f32, f32)>>> = if name == "path" {
+            vec![mapped]
+        } else {
+            mapped.into_iter().map(|points| vec![points]).collect()
+        };
+        for group in groups {
+            out.push(VectorShape {
+                fill: paint.fill,
+                stroke: paint.stroke,
+                stroke_width: paint.stroke_width * scale,
+                points: group[0].clone(),
+                contours: group,
+                even_odd: paint.even_odd,
+            });
+        }
     }
     for child in doc.node(id).children.clone() {
         if matches!(doc.node(child).data, NodeData::Element(_)) {
@@ -224,6 +240,9 @@ fn paint_of(doc: &Document, id: NodeId, parent: Paint) -> Paint {
     {
         paint.stroke_width = width.max(0.0);
     }
+    if let Some(value) = doc.attr(id, "fill-rule") {
+        paint.even_odd = value.eq_ignore_ascii_case("evenodd");
+    }
     if let Some(style) = doc.attr(id, "style") {
         for part in style.split(';') {
             let mut pair = part.splitn(2, ':');
@@ -237,6 +256,7 @@ fn paint_of(doc: &Document, id: NodeId, parent: Paint) -> Paint {
                         paint.stroke_width = width.max(0.0);
                     }
                 }
+                "fill-rule" => paint.even_odd = value.eq_ignore_ascii_case("evenodd"),
                 _ => {}
             }
         }
@@ -251,6 +271,10 @@ fn parse_paint(value: &str, current: Color) -> Option<Color> {
     }
     if value.eq_ignore_ascii_case("currentcolor") {
         return Some(current);
+    }
+    // Gradient and pattern paints fall back to a solid silhouette.
+    if value.starts_with("url(") {
+        return Some(Color::BLACK);
     }
     parse_color(value)
 }
