@@ -801,3 +801,174 @@ fn numbers(input: &str) -> Vec<f32> {
     }
     out
 }
+
+/// Serialize an inline `<svg>` so resvg can paint gradients, clips, and masks.
+/// The HTML parser stores names in lowercase; SVG wants the camelCase form.
+pub(crate) fn markup(doc: &Document, id: NodeId, styles: &[ComputedStyle], color: Color) -> String {
+    let mut out = String::new();
+    write_node(doc, id, styles, color, true, &mut out);
+    out
+}
+
+fn write_node(
+    doc: &Document,
+    id: NodeId,
+    styles: &[ComputedStyle],
+    color: Color,
+    root: bool,
+    out: &mut String,
+) {
+    let (kind, children) = {
+        let node = doc.node(id);
+        let children = node.children.clone();
+        let kind = match &node.data {
+            NodeData::Text(text) => NodeKind::Text(text.clone()),
+            NodeData::Element(element) => NodeKind::Element {
+                name: svg_ident(&element.name).to_string(),
+                attrs: element.attrs.clone(),
+            },
+            NodeData::Document | NodeData::Comment(_) => NodeKind::Skip,
+        };
+        (kind, children)
+    };
+    match kind {
+        NodeKind::Skip => {}
+        NodeKind::Text(text) => push_escaped(out, &text),
+        NodeKind::Element { name, attrs } => {
+            out.push('<');
+            out.push_str(&name);
+            if root && attrs.iter().all(|(key, _)| key != "xmlns") {
+                out.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
+            }
+            let mut wrote_color = false;
+            for (key, value) in &attrs {
+                let key = svg_ident(key);
+                out.push(' ');
+                out.push_str(key);
+                out.push_str("=\"");
+                if root && key == "style" && !value.contains("color:") {
+                    out.push_str("color:");
+                    out.push_str(&hex(color));
+                    out.push(';');
+                    wrote_color = true;
+                }
+                push_escaped(out, value);
+                out.push('"');
+            }
+            if root && !wrote_color {
+                out.push_str(" style=\"color:");
+                out.push_str(&hex(color));
+                out.push('"');
+            }
+            if let Some(style) = styles.get(id.0)
+                && let Some(fill) = style.fill
+                && attrs.iter().all(|(key, _)| key != "fill")
+            {
+                out.push_str(" fill=\"");
+                out.push_str(&hex(fill));
+                out.push('"');
+            }
+            out.push('>');
+            for child in children {
+                write_node(doc, child, styles, color, false, out);
+            }
+            out.push_str("</");
+            out.push_str(&name);
+            out.push('>');
+        }
+    }
+}
+
+enum NodeKind {
+    Skip,
+    Text(String),
+    Element { name: String, attrs: Vec<(String, String)> },
+}
+
+fn svg_ident(name: &str) -> &str {
+    match name {
+        "lineargradient" => "linearGradient",
+        "radialgradient" => "radialGradient",
+        "clippath" => "clipPath",
+        "textpath" => "textPath",
+        "foreignobject" => "foreignObject",
+        "animatetransform" => "animateTransform",
+        "animatemotion" => "animateMotion",
+        "feblend" => "feBlend",
+        "fecolormatrix" => "feColorMatrix",
+        "fecomponenttransfer" => "feComponentTransfer",
+        "fecomposite" => "feComposite",
+        "feconvolvematrix" => "feConvolveMatrix",
+        "fediffuselighting" => "feDiffuseLighting",
+        "fedisplacementmap" => "feDisplacementMap",
+        "fedistantlight" => "feDistantLight",
+        "fedropshadow" => "feDropShadow",
+        "feflood" => "feFlood",
+        "fefunca" => "feFuncA",
+        "fefuncb" => "feFuncB",
+        "fefuncg" => "feFuncG",
+        "fefuncr" => "feFuncR",
+        "fegaussianblur" => "feGaussianBlur",
+        "feimage" => "feImage",
+        "femerge" => "feMerge",
+        "femergenode" => "feMergeNode",
+        "femorphology" => "feMorphology",
+        "feoffset" => "feOffset",
+        "fepointlight" => "fePointLight",
+        "fespecularlighting" => "feSpecularLighting",
+        "fespotlight" => "feSpotLight",
+        "fetile" => "feTile",
+        "feturbulence" => "feTurbulence",
+        "viewbox" => "viewBox",
+        "preserveaspectratio" => "preserveAspectRatio",
+        "gradientunits" => "gradientUnits",
+        "gradienttransform" => "gradientTransform",
+        "patternunits" => "patternUnits",
+        "patterncontentunits" => "patternContentUnits",
+        "patterntransform" => "patternTransform",
+        "clippathunits" => "clipPathUnits",
+        "maskunits" => "maskUnits",
+        "maskcontentunits" => "maskContentUnits",
+        "filterunits" => "filterUnits",
+        "primitiveunits" => "primitiveUnits",
+        "stddeviation" => "stdDeviation",
+        "basefrequency" => "baseFrequency",
+        "numoctaves" => "numOctaves",
+        "spreadmethod" => "spreadMethod",
+        "attributename" => "attributeName",
+        "repeatcount" => "repeatCount",
+        "repeatdur" => "repeatDur",
+        "keypoints" => "keyPoints",
+        "keytimes" => "keyTimes",
+        "keysplines" => "keySplines",
+        "calcmode" => "calcMode",
+        "pathlength" => "pathLength",
+        "textlength" => "textLength",
+        "lengthadjust" => "lengthAdjust",
+        "startoffset" => "startOffset",
+        "refx" => "refX",
+        "refy" => "refY",
+        "markerwidth" => "markerWidth",
+        "markerheight" => "markerHeight",
+        "markerunits" => "markerUnits",
+        "stopcolor" => "stop-color",
+        "stopopacity" => "stop-opacity",
+        other => other,
+    }
+}
+
+fn hex(color: Color) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+fn push_escaped(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+}

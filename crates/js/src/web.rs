@@ -2043,6 +2043,16 @@ impl Class for ElementHost {
             NativeFunction::from_fn_ptr(super::query_selector_all),
         );
         class.method(
+            js_string!("closest"),
+            1,
+            NativeFunction::from_fn_ptr(super::closest_selector),
+        );
+        class.method(
+            js_string!("matches"),
+            1,
+            NativeFunction::from_fn_ptr(super::matches_selector),
+        );
+        class.method(
             js_string!("prepend"),
             0,
             NativeFunction::from_fn_ptr(super::prepend_nodes),

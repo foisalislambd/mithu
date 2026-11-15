@@ -124,7 +124,15 @@ fn walk(
     let lines = placed
         .map(|item| paint_lines(doc, &item.lines, href.clone()))
         .unwrap_or_default();
-    let shapes = if doc.element_name(id) == Some("svg") {
+    let svg_bitmap = if doc.element_name(id) == Some("svg") {
+        let markup = crate::svg::markup(doc, id, &frame.styles, style.color);
+        mithu_image::decode_svg(markup.as_bytes())
+    } else {
+        None
+    };
+    let shapes = if svg_bitmap.is_some() {
+        Vec::new()
+    } else if doc.element_name(id) == Some("svg") {
         crate::svg::shapes(
             doc,
             &frame.styles,
@@ -136,9 +144,14 @@ fn walk(
     } else {
         Vec::new()
     };
-    Some(box_from(
+    let mut layout = box_from(
         doc, id, &style, placed, rect, href, children, lines, shapes, images,
-    ))
+    );
+    if let Some(bitmap) = svg_bitmap {
+        layout.image = Some(Arc::new(bitmap));
+        layout.children.clear();
+    }
+    Some(layout)
 }
 
 fn box_from(

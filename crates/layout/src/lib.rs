@@ -452,17 +452,15 @@ mod tests {
         let styles = style_document(&doc, ".word { fill: #0a5dbd; }");
         let tree = layout_tree(&doc, &styles, 200.0, 80.0, &NaiveMetrics, &HashMap::new());
         let logo = find(&tree.root, doc.get_element_by_id("logo").unwrap()).unwrap();
-        assert!(
-            logo.shapes.len() >= 2,
-            "expected the symbol and the arc, got {}",
-            logo.shapes.len()
-        );
-        let word = logo
-            .shapes
-            .iter()
-            .find(|shape| shape.points.len() > 4)
-            .expect("the arc should flatten to several points");
-        assert_eq!(word.fill, Some(mithu_base::Color::rgb(0x0a, 0x5d, 0xbd)));
+        let image = logo.image.as_ref().expect("resvg bitmap");
+        assert!(image.width > 0 && image.height > 0);
+        let blue = image.pixels.iter().any(|pixel| {
+            let r = (pixel >> 16) & 255;
+            let g = (pixel >> 8) & 255;
+            let b = pixel & 255;
+            b > r && b > g && b > 40
+        });
+        assert!(blue, "the stylesheet fill should paint the arc");
     }
 
     #[test]
@@ -1006,6 +1004,32 @@ mod tests {
     }
 
     #[test]
+    fn mdn_featured_card_keeps_its_title() {
+        let doc = parse_html(
+            r#"<ul id="list" class="featured-articles"><li><article id="card" class="featured-articles__article"><h3 class="featured-articles__title"><a id="title" href="/x">Celebrating 20 years of MDN</a></h3><p id="sum">MDN turns 20</p></article></li></ul>"#,
+        );
+        let css = ".featured-articles{display:grid;grid-template-columns:repeat(2,1fr)}.featured-articles>li{display:contents}.featured-articles__article{border:1px solid #ccc;display:flex;flex-direction:column;padding:1rem}.featured-articles__title{display:flex;font-size:1rem}.featured-articles a:link{color:#111}";
+        let styles = style_document(&doc, css);
+        let tree = layout_tree(&doc, &styles, 1280.0, 800.0, &NaiveMetrics, &HashMap::new());
+        let card = find(&tree.root, doc.get_element_by_id("card").unwrap()).unwrap();
+        let title = find(&tree.root, doc.get_element_by_id("title").unwrap()).unwrap();
+        let text: String = card
+            .lines
+            .iter()
+            .chain(title.lines.iter())
+            .flat_map(|line| line.fragments.iter())
+            .map(|fragment| fragment.text.as_str())
+            .collect();
+        assert!(
+            text.contains("Celebrating"),
+            "card text {text:?} card {}x{} title {}x{}",
+            card.rect.width,
+            card.rect.height,
+            title.rect.width,
+            title.rect.height
+        );
+    }
+
     fn inline_svg_builds_a_path() {
         let doc = parse_html(
             r##"<svg id="icon" viewBox="0 0 10 10" width="20" height="20"><path d="M0 0 L10 0 L10 10 Z" fill="#ff0000"/></svg>"##,
@@ -1013,9 +1037,9 @@ mod tests {
         let styles = style_document(&doc, "");
         let tree = layout_tree(&doc, &styles, 400.0, 600.0, &NaiveMetrics, &HashMap::new());
         let icon = find(&tree.root, doc.get_element_by_id("icon").unwrap()).unwrap();
-        assert!(!icon.shapes.is_empty());
+        let image = icon.image.as_ref().expect("resvg bitmap");
+        assert!(image.pixels.iter().any(|pixel| pixel >> 24 > 0));
         assert_eq!(icon.background.a, 0);
-        assert!(icon.shapes[0].fill.is_some());
         assert!(icon.rect.width >= 20.0, "w {}", icon.rect.width);
     }
 

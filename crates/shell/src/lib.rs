@@ -12,7 +12,7 @@ use mithu_dom::{Document, NodeId};
 use mithu_html::parse_html;
 use mithu_image::Bitmap;
 use mithu_js::{Session, Submission};
-use mithu_layout::{LayoutBox, LayoutTree, hit_test, layout_tree, svg_shapes};
+use mithu_layout::{LayoutBox, LayoutTree, hit_test, layout_tree};
 use mithu_net::{get, post};
 use mithu_paint::{Canvas, paint_layout};
 use mithu_style::{ComputedStyle, StyleState, font_faces, style_with};
@@ -3769,7 +3769,7 @@ fn pick_srcset(value: &str) -> Option<String> {
 }
 
 fn decode_image_bytes(bytes: &[u8]) -> Option<Bitmap> {
-    mithu_image::decode(bytes).or_else(|| rasterize_svg(bytes))
+    mithu_image::decode(bytes).or_else(|| mithu_image::decode_svg(bytes))
 }
 
 fn rasterize_svg_url(url: &str) -> Option<Bitmap> {
@@ -3779,7 +3779,7 @@ fn rasterize_svg_url(url: &str) -> Option<Bitmap> {
         return None;
     }
     let text = percent_decode(data);
-    rasterize_svg(text.as_bytes())
+    mithu_image::decode_svg(text.as_bytes())
 }
 
 fn percent_decode(input: &str) -> String {
@@ -3799,95 +3799,6 @@ fn percent_decode(input: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Draw a standalone SVG into a bitmap. Gradient paints become a solid
-/// silhouette, which is enough for logos and icon fonts shipped as `.svg`.
-fn rasterize_svg(bytes: &[u8]) -> Option<Bitmap> {
-    if bytes.len() > 1_500_000 {
-        return None;
-    }
-    let text = std::str::from_utf8(bytes).ok()?;
-    let trimmed = text.trim_start();
-    if !trimmed.contains("<svg") && !trimmed.contains("<SVG") {
-        return None;
-    }
-    // Clip paths, masks, and gradients need a real SVG rasterizer. Filling
-    // those files as solid shapes draws blobs, so leave them unloaded.
-    let folded = text.to_ascii_lowercase();
-    if folded.contains("clip-path")
-        || folded.contains("lineargradient")
-        || folded.contains("radialgradient")
-        || folded.contains("<mask")
-        || folded.contains("<filter")
-        || folded.contains("<text")
-    {
-        return None;
-    }
-    let doc = parse_html(text);
-    let id = (0..doc.nodes.len())
-        .map(NodeId)
-        .find(|id| doc.element_name(*id) == Some("svg"))?;
-    let (view_w, view_h) = svg_view_size(doc.attr(id, "viewBox").or_else(|| doc.attr(id, "viewbox")));
-    let long = view_w.max(view_h).max(1.0);
-    let scale = (192.0 / long).clamp(1.0, 4.0);
-    let width = (view_w * scale).round().clamp(1.0, 512.0);
-    let height = (view_h * scale).round().clamp(1.0, 512.0);
-    let shapes = svg_shapes(&doc, id, width, height, Color::BLACK);
-    if shapes.is_empty() {
-        return None;
-    }
-    let pixel_w = width as i32;
-    let pixel_h = height as i32;
-    let mut pixels = vec![0x0000_0001u32; (pixel_w * pixel_h) as usize];
-    {
-        let mut canvas = Canvas {
-            pixels: &mut pixels,
-            width: pixel_w,
-            height: pixel_h,
-        };
-        let clip = Rect::new(0.0, 0.0, width, height);
-        for shape in &shapes {
-            if let Some(fill) = shape.fill {
-                let contours = if shape.contours.is_empty() {
-                    vec![shape.points.clone()]
-                } else {
-                    shape.contours.clone()
-                };
-                canvas.fill_contours(&contours, fill, clip, shape.even_odd);
-            }
-        }
-    }
-    for pixel in &mut pixels {
-        if *pixel == 0x0000_0001 {
-            *pixel = 0;
-        } else {
-            *pixel |= 0xFF00_0000;
-        }
-    }
-    if pixels.iter().all(|pixel| *pixel == 0) {
-        return None;
-    }
-    Some(Bitmap {
-        width: pixel_w as u32,
-        height: pixel_h as u32,
-        pixels,
-    })
-}
-
-fn svg_view_size(raw: Option<&str>) -> (f32, f32) {
-    let Some(raw) = raw else {
-        return (64.0, 64.0);
-    };
-    let nums: Vec<f32> = raw
-        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.' || ch == '-'))
-        .filter_map(|part| part.parse().ok())
-        .collect();
-    if nums.len() >= 4 && nums[2] > 0.0 && nums[3] > 0.0 {
-        (nums[2], nums[3])
-    } else {
-        (64.0, 64.0)
-    }
 }
 
 fn fetch_bytes(base: &Url, href: &str) -> Option<Vec<u8>> {
