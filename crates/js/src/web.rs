@@ -96,6 +96,7 @@ pub(crate) fn register(context: &mut Context) -> JsResult<()> {
         "Comment",
         "CDATASection",
         "Text",
+        "DocumentType",
         "ProcessingInstruction",
         "Window",
         "SVGElement",
@@ -2093,6 +2094,36 @@ impl Class for NodeHost {
         class.static_property(
             js_string!("DOCUMENT_FRAGMENT_NODE"),
             JsValue::from(11),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_TYPE_NODE"),
+            JsValue::from(10),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_DISCONNECTED"),
+            JsValue::from(1),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_PRECEDING"),
+            JsValue::from(2),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_FOLLOWING"),
+            JsValue::from(4),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_CONTAINS"),
+            JsValue::from(8),
+            ATTR,
+        );
+        class.static_property(
+            js_string!("DOCUMENT_POSITION_CONTAINED_BY"),
+            JsValue::from(16),
             ATTR,
         );
         Ok(())

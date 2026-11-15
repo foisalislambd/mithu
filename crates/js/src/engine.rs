@@ -2162,6 +2162,8 @@ impl Context {
     }
 
     fn compile_script(&mut self, code: &str, path: &str) -> JsResult<()> {
+        let prepared = prepare_source(code);
+        let code = prepared.as_ref();
         let _entered = Entered::new(self as *mut Context);
         unsafe {
             let filename = CString::new(path).unwrap_or_else(|_| CString::new("inline.js").unwrap());
@@ -2176,6 +2178,8 @@ impl Context {
     }
 
     fn eval_source(&mut self, code: &str, path: &str) -> JsResult<JsValue> {
+        let prepared = prepare_source(code);
+        let code = prepared.as_ref();
         let _entered = Entered::new(self as *mut Context);
         let global = self.global_object();
         unsafe {
@@ -2198,6 +2202,8 @@ impl Context {
     }
 
     fn compile_module(&mut self, code: &str, path: &str) -> JsResult<Module> {
+        let prepared = prepare_source(code);
+        let code = prepared.as_ref();
         let _entered = Entered::new(self as *mut Context);
         unsafe {
             let filename = CString::new(path).unwrap_or_else(|_| CString::new("module.js").unwrap());
@@ -2453,13 +2459,27 @@ unsafe extern "C" fn module_load_hook(
             Some(Ok(module)) => {
                 rooted!(in((*context).raw) let record = module.record().ptr);
                 let request = mozjs::gc::Handle::from_raw(module_request);
-                let payload = mozjs::gc::Handle::from_raw(payload);
-                let referrer = mozjs::gc::Handle::from_raw(referrer);
+                let payload_handle = mozjs::gc::Handle::from_raw(payload);
+                let referrer_handle = mozjs::gc::Handle::from_raw(referrer);
+                // A dynamic `import()` passes a promise. SpiderMonkey then
+                // links immediately, which rejects a module that is still New.
+                // Load its dependencies first so the record becomes Unlinked.
+                let dynamic = payload_is_promise((*context).raw, payload);
+                if dynamic {
+                    rooted!(in((*context).raw) let host = UndefinedValue());
+                    let _ = wrappers2::LoadRequestedModules(
+                        (*context).js(),
+                        record.handle().into(),
+                        host.handle().into(),
+                        Some(module_resolved),
+                        Some(module_rejected),
+                    );
+                }
                 wrappers2::FinishLoadingImportedModule(
                     (*context).js(),
-                    referrer,
+                    referrer_handle,
                     request,
-                    payload,
+                    payload_handle,
                     record.handle().into(),
                     false,
                 )
@@ -2529,6 +2549,99 @@ unsafe extern "C" fn rejection_tracker(
             hooks.promise_rejection_tracker(&promise, operation, &mut *context);
         }
         leave(previous);
+    }
+}
+
+/// SpiderMonkey's Unicode property escapes need the `intl` build, which
+/// cannot link next to Parley's ICU. Rewrite the common categories so a
+/// pattern such as `/\p{L}/u` still parses.
+fn prepare_source(code: &str) -> std::borrow::Cow<'_, str> {
+    if !code.contains("\\p{") && !code.contains("\\P{") {
+        return std::borrow::Cow::Borrowed(code);
+    }
+    let mut out = String::with_capacity(code.len() + 32);
+    let mut rest = code;
+    while let Some(index) = rest.find('\\') {
+        out.push_str(&rest[..index]);
+        let after = &rest[index + 1..];
+        let negated = after.starts_with('P');
+        let property = after.starts_with('p') || negated;
+        if property && after[1..].starts_with('{') {
+            if let Some(end) = after[2..].find('}') {
+                let name = &after[2..2 + end];
+                let class = unicode_property_class(name, negated);
+                if inside_character_class(&out) {
+                    out.push_str(&class);
+                } else if negated {
+                    out.push_str(&format!("[^{class}]"));
+                } else {
+                    out.push_str(&format!("[{class}]"));
+                }
+                rest = &after[2 + end + 1..];
+                continue;
+            }
+        }
+        out.push('\\');
+        rest = after;
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
+fn inside_character_class(so_far: &str) -> bool {
+    let start = so_far.len().saturating_sub(500);
+    let slice = &so_far[start..];
+    let mut depth = 0i32;
+    let mut escaped = false;
+    for ch in slice.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '[' {
+            depth += 1;
+        } else if ch == ']' && depth > 0 {
+            depth -= 1;
+        }
+    }
+    depth > 0
+}
+
+fn unicode_property_class(name: &str, negated: bool) -> String {
+    let key = name
+        .split('=')
+        .next_back()
+        .unwrap_or(name)
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', ' '], "");
+    let class = match key.as_str() {
+        "l" | "letter" | "latin" => "A-Za-z\\u00C0-\\u024F\\u0400-\\u04FF\\u0900-\\u097F\\u0980-\\u09FF",
+        "ll" | "lowercaseletter" => "a-z\\u00DF-\\u00FF",
+        "lu" | "uppercaseletter" => "A-Z\\u00C0-\\u00D6\\u00D8-\\u00DE",
+        "n" | "number" | "nd" | "decimalnumber" => "0-9",
+        "z" | "zs" | "separator" | "spaceseparator" => " \\t\\u00A0",
+        "p" | "punctuation" => "!-/:-@\\[-`{-~",
+        "emoji" => "\\u{1F300}-\\u{1FAFF}",
+        _ if negated => "\\s\\S",
+        _ => "\\s\\S",
+    };
+    let _ = negated;
+    class.to_string()
+}
+
+fn payload_is_promise(raw: *mut RawJSContext, payload: jsapi::Handle<Value>) -> bool {
+    unsafe {
+        let value = *payload.ptr;
+        if !value.is_object() {
+            return false;
+        }
+        rooted!(in(raw) let object = value.to_object());
+        wrappers2::IsPromiseObject(object.handle().into())
     }
 }
 

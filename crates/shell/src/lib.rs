@@ -3668,9 +3668,10 @@ fn load_images(
     base: &Url,
     styles: &[mithu_style::ComputedStyle],
 ) -> HashMap<NodeId, Arc<Bitmap>> {
-    let mut images = HashMap::new();
+    let mut wanted: Vec<(NodeId, String)> = Vec::new();
+    let mut network = Vec::new();
     for id in (0..document.nodes.len()).map(NodeId) {
-        if images.len() >= 80 {
+        if wanted.len() >= 80 {
             break;
         }
         let name = document.element_name(id);
@@ -3685,17 +3686,13 @@ fn load_images(
         let Some(src) = src else {
             continue;
         };
-        let bitmap = if src.starts_with("data:") {
-            mithu_image::decode_data_url(&src).or_else(|| rasterize_svg_url(&src))
-        } else {
-            fetch_bytes(base, &src).and_then(|bytes| decode_image_bytes(&bytes))
-        };
-        if let Some(bitmap) = bitmap {
-            images.insert(id, Arc::new(bitmap));
+        if !src.starts_with("data:") {
+            network.push(src.clone());
         }
+        wanted.push((id, src));
     }
     for (index, style) in styles.iter().enumerate() {
-        if images.len() >= 80 {
+        if wanted.len() >= 80 {
             break;
         }
         let Some(url) = style.background_image.as_deref() else {
@@ -3705,17 +3702,13 @@ fn load_images(
             continue;
         }
         let id = NodeId(index);
-        if images.contains_key(&id) {
+        if wanted.iter().any(|(seen, _)| *seen == id) {
             continue;
         }
-        let bitmap = if url.starts_with("data:") {
-            mithu_image::decode_data_url(url).or_else(|| rasterize_svg_url(url))
-        } else {
-            fetch_bytes(base, url).and_then(|bytes| decode_image_bytes(&bytes))
-        };
-        if let Some(bitmap) = bitmap {
-            images.insert(id, Arc::new(bitmap));
+        if !url.starts_with("data:") {
+            network.push(url.to_string());
         }
+        wanted.push((id, url.to_string()));
     }
     let mut masks = 0;
     for (index, style) in styles.iter().enumerate() {
@@ -3726,20 +3719,66 @@ fn load_images(
             continue;
         };
         let id = NodeId(index);
-        if images.contains_key(&id) {
+        if wanted.iter().any(|(seen, _)| *seen == id) {
             continue;
         }
-        let bitmap = if url.starts_with("data:") {
-            mithu_image::decode_data_url(url).or_else(|| rasterize_svg_url(url))
+        if !url.starts_with("data:") {
+            network.push(url.to_string());
+        }
+        wanted.push((id, url.to_string()));
+        masks += 1;
+    }
+    let fetched = fetch_parallel(base, network);
+    let mut images = HashMap::new();
+    for (id, src) in wanted {
+        let bitmap = if src.starts_with("data:") {
+            mithu_image::decode_data_url(&src).or_else(|| rasterize_svg_url(&src))
         } else {
-            fetch_bytes(base, url).and_then(|bytes| decode_image_bytes(&bytes))
+            fetched
+                .get(&src)
+                .and_then(|bytes| decode_image_bytes(bytes))
         };
         if let Some(bitmap) = bitmap {
             images.insert(id, Arc::new(bitmap));
-            masks += 1;
         }
     }
     images
+}
+
+fn fetch_parallel(base: &Url, hrefs: Vec<String>) -> HashMap<String, Vec<u8>> {
+    let mut unique = Vec::new();
+    for href in hrefs {
+        if !unique.iter().any(|seen: &String| seen == &href) {
+            unique.push(href);
+        }
+    }
+    if unique.is_empty() {
+        return HashMap::new();
+    }
+    let queue = std::sync::Mutex::new(unique);
+    let out = std::sync::Mutex::new(HashMap::new());
+    let workers = 8
+        .min(queue.lock().map(|guard| guard.len()).unwrap_or(1))
+        .max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = queue.lock().ok().and_then(|mut guard| guard.pop());
+                    let Some(href) = next else {
+                        break;
+                    };
+                    let Some(bytes) = fetch_bytes(base, &href) else {
+                        continue;
+                    };
+                    if let Ok(mut map) = out.lock() {
+                        map.insert(href, bytes);
+                    }
+                }
+            });
+        }
+    });
+    out.into_inner().unwrap_or_default()
 }
 
 fn nearest(

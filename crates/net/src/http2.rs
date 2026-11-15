@@ -338,6 +338,30 @@ const STATIC: &[(&str, &str)] = &[
     ("www-authenticate", ""),
 ];
 
+/// HPACK state and the next client stream id for one HTTP/2 connection.
+///
+/// A later request on the same TLS session must keep this decoder. The server
+/// updates the dynamic table, and a fresh decoder would misread the headers.
+pub struct ConnState {
+    decoder: Decoder,
+    next_stream: u32,
+    open: bool,
+}
+
+impl ConnState {
+    pub fn new() -> Self {
+        Self {
+            decoder: Decoder::new(),
+            next_stream: 1,
+            open: false,
+        }
+    }
+
+    pub fn reusable(&self) -> bool {
+        self.open && self.next_stream < 400
+    }
+}
+
 pub fn roundtrip(
     stream: &mut (impl Read + Write),
     method: &str,
@@ -348,20 +372,50 @@ pub fn roundtrip(
     extra_headers: &[(&str, &str)],
     body: &[u8],
 ) -> Result<Message, String> {
+    let mut state = ConnState::new();
+    exchange(
+        stream,
+        &mut state,
+        method,
+        url,
+        cookie,
+        origin,
+        referer,
+        extra_headers,
+        body,
+    )
+}
+
+pub fn exchange(
+    stream: &mut (impl Read + Write),
+    state: &mut ConnState,
+    method: &str,
+    url: &mithu_url::Url,
+    cookie: Option<&str>,
+    origin: Option<&str>,
+    referer: Option<&str>,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<Message, String> {
+    let stream_id = state.next_stream;
+    state.next_stream = state.next_stream.saturating_add(2);
     let mut out = Vec::new();
-    out.extend_from_slice(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
-    let mut settings = Vec::new();
-    settings.extend_from_slice(&4u16.to_be_bytes());
-    settings.extend_from_slice(&(1024u32 * 1024).to_be_bytes());
-    out.extend(frame(4, 0, 0, &settings));
+    if !state.open {
+        out.extend_from_slice(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+        let mut settings = Vec::new();
+        settings.extend_from_slice(&4u16.to_be_bytes());
+        settings.extend_from_slice(&(1024u32 * 1024).to_be_bytes());
+        out.extend(frame(4, 0, 0, &settings));
+        state.open = true;
+    }
     let block = encode_request(method, url, cookie, origin, referer, extra_headers);
     // END_HEADERS, plus END_STREAM when there is no body. A POST body follows
     // as a DATA frame so YouTube and other JSON APIs receive it.
     let flags = if body.is_empty() { 0x5 } else { 0x4 };
-    out.extend(frame(1, flags, 1, &block));
+    out.extend(frame(1, flags, stream_id, &block));
     let window = (16u32 * 1024 * 1024).to_be_bytes();
     out.extend(frame(8, 0, 0, &window));
-    out.extend(frame(8, 0, 1, &window));
+    out.extend(frame(8, 0, stream_id, &window));
     if !body.is_empty() {
         // The default MAX_FRAME_SIZE is 16 KiB. One oversized DATA frame is a
         // protocol error, so a JSON body is split and only the last frame ends
@@ -370,16 +424,16 @@ pub fn roundtrip(
         while offset < body.len() {
             let end = (offset + 16_384).min(body.len());
             let flags = if end == body.len() { 0x1 } else { 0 };
-            out.extend(frame(0, flags, 1, &body[offset..end]));
+            out.extend(frame(0, flags, stream_id, &body[offset..end]));
             offset = end;
         }
     }
     stream.write_all(&out).map_err(|error| error.to_string())?;
     stream.flush().map_err(|error| error.to_string())?;
 
-    let mut decoder = Decoder::new();
+    let wanted = stream_id;
     let mut headers = Vec::new();
-    let mut body = Vec::new();
+    let mut response = Vec::new();
     let mut header_block = Vec::new();
     let mut saw_end = false;
     for _ in 0..4096 {
@@ -391,7 +445,7 @@ pub fn roundtrip(
         }
         let kind = header[3];
         let flags = header[4];
-        let stream_id =
+        let frame_stream =
             u32::from_be_bytes([header[5], header[6], header[7], header[8]]) & 0x7fff_ffff;
         let mut payload = read_exact(stream, length)?;
         if kind == 6 {
@@ -408,12 +462,13 @@ pub fn roundtrip(
             continue;
         }
         if kind == 7 {
+            state.open = false;
             if saw_end {
                 break;
             }
             return Err("http2 goaway".into());
         }
-        if stream_id != 1 {
+        if frame_stream != wanted {
             continue;
         }
         if kind == 3 {
@@ -438,12 +493,12 @@ pub fn roundtrip(
         if kind == 1 || kind == 9 {
             header_block.extend_from_slice(&payload);
             if flags & 0x4 != 0 {
-                headers = decoder.decode(&header_block)?;
+                headers = state.decoder.decode(&header_block)?;
                 header_block.clear();
             }
         } else if kind == 0 {
-            body.extend_from_slice(&payload);
-            if body.len() > 10_000_000 {
+            response.extend_from_slice(&payload);
+            if response.len() > 10_000_000 {
                 return Err("http2 body is too large".into());
             }
         }
@@ -467,7 +522,7 @@ pub fn roundtrip(
     Ok(Message {
         status,
         headers,
-        body,
+        body: response,
     })
 }
 

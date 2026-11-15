@@ -7,6 +7,7 @@
 //! HTTP/3 is not spoken: that needs a QUIC stack, and the client only
 //! advertises `h2` and `http/1.1`.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -14,7 +15,7 @@ use std::time::Duration;
 
 use mithu_url::Url;
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 mod cache;
 mod cookies;
@@ -67,7 +68,7 @@ fn profile() -> &'static Mutex<Profile> {
     PROFILE.get_or_init(|| {
         Mutex::new(Profile {
             cookies: CookieJar::new(),
-            cache: HttpCache::new(32),
+            cache: HttpCache::new(512),
         })
     })
 }
@@ -552,6 +553,41 @@ fn tcp_exchange(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetErr
     exchange(&mut stream, request)
 }
 
+struct PooledHttp2 {
+    io: StreamOwned<ClientConnection, TcpStream>,
+    state: http2::ConnState,
+}
+
+fn h2_pool() -> &'static Mutex<HashMap<String, Vec<PooledHttp2>>> {
+    static POOL: OnceLock<Mutex<HashMap<String, Vec<PooledHttp2>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pool_key(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
+fn take_h2(host: &str, port: u16) -> Option<PooledHttp2> {
+    h2_pool()
+        .lock()
+        .ok()?
+        .get_mut(&pool_key(host, port))?
+        .pop()
+}
+
+fn store_h2(host: &str, port: u16, pooled: PooledHttp2) {
+    if !pooled.state.reusable() {
+        return;
+    }
+    let Ok(mut pool) = h2_pool().lock() else {
+        return;
+    };
+    let slot = pool.entry(pool_key(host, port)).or_default();
+    if slot.len() < 4 {
+        slot.push(pooled);
+    }
+}
+
 fn https_exchange(
     host: &str,
     port: u16,
@@ -559,6 +595,38 @@ fn https_exchange(
     method: &str,
     url: &Url,
 ) -> Result<RawHttp, NetError> {
+    if let Some(mut pooled) = take_h2(host, port) {
+        let cookie = header_value_from_request(request, "cookie");
+        let origin = header_value_from_request(request, "origin");
+        let referer = header_value_from_request(request, "referer");
+        let (extra, body) = split_request(request);
+        let extra_refs: Vec<(&str, &str)> = extra
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        match http2::exchange(
+            &mut pooled.io,
+            &mut pooled.state,
+            method,
+            url,
+            cookie.as_deref(),
+            origin.as_deref(),
+            referer.as_deref(),
+            &extra_refs,
+            body,
+        ) {
+            Ok(message) => {
+                let parsed = RawHttp {
+                    status: message.status,
+                    headers: message.headers,
+                    body: message.body,
+                };
+                store_h2(host, port, pooled);
+                return Ok(parsed);
+            }
+            Err(_) => {}
+        }
+    }
     match https_once(host, port, request, method, url, true) {
         Ok(message) => Ok(message),
         Err(error) => {
@@ -596,8 +664,9 @@ fn https_once(
             .map_err(|error| NetError::Tls(error.to_string()))?;
     }
     let alpn = connection.alpn_protocol().map(|protocol| protocol.to_vec());
-    let mut tls = rustls::Stream::new(&mut connection, &mut socket);
     if allow_h2 && alpn.as_deref() == Some(b"h2".as_slice()) {
+        let mut io = StreamOwned::new(connection, socket);
+        let mut state = http2::ConnState::new();
         let cookie = header_value_from_request(request, "cookie");
         let origin = header_value_from_request(request, "origin");
         let referer = header_value_from_request(request, "referer");
@@ -606,8 +675,9 @@ fn https_once(
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        return http2::roundtrip(
-            &mut tls,
+        let message = http2::exchange(
+            &mut io,
+            &mut state,
             method,
             url,
             cookie.as_deref(),
@@ -616,13 +686,19 @@ fn https_once(
             &extra_refs,
             body,
         )
-            .map(|message| RawHttp {
-                status: message.status,
-                headers: message.headers,
-                body: message.body,
-            })
-            .map_err(|error| NetError::Tls(format!("http2: {error}")));
+        .map_err(|error| NetError::Tls(format!("http2: {error}")))?;
+        store_h2(
+            host,
+            port,
+            PooledHttp2 { io, state },
+        );
+        return Ok(RawHttp {
+            status: message.status,
+            headers: message.headers,
+            body: message.body,
+        });
     }
+    let mut tls = rustls::Stream::new(&mut connection, &mut socket);
     let raw = exchange(&mut tls, request)?;
     parse_http_message(&raw)
 }

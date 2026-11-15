@@ -1097,6 +1097,12 @@ fn wire_prototype_chain(context: &mut Context) -> JsResult<()> {
         ("Element", "Node"),
         ("Document", "Node"),
         ("DocumentFragment", "Node"),
+        ("DocumentType", "Node"),
+        ("CharacterData", "Node"),
+        ("Text", "CharacterData"),
+        ("Comment", "CharacterData"),
+        ("CDATASection", "Text"),
+        ("ProcessingInstruction", "CharacterData"),
         ("Node", "EventTarget"),
         ("ShadowRoot", "DocumentFragment"),
     ] {
@@ -1178,6 +1184,10 @@ fn install_node_methods(context: &mut Context) -> JsResult<()> {
     define_hidden(&proto, context, "replaceWith", JsValue::from(replace_with_fn))?;
     let replace = native(context, "replaceChild", 2, replace_child);
     define_hidden(&proto, context, "replaceChild", JsValue::from(replace))?;
+    let has_children = native(context, "hasChildNodes", 0, has_child_nodes);
+    define_hidden(&proto, context, "hasChildNodes", JsValue::from(has_children))?;
+    let contains_fn = native(context, "contains", 1, node_contains);
+    define_hidden(&proto, context, "contains", JsValue::from(contains_fn))?;
     let text_get = native(context, "get textContent", 0, get_text);
     let text_set = native(context, "set textContent", 1, set_text);
     define_accessor(&proto, context, "textContent", text_get, Some(text_set))?;
@@ -4507,6 +4517,17 @@ fn set_html(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
         id
     };
     doc.clear_children(id);
+    // `<script>` and `<style>` are raw text elements. `r<t` in a script is a
+    // comparison, and parsing it as markup turns the script into a syntax error.
+    if matches!(
+        doc.element_name(id),
+        Some("script" | "style" | "textarea" | "title" | "noscript")
+    ) {
+        if !html.is_empty() {
+            doc.append_text(id, &html);
+        }
+        return Ok(JsValue::undefined());
+    }
     if html.contains('<') {
         let parsed = parse_html(&format!("<div id=\"mithu-root\">{html}</div>"));
         if let Some(root) = parsed.get_element_by_id("mithu-root") {
@@ -7084,6 +7105,40 @@ fn remove_event_listener(
     Ok(JsValue::undefined())
 }
 
+fn has_child_nodes(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Ok(host) = host(context) else {
+        return Ok(JsValue::from(false));
+    };
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::from(false));
+    };
+    Ok(JsValue::from(!host.doc.borrow().node(id).children.is_empty()))
+}
+
+fn node_contains(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(id) = node_of(this) else {
+        return Ok(JsValue::from(false));
+    };
+    let Some(other) = args.first().and_then(node_of) else {
+        return Ok(JsValue::from(false));
+    };
+    if id == other {
+        return Ok(JsValue::from(true));
+    }
+    let Ok(host) = host(context) else {
+        return Ok(JsValue::from(false));
+    };
+    let doc = host.doc.borrow();
+    let mut current = doc.node(other).parent;
+    while let Some(node) = current {
+        if node == id {
+            return Ok(JsValue::from(true));
+        }
+        current = doc.node(node).parent;
+    }
+    Ok(JsValue::from(false))
+}
+
 fn get_child_nodes(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     listed_children(this, context, false)
 }
@@ -7914,6 +7969,34 @@ mod tests {
         let yes = doc.get_element_by_id("yes").unwrap();
         assert_eq!(doc.text_content(yes), "Hi");
         assert_eq!(doc.element_name(yes), Some("b"));
+    }
+
+    #[test]
+    fn script_text_keeps_comparisons_and_nodes_report_children() {
+        let doc = parse_html(
+            r#"<div id="box"><span></span></div><p id="out"></p>
+            <script>
+              var box = document.getElementById("box");
+              if (!box.hasChildNodes() || !box.contains(box.firstChild)) {
+                throw new Error("children");
+              }
+              if (typeof DocumentType === "undefined" || !DocumentType.prototype) {
+                throw new Error("doctype");
+              }
+              var script = document.createElement("script");
+              script.innerHTML = "for (var r = 1; r < 3; r++) { window.__ran = r; }";
+              document.body.appendChild(script);
+              document.getElementById("out").textContent = String(/\S\.\p{L}/u.test("a.b"));
+            </script>"#,
+        );
+        let mut session = Session::open(doc, |_| None);
+        assert!(
+            session.logs().is_empty(),
+            "{}",
+            session.logs().join("\n")
+        );
+        let out = session.document().get_element_by_id("out").unwrap();
+        assert_eq!(session.document().text_content(out), "true");
     }
 
     #[test]
