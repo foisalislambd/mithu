@@ -8475,6 +8475,8 @@ mod tests {
               if (new Intl.PluralRules("en").select(1) !== "one") throw new Error("plural");
               if (new Intl.RelativeTimeFormat("en").format(-1, "day") !== "1 day ago") throw new Error("relative");
               if (new Intl.Collator("en", { sensitivity: "base" }).compare("A", "a") !== 0) throw new Error("collator");
+              var words = new Intl.Segmenter("en", { granularity: "word" }).segment("hi there");
+              if (!words.length || words[0].segment !== "hi") throw new Error("segment");
               var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
               if (!zone) throw new Error("zone");
               if ((zone === "UTC" || zone === "Etc/UTC") && new Date(2020, 0, 1).getTimezoneOffset() !== 0) {

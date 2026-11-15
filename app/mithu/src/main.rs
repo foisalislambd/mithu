@@ -58,12 +58,17 @@ fn event_loop() -> EventLoop<()> {
 fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
     let mut browser = Browser::new();
     if let Some(url) = url {
+        // Parser-blocking work stays inside navigate. The rest of the scripts
+        // run here, sharing one 15 second budget with timers, so a page with
+        // dozens of bundles still paints.
+        browser.set_cooperative_scripts(true);
         browser.navigate(url);
-        // Scripts, fetches, and animation frames can fill the page after the
-        // first layout. Stop when nothing is queued, or after 15 seconds.
         let started = Instant::now();
-        browser.advance_timers(0);
         while started.elapsed() < Duration::from_secs(15) {
+            if browser.pump_scripts(Duration::from_millis(200)) {
+                continue;
+            }
+            browser.advance_timers(0);
             let Some(wait) = browser.next_timer_ms() else {
                 break;
             };

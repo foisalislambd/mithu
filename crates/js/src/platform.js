@@ -747,12 +747,50 @@
   };
   Collator.supportedLocalesOf = function () { return ["en", "bn"]; };
 
+  function Segmenter(locales, options) {
+    if (!(this instanceof Segmenter)) return new Segmenter(locales, options);
+    this._granularity = options && options.granularity || "grapheme";
+  }
+  Segmenter.prototype.segment = function (input) {
+    var text = String(input == null ? "" : input);
+    var parts = [];
+    if (this._granularity === "word" || this._granularity === "sentence") {
+      var pattern = this._granularity === "sentence" ? /[^.!?]+[.!?]*|\s+/g : /\s+|\S+/g;
+      var match;
+      while ((match = pattern.exec(text))) {
+        parts.push({
+          segment: match[0],
+          index: match.index,
+          input: text,
+          isWordLike: /\S/.test(match[0])
+        });
+      }
+    } else {
+      for (var i = 0; i < text.length; i++) {
+        parts.push({ segment: text.charAt(i), index: i, input: text });
+      }
+    }
+    parts.containing = function (index) {
+      for (var n = 0; n < parts.length; n++) {
+        var part = parts[n];
+        if (index >= part.index && index < part.index + part.segment.length) return part;
+      }
+      return undefined;
+    };
+    return parts;
+  };
+  Segmenter.prototype.resolvedOptions = function () {
+    return { locale: "en", granularity: this._granularity };
+  };
+  Segmenter.supportedLocalesOf = function () { return ["en", "bn"]; };
+
   globalThis.Intl = {
     DateTimeFormat: DateTimeFormat,
     NumberFormat: NumberFormat,
     PluralRules: PluralRules,
     RelativeTimeFormat: RelativeTimeFormat,
-    Collator: Collator
+    Collator: Collator,
+    Segmenter: Segmenter
   };
   Date.prototype.toLocaleString = function (locales, options) {
     return new DateTimeFormat(locales, options).format(this);
