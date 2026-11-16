@@ -33,7 +33,13 @@ cargo test --workspace
 
 Linux packages for Lite: `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libsoup-3.0-dev`.
 
-`mithu-lite --screenshot out.png URL` and `mithu-lite --hold SECONDS URL` are for a 1280×800 measurement window. `--hold` prints `load_ms` and `rss_kb` while the process stays up. A tag push runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which uploads `mithu-*` and `mithu-lite-*` artifacts separately. The Lite job does not fetch the Servo submodule.
+`mithu-lite --screenshot out.png URL` and `mithu-lite --hold SECONDS URL` are for a 1280×800 measurement window. `--hold` prints `load_ms` and `rss_kb` while the process stays up.
+
+## Releases
+
+The version is the first line of [VERSION.md](VERSION.md). `[workspace.package] version` in `Cargo.toml` must be that same string. `python3 tools/version.py check` fails when they differ, and CI runs that check.
+
+To publish, bump both, then push to `main`. [`.github/workflows/release.yml`](.github/workflows/release.yml) compares `VERSION.md` with the newest `v*` tag. It builds `mithu` and `mithu-lite` for Linux, macOS, and Windows only when the version is strictly greater, then creates tag `v<version>` and a GitHub Release with those artifacts and generated notes. An equal or lower version, or a tag that already exists, skips with success. The same gate runs from the Actions "Run workflow" button. The Lite build does not fetch the Servo submodule.
 
 Type a URL in the address bar and press Enter. A hostname without a scheme opens as HTTPS. Other text is sent to DuckDuckGo. Alt+Left and Alt+Right walk history. Ctrl+L focuses the address bar. Ctrl+R reloads.
 

@@ -4,6 +4,7 @@
 # as separate artifacts; they are not linked into one binary.
 set -eu
 cd "$(dirname "$0")/.."
+python3 tools/version.py check
 kind="${1:-lite}"
 
 build_lite() {
