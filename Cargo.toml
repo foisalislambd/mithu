@@ -1,21 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/base",
-    "crates/url",
-    "crates/net",
-    "crates/dom",
-    "crates/html",
-    "crates/js",
-    "crates/css",
-    "crates/style",
-    "crates/image",
     "crates/text",
-    "crates/layout",
-    "crates/paint",
     "crates/shell",
     "app/mithu",
 ]
+exclude = ["third_party/servo"]
 
 [workspace.package]
 version = "0.1.0"
