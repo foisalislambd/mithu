@@ -10,7 +10,7 @@ description = "Shared Mithu desktop frame: tabs, toolbar, omnibox, and icons"
 
 [dependencies]
 mithu-text = { path = "../text" }
-resvg = "0.45"
+resvg = "0.50"
 url = "2"
 
 [lints]
