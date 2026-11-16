@@ -1,13 +1,15 @@
 #!/bin/sh
-# Build a release binary. `lite` does not configure or compile Servo.
-# `full` needs the Servo submodule (depth 1). `both` builds the two packages
-# as separate artifacts; they are not linked into one binary.
+# Build a release binary. `lite` does not compile Servo. Cargo still resolves
+# mithu-shell, so the Servo submodule (depth 1) has to be present for either
+# package. `both` builds the two packages as separate artifacts; they are not
+# linked into one binary.
 set -eu
 cd "$(dirname "$0")/.."
 python3 tools/version.py check
 kind="${1:-lite}"
 
 build_lite() {
+  git submodule update --init --depth 1 third_party/servo
   cargo build -p mithu-lite --release
   echo "artifact target/release/mithu-lite"
 }

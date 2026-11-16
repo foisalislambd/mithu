@@ -489,9 +489,16 @@ mod tests {
 
     #[test]
     fn bengali_conjunct_shapes_to_fewer_glyphs() {
-        let fonts = FontBook::load();
+        // The face is in the repo. CI images do not ship a Bengali font, and
+        // FontBook then draws one box per character, so ক্ষ stays three glyphs.
+        let mut fonts = FontBook::load();
+        fonts.add_family(
+            "Noto Sans Bengali",
+            include_bytes!("../fonts/NotoSansBengali-Regular.ttf"),
+        );
+        assert!(fonts.has_family("Noto Sans Bengali"));
         let text = "ক্ষ";
-        let glyphs = fonts.shape(text, 16.0, false, false, "");
+        let glyphs = fonts.shape(text, 16.0, false, false, "Noto Sans Bengali");
         assert!(
             glyphs.len() < text.chars().count(),
             "shaped {} chars {}",

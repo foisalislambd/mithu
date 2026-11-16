@@ -17,3 +17,9 @@ crates/ui/icons
   The full text is in THIRD_PARTY/lucide-LICENSE.
   SVGs are stored in the repo and rasterized at draw time.
   No Google or Chrome logos or product marks are included.
+
+crates/text/fonts/NotoSansBengali-Regular.ttf
+  Noto Sans Bengali, Regular. Copyright Google.
+  https://github.com/notofonts/bengali
+  SIL Open Font License 1.1. The text is crates/text/fonts/OFL.txt.
+  Bundled so the Bengali conjunct test does not depend on system fonts.
