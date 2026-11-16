@@ -10,7 +10,7 @@ third_party/servo
 Mozilla Public License, Version 2.0
 https://mozilla.org/MPL/2.0/
 
-crates/shell/icons
+crates/ui/icons
   Lucide icons from lucide-static 0.544.0
   https://github.com/lucide-icons/lucide
   ISC License, with portions derived from Feather (MIT).

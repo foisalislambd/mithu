@@ -1,0 +1,78 @@
+name: Release
+
+# Produces one full Mithu artifact and one Mithu Lite artifact per platform.
+# Lite does not check out Servo. The full job does, at depth 1.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  full:
+    name: mithu ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: mithu-linux-x64
+            binary: target/release/mithu
+          - os: macos-latest
+            artifact: mithu-macos
+            binary: target/release/mithu
+          - os: windows-latest
+            artifact: mithu-windows-x64
+            binary: target/release/mithu.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries for Servo
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config python3 gperf \
+            libclang-dev libssl-dev libfontconfig1-dev libfreetype-dev \
+            libglib2.0-dev libgtk-3-dev libunwind-dev \
+            gstreamer1.0-plugins-good libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - name: Build the Servo browser
+        run: cargo build -p mithu --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+
+  lite:
+    name: mithu-lite ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: mithu-lite-linux-x64
+            binary: target/release/mithu-lite
+          - os: macos-latest
+            artifact: mithu-lite-macos
+            binary: target/release/mithu-lite
+          - os: windows-latest
+            artifact: mithu-lite-windows-x64
+            binary: target/release/mithu-lite.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux WebKitGTK
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+      - name: Build Mithu Lite
+        run: cargo build -p mithu-lite --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}

@@ -2,8 +2,10 @@
 resolver = "3"
 members = [
     "crates/text",
+    "crates/ui",
     "crates/shell",
     "app/mithu",
+    "app/mithu-lite",
 ]
 exclude = ["third_party/servo"]
 

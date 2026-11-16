@@ -1,6 +1,6 @@
 # Architecture
 
-The page engine is Servo, embedded from `third_party/servo` (`components/servo`, commit `bad39019b`). Mithu draws the frame and forwards input. The custom DOM, CSS, JavaScript, layout, and network crates have been removed. The notes below about a from-scratch pipeline describe that earlier design.
+The full build's page engine is Servo, embedded from `third_party/servo` (`components/servo`, commit `bad39019b`). Mithu Lite (`app/mithu-lite`) does not link that engine. It hosts one `wry` webview per tab and paints the same frame from `crates/ui`. The custom DOM, CSS, JavaScript, layout, and network crates have been removed. The notes below about a from-scratch pipeline describe that earlier design.
 
 Mithu is a small browser written in this repository. Chromium is the reference for how the pieces fit together. The checkouts used while writing this live outside the git tree, at `/home/ubuntu/scratch/`, and are not committed:
 

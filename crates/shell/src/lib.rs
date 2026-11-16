@@ -1,8 +1,9 @@
-//! Chrome-like frame around one Servo [`WebView`] per tab.
+//! Servo page inside the shared Mithu frame.
 //!
-//! The page (DOM, style, layout, script, network) is Servo. This crate draws
-//! the tab strip, toolbar, bookmarks, and the address bar, then copies Servo's
-//! software framebuffer into the content rectangle. No product logo is drawn.
+//! The page (DOM, style, layout, script, network) is Servo. The tab strip,
+//! toolbar, bookmarks, and address bar are painted by `mithu-ui`, then this
+//! crate copies Servo's software framebuffer into the content rectangle.
+//! No product logo is drawn.
 
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,33 +22,10 @@ use servo::{
 };
 use url::Url;
 
-pub const TAB_H: f32 = 41.0;
-pub const TOOLBAR_H: f32 = 48.0;
-pub const BOOKMARK_BAR_H: f32 = 34.0;
-pub(crate) const CAPTION_W: f32 = 46.0;
-pub(crate) const BTN: f32 = 34.0;
-
-pub(crate) const TAB_STRIP: u32 = rgb(211, 227, 253);
-pub(crate) const TOOLBAR: u32 = rgb(255, 255, 255);
-pub(crate) const ICON: u32 = rgb(31, 31, 31);
-pub(crate) const ICON_OFF: u32 = rgb(143, 143, 143);
-pub(crate) const OMNIBOX: u32 = rgb(239, 237, 237);
-const ADDRESS: u32 = rgb(255, 255, 255);
-const ADDRESS_BORDER: u32 = rgb(199, 199, 199);
-pub(crate) const ADDRESS_FOCUS: u32 = rgb(11, 87, 208);
-pub(crate) const INK: u32 = rgb(31, 31, 31);
-pub(crate) const MUTED: u32 = rgb(94, 94, 94);
-pub(crate) const HOVER: u32 = rgb(168, 199, 250);
-pub(crate) const PLUS: u32 = rgb(236, 243, 254);
-pub(crate) const STAR: u32 = rgb(242, 180, 0);
-const PAGE: u32 = rgb(244, 241, 234);
-
-pub(crate) const fn rgb(r: u32, g: u32, b: u32) -> u32 {
-    (r << 16) | (g << 8) | b
-}
-
-mod chrome;
-mod icons;
+pub use mithu_ui::{
+    rgb, ADDRESS, ADDRESS_BORDER, BOOKMARK_BAR_H, CAPTION_W, INK, MUTED, PAGE, TAB_H, TOOLBAR_H,
+};
+use mithu_ui::chrome;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameHit {
@@ -1452,33 +1430,8 @@ fn start_url() -> Url {
     Url::parse("about:blank").expect("about:blank")
 }
 
-fn percent(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
 fn parse_location(input: &str) -> Url {
-    let text = input.trim();
-    if text.is_empty() {
-        return Url::parse("about:blank").expect("blank");
-    }
-    if text.starts_with("about:") || text.starts_with("data:") || text.starts_with("file:") || text.contains("://")
-    {
-        return Url::parse(text).unwrap_or_else(|_| Url::parse("about:blank").expect("blank"));
-    }
-    if !text.contains(' ') && text.contains('.') {
-        return Url::parse(&format!("https://{text}"))
-            .unwrap_or_else(|_| Url::parse("about:blank").expect("blank"));
-    }
-    Url::parse(&format!("https://duckduckgo.com/?q={}", percent(text))).expect("search")
+    mithu_ui::parse_location(input)
 }
 
 fn overlay_for(url: &Url) -> Option<Overlay> {
