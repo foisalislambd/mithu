@@ -1,16 +1,12 @@
 //! Native window for the Mithu browser.
 
-mod gpu;
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mithu_paint::{VelloTarget, render_vello_cpu};
-use mithu_shell::{Browser, FrameHit};
-use vello::Scene;
+use mithu_shell::{Browser, FrameHit, KeyKind};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -29,21 +25,14 @@ fn main() {
 fn run() {
     let mut args = std::env::args().skip(1);
     if let Some(first) = args.next() {
-        if first == "--bench-paint" {
-            bench_paint();
-            return;
-        }
         if first == "--hold" {
-            let seconds: u64 = args
+            let seconds = args
                 .next()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(12);
+                .unwrap_or(10);
             let url = args.next().unwrap_or_else(|| "about:blank".to_string());
-            let extra_tabs: usize = args.next().and_then(|value| value.parse().ok()).unwrap_or(0);
-            if let Err(error) = hold_page(seconds, &url, extra_tabs) {
-                eprintln!("mithu: {error}");
-                std::process::exit(1);
-            }
+            let tabs = args.next().and_then(|value| value.parse().ok()).unwrap_or(1);
+            hold(seconds, &url, tabs);
             return;
         }
         if first == "--screenshot" {
@@ -66,75 +55,21 @@ fn run() {
     event_loop.run_app(&mut app).expect("run the window");
 }
 
-fn bench_paint() {
-    let path = "/tmp/mithu-bench.html";
-    let mut html = String::from(
-        "<!DOCTYPE html><html><body style=\"margin:0;font-family:sans-serif;background:#f4f1ea\">",
-    );
-    for row in 0..80 {
-        let color = format!("#{:02x}{:02x}88", (row * 3) % 256, (row * 7) % 256);
-        html.push_str(&format!(
-            "<section style=\"margin:8px 12px;padding:12px;background:{color};border-radius:8px\"><h2>Section {row}</h2><p>The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.</p></section>"
-        ));
-    }
-    html.push_str("</body></html>");
-    std::fs::write(path, html).expect("bench page");
+fn hold(seconds: u64, url: &str, tabs: usize) {
     let mut browser = Browser::new();
-    browser.navigate(&format!("file://{path}"));
-    let width = 1280u32;
-    let height = 800u32;
-    let frames = 12u32;
-    let _ = browser.render(width as f32, height as f32);
+    browser.resize(1280.0, 800.0);
     let started = Instant::now();
-    for _ in 0..frames {
-        browser.scroll_by(64.0);
-        let _ = browser.render(width as f32, height as f32);
+    browser.navigate(url);
+    for _ in 1..tabs.max(1) {
+        browser.new_tab();
+        browser.navigate(url);
     }
-    let cpu_ms = started.elapsed().as_secs_f64() * 1000.0 / f64::from(frames);
-    browser.scroll_by(-64.0 * frames as f32);
-    let _ = render_vello_cpu(width, height, |draw| {
-        browser.record(draw, width, height);
-    });
-    let started = Instant::now();
-    for _ in 0..frames {
-        browser.scroll_by(64.0);
-        let _ = render_vello_cpu(width, height, |draw| {
-            browser.record(draw, width, height);
-        });
+    while started.elapsed() < Duration::from_secs(45) && !browser.load_settled() {
+        browser.pump_scripts(Duration::from_millis(100));
     }
-    let vello_cpu_ms = started.elapsed().as_secs_f64() * 1000.0 / f64::from(frames);
-    println!("paint bench {width}x{height} scroll {frames} frames");
-    println!("cpu-painter {cpu_ms:.2} ms/frame");
-    println!("vello-cpu {vello_cpu_ms:.2} ms/frame");
-    match gpu::Headless::new(width, height) {
-        None => println!("vello-gpu unavailable"),
-        Some(mut gpu) => {
-            let mut scene = Scene::new();
-            {
-                let mut draw = VelloTarget::new(&mut scene, width as i32, height as i32);
-                browser.record(&mut draw, width, height);
-            }
-            if gpu.render(&scene).is_err() {
-                println!("vello-gpu unavailable");
-                return;
-            }
-            let started = Instant::now();
-            for _ in 0..frames {
-                browser.scroll_by(64.0);
-                scene.reset();
-                {
-                    let mut draw = VelloTarget::new(&mut scene, width as i32, height as i32);
-                    browser.record(&mut draw, width, height);
-                }
-                if gpu.render(&scene).is_err() {
-                    println!("vello-gpu failed");
-                    return;
-                }
-            }
-            let gpu_ms = started.elapsed().as_secs_f64() * 1000.0 / f64::from(frames);
-            println!("vello-gpu {gpu_ms:.2} ms/frame");
-        }
-    }
+    let _ = browser.render(1280.0, 800.0);
+    println!("loaded_ms {}", started.elapsed().as_millis());
+    std::thread::sleep(Duration::from_secs(seconds));
 }
 
 fn event_loop() -> EventLoop<()> {
@@ -145,60 +80,6 @@ fn event_loop() -> EventLoop<()> {
         builder.with_any_thread(true);
     }
     builder.build().expect("create the event loop")
-}
-
-fn hold_page(seconds: u64, url: &str, extra_tabs: usize) -> Result<(), String> {
-    let mut browser = Browser::new();
-    browser.resize(1280.0, 800.0);
-    browser.set_cooperative_scripts(true);
-    let started = Instant::now();
-    browser.navigate(url);
-    pump_quiet(&mut browser, started);
-    for _ in 0..extra_tabs.saturating_sub(1) {
-        browser.new_tab();
-        browser.navigate("about:blank");
-    }
-    eprintln!("loaded {}ms tabs {}", started.elapsed().as_millis(), browser.tab_count());
-    std::thread::sleep(Duration::from_secs(seconds));
-    eprintln!("hold done {}ms", started.elapsed().as_millis());
-    Ok(())
-}
-
-fn pump_quiet(browser: &mut Browser, budget: Instant) {
-    let started = Instant::now();
-    let mut seen = browser.content_revision();
-    let mut stable_since = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) && budget.elapsed() < Duration::from_secs(8) {
-        let pending = browser.pump_scripts(Duration::from_millis(200));
-        let revision = browser.content_revision();
-        if revision != seen {
-            seen = revision;
-            stable_since = Instant::now();
-        }
-        if pending {
-            continue;
-        }
-        browser.advance_timers(0);
-        let frames = browser.animation_frames_pending();
-        let quiet = stable_since.elapsed() > Duration::from_millis(800)
-            && started.elapsed() > Duration::from_secs(1);
-        if quiet && !frames {
-            break;
-        }
-        if started.elapsed() > Duration::from_millis(3500) {
-            break;
-        }
-        if frames {
-            continue;
-        }
-        let Some(wait) = browser.next_timer_ms() else {
-            break;
-        };
-        if wait > 1_000 {
-            break;
-        }
-        browser.advance_timers(wait.clamp(1, 250));
-    }
 }
 
 fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
@@ -214,22 +95,53 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
         if std::env::var_os("MITHU_TIMING").is_some() {
             eprintln!("timing navigate {}ms", nav.elapsed().as_millis());
         }
-        let pump = Instant::now();
-        pump_quiet(&mut browser, budget);
-        if std::env::var_os("MITHU_TIMING").is_some() {
-            eprintln!("timing pump {}ms", pump.elapsed().as_millis());
+        let started = Instant::now();
+        let mut seen = browser.content_revision();
+        let mut stable_since = Instant::now();
+        // Servo finishes the load on its own threads. Keep spinning until the
+        // load settles, then until the frame has been quiet for 800ms.
+        while started.elapsed() < Duration::from_secs(20)
+            && budget.elapsed() < Duration::from_secs(25)
+        {
+            let pending = browser.pump_scripts(Duration::from_millis(200));
+            let revision = browser.content_revision();
+            if revision != seen {
+                seen = revision;
+                stable_since = Instant::now();
+            }
+            if pending {
+                continue;
+            }
+            browser.advance_timers(0);
+            let frames = browser.animation_frames_pending();
+            let quiet = stable_since.elapsed() > Duration::from_millis(800)
+                && started.elapsed() > Duration::from_secs(1);
+            // Keep scheduling animation frames while a timeline (GSAP fromTo)
+            // is still queued. A ticker that never clears still stops after a
+            // few seconds so the shot stays inside its budget.
+            if quiet && !frames {
+                break;
+            }
+            if started.elapsed() > Duration::from_millis(3500) {
+                break;
+            }
+            if frames {
+                continue;
+            }
+            let Some(wait) = browser.next_timer_ms() else {
+                break;
+            };
+            if wait > 1_000 {
+                break;
+            }
+            browser.advance_timers(wait.clamp(1, 250));
         }
+        eprintln!("load_ms {}", budget.elapsed().as_millis());
     }
     let width = 1280u32;
     let height = 800u32;
-    // No display adapter in the harness. vello_cpu records the same scene the
-    // window sends to wgpu; the software painter covers a viewport vello_cpu
-    // cannot allocate.
     let paint = Instant::now();
-    let pixels = render_vello_cpu(width, height, |draw| {
-        browser.record(draw, width, height);
-    })
-    .unwrap_or_else(|| browser.render(width as f32, height as f32));
+    let pixels = browser.render(width as f32, height as f32);
     if std::env::var_os("MITHU_TIMING").is_some() {
         eprintln!("timing paint {}ms", paint.elapsed().as_millis());
     }
@@ -239,8 +151,7 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
         rgb.push(((pixel >> 8) & 255) as u8);
         rgb.push((pixel & 255) as u8);
     }
-    let png = mithu_image::encode_png(width, height, &rgb)
-        .ok_or_else(|| "could not encode the screenshot".to_string())?;
+    let png = encode_png(width, height, &rgb)?;
     std::fs::write(path, png).map_err(|error| error.to_string())?;
     if !browser.status_line().is_empty() {
         eprintln!("{}", browser.status_line());
@@ -253,12 +164,25 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+    image::ImageEncoder::write_image(
+        encoder,
+        rgb,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(bytes)
+}
+
 struct App {
     browser: Browser,
     window: Option<Arc<Window>>,
     context: Option<softbuffer::Context<Arc<Window>>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
-    gpu: Option<gpu::Gpu>,
     modifiers: ModifiersState,
     cursor: (f32, f32),
     timer_mark: Instant,
@@ -274,11 +198,51 @@ impl App {
             window: None,
             context: None,
             surface: None,
-            gpu: None,
             modifiers: ModifiersState::default(),
             cursor: (0.0, 0.0),
             timer_mark: Instant::now(),
         }
+    }
+
+    fn forward_key(&mut self, key: &Key, pressed: bool) {
+        if self.browser.omnibox_focused || self.browser.find_focused {
+            return;
+        }
+        let kind = match key {
+            Key::Named(NamedKey::Enter) => KeyKind::Enter,
+            Key::Named(NamedKey::Escape) => KeyKind::Escape,
+            Key::Named(NamedKey::Backspace) => KeyKind::Backspace,
+            Key::Named(NamedKey::Tab) => KeyKind::Tab,
+            Key::Named(NamedKey::ArrowLeft) => KeyKind::Left,
+            Key::Named(NamedKey::ArrowRight) => KeyKind::Right,
+            Key::Named(NamedKey::ArrowUp) => KeyKind::Up,
+            Key::Named(NamedKey::ArrowDown) => KeyKind::Down,
+            Key::Named(NamedKey::PageUp) => KeyKind::PageUp,
+            Key::Named(NamedKey::PageDown) => KeyKind::PageDown,
+            Key::Named(NamedKey::Home) => KeyKind::Home,
+            Key::Named(NamedKey::End) => KeyKind::End,
+            Key::Named(NamedKey::Space) => KeyKind::Space,
+            Key::Character(text) => {
+                for ch in text.chars().take(1) {
+                    self.browser.send_key(
+                        KeyKind::Char(ch),
+                        pressed,
+                        self.modifiers.control_key(),
+                        self.modifiers.alt_key(),
+                        self.modifiers.shift_key(),
+                    );
+                }
+                return;
+            }
+            _ => return,
+        };
+        self.browser.send_key(
+            kind,
+            pressed,
+            self.modifiers.control_key(),
+            self.modifiers.alt_key(),
+            self.modifiers.shift_key(),
+        );
     }
 
     fn request_redraw(&self) {
@@ -319,24 +283,7 @@ impl App {
         }
         let px_w = width.get();
         let px_h = height.get();
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.resize(px_w, px_h);
-            let mut scene = Scene::new();
-            {
-                let mut draw = VelloTarget::new(&mut scene, px_w as i32, px_h as i32);
-                self.browser.record(&mut draw, px_w, px_h);
-            }
-            if gpu.render(&scene).is_ok() {
-                self.sync_title();
-                return;
-            }
-            eprintln!("mithu: gpu frame failed, using vello_cpu");
-            self.gpu = None;
-        }
-        let frame = render_vello_cpu(px_w, px_h, |draw| {
-            self.browser.record(draw, px_w, px_h);
-        })
-        .unwrap_or_else(|| self.browser.render(px_w as f32, px_h as f32));
+        let frame = self.browser.render(px_w as f32, px_h as f32);
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
@@ -383,10 +330,6 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         self.browser
             .resize(size.width.max(1) as f32, size.height.max(1) as f32);
-        self.gpu = gpu::Gpu::new(window.clone());
-        if self.gpu.is_none() {
-            eprintln!("mithu: no wgpu adapter, using vello_cpu");
-        }
         self.context = Some(context);
         self.surface = Some(surface);
         self.window = Some(window);
@@ -449,8 +392,13 @@ impl ApplicationHandler for App {
                 self.browser.scroll_by(dy);
                 self.request_redraw();
             }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.browser.ime_commit(&text);
+                self.request_redraw();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    self.forward_key(&event.logical_key, false);
                     return;
                 }
                 let ctrl = self.modifiers.control_key();
@@ -569,7 +517,7 @@ impl ApplicationHandler for App {
                         self.browser.field_insert(' ')
                     }
                     Key::Named(NamedKey::Space) if !focused => self.browser.scroll_page(1.0),
-                    _ => return,
+                    _ => self.forward_key(&event.logical_key, true),
                 }
                 self.sync_title();
                 self.request_redraw();

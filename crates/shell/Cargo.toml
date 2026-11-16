@@ -6,20 +6,16 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Navigation, history, and the browser frame"
+description = "Mithu window frame around a Servo webview"
 
 [dependencies]
-mithu-base = { path = "../base" }
-mithu-dom = { path = "../dom" }
-mithu-html = { path = "../html" }
-mithu-image = { path = "../image" }
-mithu-js = { path = "../js" }
-mithu-layout = { path = "../layout" }
-mithu-net = { path = "../net" }
-mithu-paint = { path = "../paint" }
-mithu-style = { path = "../style" }
+dpi = "0.1"
+euclid = "0.22"
 mithu-text = { path = "../text" }
-mithu-url = { path = "../url" }
+resvg = "0.45"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit"] }
+url = "2"
 
 [lints]
 workspace = true

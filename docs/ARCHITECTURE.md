@@ -1,5 +1,7 @@
 # Architecture
 
+The page engine is Servo, embedded from `third_party/servo` (`components/servo`, commit `bad39019b`). Mithu draws the frame and forwards input. The custom DOM, CSS, JavaScript, layout, and network crates have been removed. The notes below about a from-scratch pipeline describe that earlier design.
+
 Mithu is a small browser written in this repository. Chromium is the reference for how the pieces fit together. The checkouts used while writing this live outside the git tree, at `/home/ubuntu/scratch/`, and are not committed:
 
 | Tree | Commit | Working tree |
@@ -12,9 +14,7 @@ A full Chromium `gclient sync` was not run. Dependencies that Chromium pulls in 
 
 ## What we kept
 
-The workspace already had a pipeline and a chosen set of libraries. This work builds on that. No engine was swapped out.
-
-JavaScript stays on [Boa](https://github.com/boa-dev/boa) (`boa_engine` in `crates/js`). V8's source (`v8/src/api/api.cc` and the rest of `v8/src`) is a reference for how a JS engine is embedded and how host objects talk to the DOM. Mithu does not link V8 or `rusty_v8`. Boa is pure Rust, already wired to the DOM, and much smaller than shipping V8.
+The frame stays Mithu's. The page engine is Servo, through the `servo` crate in `third_party/servo` (`components/servo`). The custom DOM, HTML, CSS, JavaScript, layout, and network crates are gone. The window is still `winit` and `softbuffer`. Servo paints into a software framebuffer and Mithu copies that into the content rectangle under the tab strip and toolbar.
 
 The window stays on `winit` and `softbuffer`. Chromium draws its widgets with the Views toolkit (`chrome/browser/ui/views`) and draws web content with Skia (`SkCanvas` in the Skia tree) through the compositor (`cc/`). A GPU stack (`wgpu`) or a retained widget toolkit would add a large dependency for a UI that is a handful of rectangles and glyphs. Mithu already rasterizes the page and the browser frame into one CPU buffer. That is the lightweight stand-in for Skia plus Views: one framebuffer, no GPU process.
 

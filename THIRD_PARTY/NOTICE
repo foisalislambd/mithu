@@ -1,15 +1,19 @@
-Mithu is MIT licensed. The files listed here are adapted from Servo and
-remain under the Mozilla Public License, Version 2.0. Servo's source is
-https://github.com/servo/servo.
+Mithu is MIT licensed. Servo, embedded as the page engine, remains under the
+Mozilla Public License, Version 2.0.
 
-crates/net/src/cors.rs
-  Adapted from components/script/dom/fetch/headers.rs
-  (is_forbidden_request_header, is_forbidden_response_header) and
-  components/net/fetch/methods.rs (CORS-exposed header-name list).
-
-crates/js/src/custom_element.rs
-  Adapted from components/script/dom/node/customelementregistry.rs
-  (upgrade_element, invoke_callback).
+third_party/servo
+  https://github.com/servo/servo
+  Commit bad39019b773609b1943d2fa301b451489f06d4e
+  The `servo` library crate (components/servo) is linked with the
+  `bundled`, `clipboard`, and `js_jit` features.
 
 Mozilla Public License, Version 2.0
 https://mozilla.org/MPL/2.0/
+
+crates/shell/icons
+  Lucide icons from lucide-static 0.544.0
+  https://github.com/lucide-icons/lucide
+  ISC License, with portions derived from Feather (MIT).
+  The full text is in THIRD_PARTY/lucide-LICENSE.
+  SVGs are stored in the repo and rasterized at draw time.
+  No Google or Chrome logos or product marks are included.
