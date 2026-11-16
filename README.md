@@ -43,7 +43,7 @@ The goal is a thin desktop shell, not a second product stacked on top of the pag
 | Binary size | ~96 MB (96,881,800 bytes) | 5.1 MiB (5,338,536 bytes) |
 | about:blank RAM | 361 MB RSS, one process | UI process about 353 MB RSS (steady 361,468 KB). WebKit also starts a web process (~133 MB RSS) and a network process (~52 MB RSS). Together, proportional set is about 387 MB |
 | Use it when | You want Servo in-process and a build that does not depend on the system web view | You want a small binary and today's sites, using the engine the OS already ships |
-| Build cost | Compiles Servo. Slow, and the submodule is required | Does not compile Servo or mozjs |
+| Build cost | Compiles Servo. Slow, and the submodule is required | Does not compile Servo or mozjs. The submodule still has to be checked out, because Cargo resolves the whole workspace |
 
 Numbers above were measured on Linux x86_64 from release builds (`opt-level = "z"`, thin LTO, stripped). Lite load times on that machine, from navigation to the engine's finished event: example.com 846 ms, English Wikipedia 1.1–1.4 s, GitHub 2.0–2.1 s, YouTube's logged-out home 3.5 s, BBC 1.2 s.
 
@@ -132,7 +132,7 @@ On macOS and Windows, install the toolchain Servo documents in `third_party/serv
 
 ### Clone
 
-Use a depth-1 clone. The Servo submodule is only needed for the full build.
+Use a depth-1 clone, then initialize the Servo submodule. Lite does not compile Servo, but `mithu-shell` is still a workspace member and its `servo` path must exist or Cargo stops before building anything.
 
 ```bash
 git clone --depth 1 https://github.com/foisalislambd/mithu.git
@@ -140,12 +140,10 @@ cd mithu
 git submodule update --init --depth 1 third_party/servo
 ```
 
-Skip the submodule line if you only want Lite.
-
 ### Build and run
 
 ```bash
-# Lite. Does not compile Servo.
+# Lite. Does not compile Servo. The submodule must still be present.
 cargo run -p mithu-lite
 cargo run -p mithu-lite -- https://example.com/
 cargo build -p mithu-lite --release
@@ -195,7 +193,7 @@ flowchart TB
 | `crates/shell` | `mithu-shell` | Servo web views, history, and compositing under the frame. |
 | `app/mithu` | `mithu` | Full window (`winit` and `softbuffer`). |
 | `app/mithu-lite` | `mithu-lite` | Lite window. One `wry` web view per tab. |
-| `third_party/servo` | `servo` | Servo submodule. Excluded from the Lite build. |
+| `third_party/servo` | `servo` | Servo submodule. Not compiled into Lite. Required on disk so the workspace resolves. |
 | `tools/package.sh` | | Builds `lite`, `full`, or `both`. |
 | `tools/version.py` | | Reads `VERSION.md` and checks it against `Cargo.toml`. |
 | `VERSION.md` | | The project version. The first line is semver. |
@@ -223,7 +221,7 @@ The version is the first line of [VERSION.md](VERSION.md). Right now that line i
 2. Run `python3 tools/version.py check`. It fails if they differ. CI runs that check too.
 3. Push to `main`.
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) reads `VERSION.md` and compares it with the newest `v*` tag. It builds `mithu` and `mithu-lite` for Linux, macOS, and Windows only when the version is strictly greater and `v<version>` does not already exist. It then creates that tag and a GitHub Release with the six artifacts and generated notes. An equal or lower version skips with success, so a normal push does not publish again. The Actions "Run workflow" button uses the same gate. The Lite job does not fetch the Servo submodule.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) reads `VERSION.md` and compares it with the newest `v*` tag. It builds `mithu` and `mithu-lite` for Linux, macOS, and Windows only when the version is strictly greater and `v<version>` does not already exist. It then creates that tag and a GitHub Release with the six artifacts and generated notes. An equal or lower version skips with success, so a normal push does not publish again. The Actions "Run workflow" button uses the same gate. The Lite job checks out the Servo submodule so Cargo can resolve `mithu-shell`, then compiles only `mithu-lite`. If any build fails, that job cancels the rest of the run. The publish job runs only when the full build and the Lite build both succeed.
 
 `python3 tools/version.py test` checks greater, equal, lower, and "no previous tag" on the comparer itself.
 
