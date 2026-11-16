@@ -12,6 +12,7 @@ description = "Mithu window frame around a Servo webview"
 dpi = "0.1"
 euclid = "0.22"
 mithu-text = { path = "../text" }
+resvg = "0.45"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit"] }
 url = "2"

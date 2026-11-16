@@ -24,28 +24,30 @@ use url::Url;
 pub const TAB_H: f32 = 41.0;
 pub const TOOLBAR_H: f32 = 48.0;
 pub const BOOKMARK_BAR_H: f32 = 34.0;
-const CAPTION_W: f32 = 46.0;
-const BTN: f32 = 34.0;
+pub(crate) const CAPTION_W: f32 = 46.0;
+pub(crate) const BTN: f32 = 34.0;
 
-const TAB_STRIP: u32 = rgb(211, 227, 253);
-const TOOLBAR: u32 = rgb(255, 255, 255);
-const ICON: u32 = rgb(31, 31, 31);
-const ICON_OFF: u32 = rgb(143, 143, 143);
-const OMNIBOX: u32 = rgb(239, 237, 237);
+pub(crate) const TAB_STRIP: u32 = rgb(211, 227, 253);
+pub(crate) const TOOLBAR: u32 = rgb(255, 255, 255);
+pub(crate) const ICON: u32 = rgb(31, 31, 31);
+pub(crate) const ICON_OFF: u32 = rgb(143, 143, 143);
+pub(crate) const OMNIBOX: u32 = rgb(239, 237, 237);
 const ADDRESS: u32 = rgb(255, 255, 255);
 const ADDRESS_BORDER: u32 = rgb(199, 199, 199);
-const ADDRESS_FOCUS: u32 = rgb(11, 87, 208);
-const INK: u32 = rgb(31, 31, 31);
-const MUTED: u32 = rgb(94, 94, 94);
-const HOVER: u32 = rgb(168, 199, 250);
-const PLUS: u32 = rgb(236, 243, 254);
-const STAR: u32 = rgb(242, 180, 0);
-const SEPARATOR: u32 = rgb(199, 199, 199);
+pub(crate) const ADDRESS_FOCUS: u32 = rgb(11, 87, 208);
+pub(crate) const INK: u32 = rgb(31, 31, 31);
+pub(crate) const MUTED: u32 = rgb(94, 94, 94);
+pub(crate) const HOVER: u32 = rgb(168, 199, 250);
+pub(crate) const PLUS: u32 = rgb(236, 243, 254);
+pub(crate) const STAR: u32 = rgb(242, 180, 0);
 const PAGE: u32 = rgb(244, 241, 234);
 
-const fn rgb(r: u32, g: u32, b: u32) -> u32 {
+pub(crate) const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
+
+mod chrome;
+mod icons;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameHit {
@@ -110,6 +112,7 @@ enum Overlay {
     History,
     Downloads,
     Settings,
+    NewTab,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -141,7 +144,12 @@ pub struct Browser {
     menu: Option<MenuKind>,
     suggestion: Option<usize>,
     pointer: (f32, f32),
+    pressed: bool,
     pressed_in_page: bool,
+    link_status: String,
+    tab_search: bool,
+    extensions_open: bool,
+    profile_open: bool,
     pending_url: Option<String>,
     dark: bool,
     fonts: FontBook,
@@ -181,14 +189,19 @@ impl Browser {
             find_open: false,
             find_query: String::new(),
             bookmarks: Vec::new(),
-            bookmarks_open: false,
+            bookmarks_open: true,
             visits: Vec::new(),
             downloads: Vec::new(),
             overlay: None,
             menu: None,
             suggestion: None,
-            pointer: (0.0, 0.0),
+            pointer: (-1.0, -1.0),
+            pressed: false,
             pressed_in_page: false,
+            link_status: String::new(),
+            tab_search: false,
+            extensions_open: false,
+            profile_open: false,
             pending_url: None,
             dark: false,
             fonts: FontBook::load(),
@@ -197,6 +210,8 @@ impl Browser {
             status: String::new(),
         };
         browser.open_tab(start_url());
+        browser.overlay = Some(Overlay::NewTab);
+        browser.omnibox = "about:newtab".into();
         browser.spin();
         browser
     }
@@ -333,8 +348,11 @@ impl Browser {
     }
 
     pub fn new_tab(&mut self) {
-        self.overlay = None;
         self.open_tab(Url::parse("about:blank").expect("about:blank"));
+        self.overlay = Some(Overlay::NewTab);
+        self.omnibox = "about:newtab".into();
+        self.omnibox_focused = false;
+        self.tab_search = false;
         self.spin();
     }
 
@@ -588,11 +606,19 @@ impl Browser {
 
     pub fn pointer_down(&mut self, x: f32, y: f32) {
         self.pointer = (x, y);
+        self.pressed = true;
         match self.click_target(x, y) {
             Click::Frame(_) => {}
             Click::Tab(index) => {
+                self.tab_search = false;
                 self.active = index;
-                self.overlay = None;
+                let keep_ntp = self.overlay == Some(Overlay::NewTab)
+                    && self.tabs.get(index).is_some_and(|tab| {
+                        tab.url.is_empty() || tab.url.starts_with("about:")
+                    });
+                if !keep_ntp {
+                    self.overlay = None;
+                }
                 self.resize_active();
                 self.sync_active();
                 self.bump();
@@ -602,15 +628,45 @@ impl Browser {
                 self.close_tab();
             }
             Click::NewTab => self.new_tab(),
+            Click::TabSearch => {
+                self.tab_search = !self.tab_search;
+                self.menu = None;
+                self.extensions_open = false;
+                self.profile_open = false;
+                self.bump();
+            }
             Click::Back => self.back(),
             Click::Forward => self.forward(),
+            Click::Home => self.navigate("about:newtab"),
             Click::Reload => self.reload(),
             Click::Omnibox => self.focus_omnibox(),
             Click::Star => self.toggle_bookmark(),
-            Click::MenuButton => {
-                self.menu = Some(MenuKind::App);
+            Click::Extensions => {
+                self.extensions_open = !self.extensions_open;
+                self.menu = None;
+                self.tab_search = false;
+                self.profile_open = false;
                 self.bump();
             }
+            Click::Profile => {
+                self.profile_open = !self.profile_open;
+                self.menu = None;
+                self.tab_search = false;
+                self.extensions_open = false;
+                self.bump();
+            }
+            Click::MenuButton => {
+                self.menu = if self.menu == Some(MenuKind::App) { None } else { Some(MenuKind::App) };
+                self.tab_search = false;
+                self.extensions_open = false;
+                self.profile_open = false;
+                self.bump();
+            }
+            Click::Suggestion(index) => {
+                self.suggestion = Some(index);
+                self.submit_omnibox();
+            }
+            Click::Panel => {}
             Click::Bookmark(index) => {
                 if let Some(mark) = self.bookmarks.get(index) {
                     let url = mark.url.clone();
@@ -642,11 +698,21 @@ impl Browser {
                     self.pressed_in_page = true;
                 }
             }
-            Click::None => self.menu = None,
+            Click::None => {
+                self.menu = None;
+                self.tab_search = false;
+                self.extensions_open = false;
+                self.profile_open = false;
+                self.bump();
+            }
         }
     }
 
     pub fn pointer_up(&mut self) {
+        if self.pressed {
+            self.pressed = false;
+            self.bump();
+        }
         if !self.pressed_in_page {
             return;
         }
@@ -856,12 +922,14 @@ impl Browser {
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| display_title(&url));
         let changed = tab.status != status || tab.url != url || tab.title != title;
+        let link = tab.webview.status_text().unwrap_or_default();
         tab.status = status;
         if tab.url != url && url.starts_with("http") && !self.visits.contains(&url) {
             self.visits.push(url.clone());
         }
         tab.url = url;
         tab.title = title;
+        self.link_status = link;
         if changed {
             self.bump();
         }
@@ -871,14 +939,19 @@ impl Browser {
                     Overlay::History => "about:history".into(),
                     Overlay::Downloads => "about:downloads".into(),
                     Overlay::Settings => "about:settings".into(),
+                    Overlay::NewTab => "about:newtab".into(),
                 };
             } else if let Some(tab) = self.tabs.get(self.active) {
                 self.omnibox = tab.url.clone();
             }
         }
-        self.status = match self.tabs.get(self.active).map(|tab| tab.status) {
-            Some(LoadStatus::Started | LoadStatus::HeadParsed) => "Loading".into(),
-            _ => self.location(),
+        self.status = if self.overlay.is_some() {
+            self.location()
+        } else {
+            match self.tabs.get(self.active).map(|tab| tab.status) {
+                Some(LoadStatus::Started | LoadStatus::HeadParsed) => "Loading".into(),
+                _ => self.location(),
+            }
         };
         if self.load_settled() {
             self.pending_url = None;
@@ -899,7 +972,7 @@ impl Browser {
 
     fn content_top(&self) -> f32 {
         let mut top = TAB_H + TOOLBAR_H;
-        if self.bookmarks_open || !self.bookmarks.is_empty() {
+        if self.bookmarks_open {
             top += BOOKMARK_BAR_H;
         }
         top
@@ -969,6 +1042,7 @@ impl Browser {
                 Overlay::History => "about:history".into(),
                 Overlay::Downloads => "about:downloads".into(),
                 Overlay::Settings => "about:settings".into(),
+                Overlay::NewTab => "about:newtab".into(),
             };
         }
         self.tabs
@@ -1117,6 +1191,7 @@ impl Browser {
                     y += 24.0;
                 }
             }
+            Some(Overlay::NewTab) | None => {}
             Some(Overlay::Settings) => {
                 self.draw_text(pixels, width, height, 24.0, y, 22.0, INK, "Settings");
                 y += 40.0;
@@ -1129,236 +1204,76 @@ impl Browser {
                 stroke_rect(pixels, width, height, 24.0, y, 360.0, 36.0, ADDRESS_BORDER);
                 self.draw_text(pixels, width, height, 36.0, y + 24.0, 15.0, INK, label);
             }
-            None => {}
         }
     }
 
     fn draw_chrome(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let w = self.viewport_w;
-        let h = self.viewport_h;
-        fill_rect(pixels, width, height, 0.0, 0.0, w, TAB_H, TAB_STRIP);
-        fill_rect(pixels, width, height, 0.0, TAB_H, w, TOOLBAR_H, TOOLBAR);
-        self.draw_tabs(pixels, width, height);
-        self.draw_toolbar(pixels, width, height);
-        if self.bookmarks_open || !self.bookmarks.is_empty() {
-            self.draw_bookmarks(pixels, width, height);
-        }
-        self.draw_progress(pixels, width, height);
-        if self.find_open {
-            self.draw_find(pixels, width, height);
-        }
-        if self.omnibox_focused {
-            self.draw_suggestions(pixels, width, height);
-        }
-        if self.menu.is_some() {
-            self.draw_menu(pixels, width, height);
-        }
-        let _ = h;
+        let state = self.chrome_state();
+        chrome::paint(pixels, width, height, &state);
     }
 
-    fn draw_tabs(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let caption = CAPTION_W * 3.0;
-        let plus = 28.0;
-        let available = (self.viewport_w - caption - plus - 16.0).max(40.0);
-        let tab_w = (available / self.tabs.len().max(1) as f32).clamp(40.0, 220.0);
-        for (index, tab) in self.tabs.iter().enumerate() {
-            let x = 8.0 + index as f32 * tab_w;
-            let active = index == self.active;
-            let fill = if active { TOOLBAR } else { TAB_STRIP };
-            fill_rect(pixels, width, height, x, 6.0, tab_w - 4.0, TAB_H - 6.0, fill);
-            if let Some(icon) = tab.webview.favicon() {
-                blit_favicon(pixels, width, height, x + 10.0, 14.0, &icon);
-            }
-            let title = if tab.title.is_empty() {
-                "New Tab"
-            } else {
-                &tab.title
-            };
-            self.draw_text(pixels, width, height, x + 30.0, 28.0, 13.0, INK, title);
-            self.draw_text(
-                pixels,
-                width,
-                height,
-                x + tab_w - 22.0,
-                26.0,
-                12.0,
-                MUTED,
-                "x",
-            );
-        }
-        let plus_x = 8.0 + self.tabs.len() as f32 * tab_w;
-        fill_rect(pixels, width, height, plus_x, 10.0, 24.0, 24.0, PLUS);
-        self.draw_text(pixels, width, height, plus_x + 6.0, 28.0, 16.0, INK, "+");
-        self.caption(pixels, width, height);
-    }
-
-    fn caption(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let y = 20.0;
-        let min_x = self.viewport_w - CAPTION_W * 3.0;
-        let max_x = self.viewport_w - CAPTION_W * 2.0;
-        let close_x = self.viewport_w - CAPTION_W;
-        self.draw_text(pixels, width, height, min_x + 16.0, y + 6.0, 14.0, ICON, "_");
-        self.draw_text(pixels, width, height, max_x + 16.0, y + 4.0, 12.0, ICON, "[]");
-        self.draw_text(pixels, width, height, close_x + 16.0, y + 4.0, 14.0, ICON, "x");
-    }
-
-    fn draw_toolbar(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let y = TAB_H + 7.0;
-        let back = self.tabs.get(self.active).is_some_and(|tab| tab.webview.can_go_back())
-            || self.overlay.is_some();
-        let forward = self
+    fn chrome_state(&self) -> chrome::State<'_> {
+        let tabs = self
             .tabs
-            .get(self.active)
-            .is_some_and(|tab| tab.webview.can_go_forward());
-        self.tool_button(pixels, width, height, 8.0, y, "<", back);
-        self.tool_button(pixels, width, height, 46.0, y, ">", forward);
-        self.tool_button(pixels, width, height, 84.0, y, "R", true);
-        let box_x = 130.0;
-        let box_w = (self.viewport_w - 220.0).max(80.0);
-        fill_rect(pixels, width, height, box_x, y, box_w, BTN, if self.omnibox_focused { ADDRESS } else { OMNIBOX });
-        let border = if self.omnibox_focused {
-            ADDRESS_FOCUS
+            .iter()
+            .map(|tab| chrome::TabPaint {
+                title: if tab.title.is_empty() { "New Tab".into() } else { tab.title.clone() },
+                favicon: tab.webview.favicon().map(|image| favicon_rgba(&image)),
+            })
+            .collect();
+        let secure = if self.omnibox.starts_with("https://") {
+            chrome::Secure::Https
+        } else if self.omnibox.starts_with("http://") {
+            chrome::Secure::Http
         } else {
-            ADDRESS_BORDER
+            chrome::Secure::Internal
         };
-        stroke_rect(pixels, width, height, box_x, y, box_w, BTN, border);
-        if let Some(tab) = self.tabs.get(self.active) {
-            if let Some(icon) = tab.webview.favicon() {
-                blit_favicon(pixels, width, height, box_x + 8.0, y + 9.0, &icon);
-            }
-        }
-        let text = if self.omnibox.is_empty() {
-            "Search or enter a URL"
-        } else {
-            &self.omnibox
-        };
-        let color = if self.omnibox.is_empty() && !self.omnibox_focused {
-            MUTED
-        } else {
-            INK
-        };
-        self.draw_text(pixels, width, height, box_x + 30.0, y + 22.0, 14.0, color, text);
-        let star_x = self.viewport_w - 78.0;
-        let starred = self.bookmarks.iter().any(|mark| mark.url == self.location());
-        self.draw_text(
-            pixels,
-            width,
-            height,
-            star_x,
-            y + 22.0,
-            16.0,
-            if starred { STAR } else { ICON },
-            "*",
-        );
-        self.draw_text(pixels, width, height, self.viewport_w - 40.0, y + 22.0, 16.0, ICON, "=");
-    }
-
-    fn tool_button(&self, pixels: &mut [u32], width: u32, height: u32, x: f32, y: f32, label: &str, on: bool) {
-        fill_rect(pixels, width, height, x, y, BTN, BTN, TOOLBAR);
-        self.draw_text(
-            pixels,
-            width,
-            height,
-            x + 10.0,
-            y + 22.0,
-            16.0,
-            if on { ICON } else { ICON_OFF },
-            label,
-        );
-    }
-
-    fn draw_bookmarks(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let y = TAB_H + TOOLBAR_H;
-        fill_rect(pixels, width, height, 0.0, y, self.viewport_w, BOOKMARK_BAR_H, TOOLBAR);
-        fill_rect(pixels, width, height, 0.0, y, self.viewport_w, 1.0, SEPARATOR);
-        let mut x = 12.0;
-        if self.bookmarks.is_empty() {
-            self.draw_text(pixels, width, height, x, y + 22.0, 13.0, MUTED, "Bookmarks");
-            return;
-        }
-        for mark in self.bookmarks.iter().take(8) {
-            let label = if mark.title.is_empty() {
-                mark.url.as_str()
-            } else {
-                mark.title.as_str()
-            };
-            self.draw_text(pixels, width, height, x, y + 22.0, 13.0, INK, label);
-            x += 140.0;
-        }
-    }
-
-    fn draw_progress(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let fraction = match self.tabs.get(self.active).map(|tab| tab.status) {
-            Some(LoadStatus::Started) => 0.3,
-            Some(LoadStatus::HeadParsed) => 0.7,
-            _ => return,
-        };
-        let y = self.content_top() - 3.0;
-        fill_rect(
-            pixels,
-            width,
-            height,
-            0.0,
-            y,
-            self.viewport_w * fraction,
-            3.0,
-            ADDRESS_FOCUS,
-        );
-    }
-
-    fn draw_find(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let x = self.viewport_w - 280.0;
-        let y = self.content_top() + 8.0;
-        fill_rect(pixels, width, height, x, y, 260.0, 32.0, ADDRESS);
-        stroke_rect(pixels, width, height, x, y, 260.0, 32.0, ADDRESS_BORDER);
-        let text = if self.find_query.is_empty() {
-            "Find"
-        } else {
-            &self.find_query
-        };
-        self.draw_text(pixels, width, height, x + 10.0, y + 21.0, 14.0, INK, text);
-    }
-
-    fn draw_suggestions(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let items = self.suggestions();
-        if items.is_empty() {
-            return;
-        }
-        let x = 130.0;
-        let mut y = TAB_H + 7.0 + BTN;
-        let w = (self.viewport_w - 220.0).max(80.0);
-        for (index, item) in items.iter().enumerate() {
-            let fill = if self.suggestion == Some(index) {
-                HOVER
-            } else {
-                ADDRESS
-            };
-            fill_rect(pixels, width, height, x, y, w, 28.0, fill);
-            self.draw_text(pixels, width, height, x + 10.0, y + 19.0, 13.0, INK, item);
-            y += 28.0;
-        }
-    }
-
-    fn draw_menu(&self, pixels: &mut [u32], width: u32, height: u32) {
-        let (x, y) = match self.menu {
-            Some(MenuKind::App) => (self.viewport_w - 220.0, TAB_H + TOOLBAR_H),
-            Some(MenuKind::Context) => (self.pointer.0, self.pointer.1),
-            None => return,
-        };
-        let items = menu_items(self.menu);
-        fill_rect(pixels, width, height, x, y, 200.0, items.len() as f32 * 28.0 + 8.0, ADDRESS);
-        stroke_rect(pixels, width, height, x, y, 200.0, items.len() as f32 * 28.0 + 8.0, ADDRESS_BORDER);
-        for (index, item) in items.iter().enumerate() {
-            self.draw_text(
-                pixels,
-                width,
-                height,
-                x + 12.0,
-                y + 24.0 + index as f32 * 28.0,
-                14.0,
-                INK,
-                item.label(),
+        let location = self.location();
+        let loading = self.overlay.is_none()
+            && matches!(
+                self.tabs.get(self.active).map(|tab| tab.status),
+                Some(LoadStatus::Started | LoadStatus::HeadParsed)
             );
+        let progress = match self.tabs.get(self.active).map(|tab| tab.status) {
+            Some(LoadStatus::Started) => 0.35,
+            Some(LoadStatus::HeadParsed) => 0.7,
+            _ => 0.0,
+        };
+        let menu = match self.menu {
+            Some(MenuKind::App) => Some(chrome::Popup::App),
+            Some(MenuKind::Context) => Some(chrome::Popup::Context),
+            None => None,
+        };
+        chrome::State {
+            width: self.viewport_w,
+            height: self.viewport_h,
+            tabs,
+            active: self.active,
+            omnibox: self.omnibox.clone(),
+            omnibox_focused: self.omnibox_focused,
+            cursor: self.cursor,
+            secure,
+            bookmarked: self.bookmarks.iter().any(|mark| mark.url == location),
+            bookmarks: self.bookmarks.iter().map(|mark| (mark.title.clone(), mark.url.clone())).collect(),
+            bookmarks_open: self.bookmarks_open,
+            can_back: self.tabs.get(self.active).is_some_and(|tab| tab.webview.can_go_back()),
+            can_forward: self.tabs.get(self.active).is_some_and(|tab| tab.webview.can_go_forward()),
+            loading,
+            progress,
+            link_status: self.link_status.clone(),
+            pointer: self.pointer,
+            pressed: self.pressed,
+            ntp: self.overlay == Some(Overlay::NewTab),
+            menu,
+            menu_labels: menu_items(self.menu).into_iter().map(|item| item.label().to_string()).collect(),
+            tab_search: self.tab_search,
+            extensions: self.extensions_open,
+            profile: self.profile_open,
+            suggestions: if self.omnibox_focused { self.suggestions() } else { Vec::new() },
+            suggestion: self.suggestion,
+            find_open: self.find_open,
+            find_query: self.find_query.clone(),
+            fonts: &self.fonts,
         }
     }
 
@@ -1376,82 +1291,46 @@ impl Browser {
     }
 
     fn click_target(&self, x: f32, y: f32) -> Click {
-        if let Some(kind) = self.menu {
-            if let Some(item) = menu_hit(kind, self.viewport_w, self.pointer, x, y) {
-                return match kind {
-                    MenuKind::App => Click::MenuItem(item),
-                    MenuKind::Context => Click::ContextItem(item),
-                };
-            }
-        }
-        if y < TAB_H {
-            return self.tab_hit(x);
-        }
-        if y < TAB_H + TOOLBAR_H {
-            return self.toolbar_hit(x, y);
-        }
-        let bar = self.bookmarks_open || !self.bookmarks.is_empty();
-        if bar && y < TAB_H + TOOLBAR_H + BOOKMARK_BAR_H {
-            let index = ((x - 12.0) / 140.0).floor() as isize;
-            if index >= 0 && (index as usize) < self.bookmarks.len() {
-                return Click::Bookmark(index as usize);
-            }
-            return Click::None;
-        }
-        if let Some(Overlay::Settings) = self.overlay {
-            let top = self.content_top() + 76.0;
-            if x >= 24.0 && x <= 384.0 && y >= top && y <= top + 36.0 {
-                return Click::Theme;
-            }
-        }
-        if y >= self.content_top() {
-            return Click::Content;
-        }
-        Click::None
-    }
-
-    fn tab_hit(&self, x: f32) -> Click {
-        if let Some(hit) = caption_hit(self.viewport_w, x) {
-            return Click::Frame(hit);
-        }
-        let caption = CAPTION_W * 3.0;
-        let plus = 28.0;
-        let available = (self.viewport_w - caption - plus - 16.0).max(40.0);
-        let tab_w = (available / self.tabs.len().max(1) as f32).clamp(40.0, 220.0);
-        let plus_x = 8.0 + self.tabs.len() as f32 * tab_w;
-        if x >= plus_x && x <= plus_x + 24.0 {
-            return Click::NewTab;
-        }
-        if x >= 8.0 && x < plus_x {
-            let index = ((x - 8.0) / tab_w).floor() as usize;
-            if index < self.tabs.len() {
-                let local = x - 8.0 - index as f32 * tab_w;
-                if local > tab_w - 26.0 {
-                    return Click::CloseTab(index);
+        let state = self.chrome_state();
+        match chrome::hit(&state, x, y) {
+            chrome::Hit::Drag => Click::Frame(FrameHit::Drag),
+            chrome::Hit::Minimize => Click::Frame(FrameHit::Minimize),
+            chrome::Hit::Maximize => Click::Frame(FrameHit::Maximize),
+            chrome::Hit::Close => Click::Frame(FrameHit::Close),
+            chrome::Hit::Tab(index) => Click::Tab(index),
+            chrome::Hit::CloseTab(index) => Click::CloseTab(index),
+            chrome::Hit::NewTab => Click::NewTab,
+            chrome::Hit::TabSearch => Click::TabSearch,
+            chrome::Hit::Back => Click::Back,
+            chrome::Hit::Forward => Click::Forward,
+            chrome::Hit::Reload => Click::Reload,
+            chrome::Hit::Home => Click::Home,
+            chrome::Hit::Omnibox => Click::Omnibox,
+            chrome::Hit::Star => Click::Star,
+            chrome::Hit::Extensions => Click::Extensions,
+            chrome::Hit::Profile => Click::Profile,
+            chrome::Hit::Menu => Click::MenuButton,
+            chrome::Hit::Bookmark(index) => Click::Bookmark(index),
+            chrome::Hit::MenuItem(index) => {
+                let items = menu_items(self.menu);
+                match self.menu {
+                    Some(MenuKind::Context) => items.get(index).copied().map(Click::ContextItem).unwrap_or(Click::None),
+                    _ => items.get(index).copied().map(Click::MenuItem).unwrap_or(Click::None),
                 }
-                return Click::Tab(index);
             }
+            chrome::Hit::Suggestion(index) => Click::Suggestion(index),
+            chrome::Hit::Panel => Click::Panel,
+            chrome::Hit::Content => {
+                if let Some(Overlay::Settings) = self.overlay {
+                    let top = self.content_top() + 76.0;
+                    if x >= 24.0 && x <= 384.0 && y >= top && y <= top + 36.0 {
+                        return Click::Theme;
+                    }
+                }
+                Click::Content
+            }
+            chrome::Hit::None => Click::None,
         }
-        Click::Frame(FrameHit::Drag)
-    }
-
-    fn toolbar_hit(&self, x: f32, _y: f32) -> Click {
-        if (8.0..42.0).contains(&x) {
-            return Click::Back;
-        }
-        if (46.0..80.0).contains(&x) {
-            return Click::Forward;
-        }
-        if (84.0..118.0).contains(&x) {
-            return Click::Reload;
-        }
-        if x >= self.viewport_w - 56.0 {
-            return Click::MenuButton;
-        }
-        if x >= self.viewport_w - 96.0 {
-            return Click::Star;
-        }
-        Click::Omnibox
     }
 }
 
@@ -1466,6 +1345,12 @@ enum Click {
     Reload,
     Omnibox,
     Star,
+    Home,
+    TabSearch,
+    Extensions,
+    Profile,
+    Suggestion(usize),
+    Panel,
     MenuButton,
     Bookmark(usize),
     MenuItem(Item),
@@ -1511,23 +1396,6 @@ fn menu_items(kind: Option<MenuKind>) -> Vec<Item> {
             Item::Bookmark,
         ],
         None => Vec::new(),
-    }
-}
-
-fn menu_hit(kind: MenuKind, viewport_w: f32, pointer: (f32, f32), x: f32, y: f32) -> Option<Item> {
-    let (origin_x, origin_y) = match kind {
-        MenuKind::App => (viewport_w - 220.0, TAB_H + TOOLBAR_H),
-        MenuKind::Context => pointer,
-    };
-    let items = menu_items(Some(kind));
-    if x < origin_x || x > origin_x + 200.0 || y < origin_y {
-        return None;
-    }
-    let index = ((y - origin_y - 4.0) / 28.0).floor() as isize;
-    if index >= 0 {
-        items.get(index as usize).copied()
-    } else {
-        None
     }
 }
 
@@ -1621,10 +1489,12 @@ fn overlay_for(url: &Url) -> Option<Overlay> {
         "history" => Some(Overlay::History),
         "downloads" => Some(Overlay::Downloads),
         "settings" => Some(Overlay::Settings),
+        "newtab" | "blank" | "mithu" | "home" => Some(Overlay::NewTab),
         _ => None,
     }
 }
 
+#[cfg(test)]
 fn caption_hit(width: f32, x: f32) -> Option<FrameHit> {
     if x >= width - CAPTION_W {
         Some(FrameHit::Close)
@@ -1649,14 +1519,7 @@ fn display_title(url: &str) -> String {
     }
 }
 
-fn blit_favicon(
-    pixels: &mut [u32],
-    width: u32,
-    height: u32,
-    x: f32,
-    y: f32,
-    image: &servo::Image,
-) {
+fn favicon_rgba(image: &servo::Image) -> (u32, u32, Vec<u8>) {
     let data = image.data();
     let stride = match image.format {
         PixelFormat::RGBA8 | PixelFormat::BGRA8 => 4,
@@ -1664,25 +1527,24 @@ fn blit_favicon(
         PixelFormat::KA8 => 2,
         PixelFormat::K8 => 1,
     };
-    for row in 0..image.height.min(16) {
-        for col in 0..image.width.min(16) {
+    let mut rgba = Vec::with_capacity((image.width * image.height * 4) as usize);
+    for row in 0..image.height {
+        for col in 0..image.width {
             let index = (row * image.width + col) as usize * stride;
             if index >= data.len() {
-                return;
+                return (image.width, image.height, rgba);
             }
-            let pixel = match image.format {
-                PixelFormat::RGBA8 | PixelFormat::RGB8 => {
-                    rgb(data[index] as u32, data[index + 1] as u32, data[index + 2] as u32)
-                }
-                PixelFormat::BGRA8 => {
-                    rgb(data[index + 2] as u32, data[index + 1] as u32, data[index] as u32)
-                }
-                PixelFormat::K8 => rgb(data[index] as u32, data[index] as u32, data[index] as u32),
-                PixelFormat::KA8 => rgb(data[index] as u32, data[index] as u32, data[index] as u32),
+            let (red, green, blue, alpha) = match image.format {
+                PixelFormat::RGBA8 => (data[index], data[index + 1], data[index + 2], data.get(index + 3).copied().unwrap_or(255)),
+                PixelFormat::BGRA8 => (data[index + 2], data[index + 1], data[index], data.get(index + 3).copied().unwrap_or(255)),
+                PixelFormat::RGB8 => (data[index], data[index + 1], data[index + 2], 255),
+                PixelFormat::K8 => (data[index], data[index], data[index], 255),
+                PixelFormat::KA8 => (data[index], data[index], data[index], data.get(index + 1).copied().unwrap_or(255)),
             };
-            put(pixels, width, height, x as i32 + col as i32, y as i32 + row as i32, pixel);
+            rgba.extend_from_slice(&[red, green, blue, alpha]);
         }
     }
+    (image.width, image.height, rgba)
 }
 
 fn blit_glyph(pixels: &mut [u32], width: u32, height: u32, pen: f32, baseline: f32, glyph: &Glyph, color: u32) {
@@ -1724,13 +1586,6 @@ fn stroke_rect(pixels: &mut [u32], width: u32, height: u32, x: f32, y: f32, w: f
     fill_rect(pixels, width, height, x, y + h - 1.0, w, 1.0, color);
     fill_rect(pixels, width, height, x, y, 1.0, h, color);
     fill_rect(pixels, width, height, x + w - 1.0, y, 1.0, h, color);
-}
-
-fn put(pixels: &mut [u32], width: u32, height: u32, x: i32, y: i32, color: u32) {
-    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
-        return;
-    }
-    pixels[(y as u32 * width + x as u32) as usize] = color;
 }
 
 fn blend(pixels: &mut [u32], width: u32, height: u32, x: i32, y: i32, color: u32, alpha: u8) {

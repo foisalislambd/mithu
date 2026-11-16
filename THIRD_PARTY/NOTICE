@@ -9,3 +9,11 @@ third_party/servo
 
 Mozilla Public License, Version 2.0
 https://mozilla.org/MPL/2.0/
+
+crates/shell/icons
+  Lucide icons from lucide-static 0.544.0
+  https://github.com/lucide-icons/lucide
+  ISC License, with portions derived from Feather (MIT).
+  The full text is in THIRD_PARTY/lucide-LICENSE.
+  SVGs are stored in the repo and rasterized at draw time.
+  No Google or Chrome logos or product marks are included.
