@@ -2016,6 +2016,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mithu-measure"
+version = "0.1.0"
+dependencies = [
+ "mithu-html",
+ "mithu-js",
+ "mithu-shell",
+]
+
+[[package]]
 name = "mithu-net"
 version = "0.1.0"
 dependencies = [

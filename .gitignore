@@ -4,6 +4,9 @@ chromium/
 # Rust build output
 target/
 
+# Python cache from the measurement sampler
+__pycache__/
+
 # Local environment and editor files
 .env
 .env.*

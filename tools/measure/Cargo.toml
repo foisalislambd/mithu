@@ -1,0 +1,21 @@
+[package]
+name = "mithu-measure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "WPT testharness and test262 runners for the Mithu host"
+
+[[bin]]
+name = "mithu-measure"
+path = "src/main.rs"
+
+[dependencies]
+mithu-html = { path = "../../crates/html" }
+mithu-js = { path = "../../crates/js" }
+mithu-shell = { path = "../../crates/shell" }
+
+[lints]
+workspace = true
