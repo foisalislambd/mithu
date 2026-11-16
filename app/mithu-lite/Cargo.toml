@@ -1,0 +1,22 @@
+[package]
+name = "mithu-lite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Mithu Lite: the shared frame around the OS system webview"
+
+[dependencies]
+mithu-text = { path = "../../crates/text" }
+mithu-ui = { path = "../../crates/ui" }
+softbuffer = "0.4"
+winit = "0.30"
+wry = "0.57"
+
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
+gtk = "0.18"
+
+[lints]
+workspace = true
