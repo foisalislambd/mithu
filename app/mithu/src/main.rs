@@ -12,13 +12,24 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 fn main() {
-    let run = std::thread::Builder::new()
-        .name("mithu".into())
-        .stack_size(32 * 1024 * 1024)
-        .spawn(run)
-        .expect("start mithu");
-    if let Err(payload) = run.join() {
-        std::panic::resume_unwind(payload);
+    install_crash_hook();
+    // Windows rejects a winit event loop that is not on the main thread, and
+    // the process then exits as soon as the console appears. The other
+    // platforms keep a 32MB worker because their default main stack is small
+    // and winit allows the loop off-thread. The Windows stack reserve is set
+    // in build.rs.
+    #[cfg(windows)]
+    run();
+    #[cfg(not(windows))]
+    {
+        let worker = std::thread::Builder::new()
+            .name("mithu".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(run)
+            .expect("start mithu");
+        if let Err(payload) = worker.join() {
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
@@ -31,8 +42,18 @@ fn run() {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(10);
             let url = args.next().unwrap_or_else(|| "about:blank".to_string());
-            let tabs = args.next().and_then(|value| value.parse().ok()).unwrap_or(1);
+            let tabs = args
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1);
             hold(seconds, &url, tabs);
+            return;
+        }
+        if first == "--smoke-test" {
+            let url = args.next().unwrap_or_else(|| "about:blank".to_string());
+            if let Err(error) = smoke(&url) {
+                report_fatal(&error);
+            }
             return;
         }
         if first == "--screenshot" {
@@ -47,12 +68,35 @@ fn run() {
         let event_loop = event_loop();
         let mut app = App::new();
         app.browser.navigate(&first);
-        event_loop.run_app(&mut app).expect("run the window");
+        if let Err(error) = event_loop.run_app(&mut app) {
+            report_fatal(&format!("could not run the window: {error}"));
+        }
         return;
     }
     let event_loop = event_loop();
     let mut app = App::new();
-    event_loop.run_app(&mut app).expect("run the window");
+    if let Err(error) = event_loop.run_app(&mut app) {
+        report_fatal(&format!("could not run the window: {error}"));
+    }
+}
+
+fn smoke(url: &str) -> Result<(), String> {
+    NO_DIALOG.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut browser = mithu_shell::Browser::try_new()?;
+    browser.resize(800.0, 600.0);
+    if url != "about:blank" {
+        browser.navigate(url);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(20) && !browser.load_settled() {
+            browser.pump_scripts(Duration::from_millis(50));
+        }
+    }
+    let frame = browser.render(800.0, 600.0);
+    if frame.iter().all(|pixel| *pixel == 0) {
+        return Err("smoke test painted an empty frame".into());
+    }
+    println!("smoke ok");
+    Ok(())
 }
 
 fn hold(seconds: u64, url: &str, tabs: usize) {
@@ -79,7 +123,10 @@ fn event_loop() -> EventLoop<()> {
         use winit::platform::x11::EventLoopBuilderExtX11;
         builder.with_any_thread(true);
     }
-    builder.build().expect("create the event loop")
+    match builder.build() {
+        Ok(loop_) => loop_,
+        Err(error) => report_fatal(&format!("could not create the event loop: {error}")),
+    }
 }
 
 fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
@@ -167,14 +214,8 @@ fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
 fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut bytes);
-    image::ImageEncoder::write_image(
-        encoder,
-        rgb,
-        width,
-        height,
-        image::ExtendedColorType::Rgb8,
-    )
-    .map_err(|error| error.to_string())?;
+    image::ImageEncoder::write_image(encoder, rgb, width, height, image::ExtendedColorType::Rgb8)
+        .map_err(|error| error.to_string())?;
     Ok(bytes)
 }
 
@@ -305,27 +346,15 @@ impl ApplicationHandler for App {
             .with_inner_size(LogicalSize::new(1200.0, 800.0));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
-            Err(error) => {
-                eprintln!("mithu: could not open a window: {error}");
-                event_loop.exit();
-                return;
-            }
+            Err(error) => report_fatal(&format!("could not open a window: {error}")),
         };
         let context = match softbuffer::Context::new(window.clone()) {
             Ok(context) => context,
-            Err(error) => {
-                eprintln!("mithu: could not create a framebuffer: {error}");
-                event_loop.exit();
-                return;
-            }
+            Err(error) => report_fatal(&format!("could not create a framebuffer: {error}")),
         };
         let surface = match softbuffer::Surface::new(&context, window.clone()) {
             Ok(surface) => surface,
-            Err(error) => {
-                eprintln!("mithu: could not create a surface: {error}");
-                event_loop.exit();
-                return;
-            }
+            Err(error) => report_fatal(&format!("could not create a surface: {error}")),
         };
         let size = window.inner_size();
         self.browser
@@ -529,8 +558,8 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let elapsed = self.timer_mark.elapsed().as_millis() as u64;
         self.timer_mark = Instant::now();
-        let scripts = self.browser.pump_scripts(Duration::from_millis(12))
-            || self.browser.chrome_animating();
+        let scripts =
+            self.browser.pump_scripts(Duration::from_millis(12)) || self.browser.chrome_animating();
         // Drive frames while scripts are still loading. A fromTo that starts
         // in an effect would otherwise sit at opacity 0 until the bundles end.
         if self.browser.animation_frames_pending() {
@@ -566,4 +595,107 @@ impl ApplicationHandler for App {
             Instant::now() + Duration::from_millis(wait),
         ));
     }
+}
+
+fn install_crash_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic");
+        let loc = info
+            .location()
+            .map(|location| format!(" ({location})"))
+            .unwrap_or_default();
+        record(&format!("panic: {payload}{loc}"));
+    }));
+}
+
+fn report_fatal(message: &str) -> ! {
+    record(message);
+    std::process::exit(1);
+}
+
+fn record(message: &str) {
+    let line = format!("{message}\n");
+    eprintln!("mithu: {message}");
+    if let Some(path) = log_path() {
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(line.as_bytes())
+            });
+    }
+    show_dialog(message);
+}
+
+fn log_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")?;
+        Some(
+            std::path::PathBuf::from(base)
+                .join("Mithu")
+                .join("mithu.log"),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(
+            std::path::PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("Mithu")
+                .join("mithu.log"),
+        )
+    }
+}
+
+static NO_DIALOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn show_dialog(message: &str) {
+    if NO_DIALOG.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("MITHU_NO_DIALOG").is_some()
+        || std::env::var_os("CI").is_some()
+    {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        // Timeout so a fatal error cannot sit forever on a hidden desktop.
+        let script = format!(
+            "$w = New-Object -ComObject WScript.Shell; [void]$w.Popup({}, 20, 'Mithu', 16)",
+            powershell_string(message)
+        );
+        let _ = std::process::Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(script)
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = message;
+    }
+}
+
+#[cfg(windows)]
+fn powershell_string(message: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in message.chars() {
+        match ch {
+            '"' => out.push_str("\"\""),
+            '\r' | '\n' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }

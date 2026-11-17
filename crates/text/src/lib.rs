@@ -1,8 +1,8 @@
 //! Text measurement and glyph rasterization.
 //!
-//! Vector faces come from the system font directories. Bengali falls back to
-//! Noto Sans Bengali when the primary face has no glyph. A bitmap advance is
-//! used only when no face can be loaded.
+//! Noto Sans and Noto Sans Bengali are compiled into the binary. System font
+//! files are consulted only when a character is missing from those faces. A
+//! solid bitmap is used only when no face can be loaded at all.
 
 use std::path::Path;
 
@@ -74,43 +74,29 @@ pub struct FontBook {
 }
 
 impl FontBook {
-    pub fn load() -> Self {
+    /// Faces compiled into the binary. This does not read the font directories.
+    pub fn bundled() -> Self {
+        let sans = face_from_bytes(include_bytes!("../fonts/NotoSans-Regular.ttf"));
         Self {
-            sans: load_face(&[
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-            ]),
-            bold: load_face(&[
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-            ]),
-            mono: load_face(&[
-                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-                "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-            ]),
-            bengali: load_face(&["/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf"]),
-            fallbacks: [
-                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansArmenian-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansGeorgian-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            ]
-            .into_iter()
-            .filter_map(|path| match load_face(&[path]) {
-                face @ Face::Vector(_) => Some(face),
-                Face::Fallback => None,
-            })
-            .collect(),
+            sans,
+            bold: face_from_bytes(include_bytes!("../fonts/NotoSans-Bold.ttf")),
+            // The UI does not ship a separate mono face. Regular Noto Sans
+            // still has a real outline for every Latin letter.
+            mono: face_from_bytes(include_bytes!("../fonts/NotoSans-Regular.ttf")),
+            bengali: face_from_bytes(include_bytes!("../fonts/NotoSansBengali-Regular.ttf")),
+            fallbacks: Vec::new(),
             custom: Vec::new(),
         }
+    }
+
+    pub fn load() -> Self {
+        let mut book = Self::bundled();
+        for path in SYSTEM_FALLBACKS {
+            if let face @ Face::Vector(_) = load_face(&[path]) {
+                book.fallbacks.push(face);
+            }
+        }
+        book
     }
 
     /// Register a decoded TrueType or OpenType face under `family`.
@@ -308,6 +294,48 @@ impl MeasureText for FontBook {
     }
 }
 
+const SYSTEM_FALLBACKS: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansArmenian-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansGeorgian-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    "/Library/Fonts/Arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/segoeuib.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/consola.ttf",
+    "C:/Windows/Fonts/malgun.ttf",
+    "C:/Windows/Fonts/msgothic.ttc",
+    "C:/Windows/Fonts/nirmala.ttf",
+];
+
+fn face_from_bytes(bytes: &[u8]) -> Face {
+    let bytes = bytes.to_vec();
+    match Font::from_bytes(bytes.clone(), fontdue::FontSettings::default()) {
+        Ok(font) => Face::Vector(VectorFace { font, bytes }),
+        Err(_) => Face::Fallback,
+    }
+}
+
 fn load_face(paths: &[&str]) -> Face {
     for path in paths {
         if !Path::new(path).is_file() {
@@ -487,18 +515,45 @@ fn decode_woff(bytes: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn outlined(glyph: &Glyph) {
+        assert!(glyph.width > 0 && glyph.height > 0, "missing bitmap");
+        assert!(
+            glyph.coverage.iter().any(|coverage| *coverage == 0),
+            "glyph is a solid box (.notdef)"
+        );
+        assert!(glyph.coverage.iter().any(|coverage| *coverage > 0));
+    }
+
+    #[test]
+    fn bundled_latin_is_not_notdef_without_system_fonts() {
+        let fonts = FontBook::bundled();
+        let glyphs = fonts.shape("Mithu", 32.0, false, false, "");
+        assert_eq!(glyphs.len(), "Mithu".chars().count());
+        for glyph in &glyphs {
+            outlined(glyph);
+        }
+        let bold = fonts.shape("Bookmarks", 13.0, true, false, "");
+        assert!(!bold.is_empty());
+        for glyph in &bold {
+            outlined(glyph);
+        }
+        let advances: Vec<i32> = glyphs
+            .iter()
+            .map(|glyph| glyph.advance.round() as i32)
+            .collect();
+        assert!(
+            advances.iter().any(|advance| *advance != advances[0]),
+            "every letter had the same advance, which is the bitmap fallback"
+        );
+    }
+
     #[test]
     fn bengali_conjunct_shapes_to_fewer_glyphs() {
-        // The face is in the repo. CI images do not ship a Bengali font, and
-        // FontBook then draws one box per character, so ক্ষ stays three glyphs.
-        let mut fonts = FontBook::load();
-        fonts.add_family(
-            "Noto Sans Bengali",
-            include_bytes!("../fonts/NotoSansBengali-Regular.ttf"),
-        );
-        assert!(fonts.has_family("Noto Sans Bengali"));
+        // The face is in the repo. A missing Bengali font draws one box per
+        // character, so ক্ষ stays three glyphs.
+        let fonts = FontBook::bundled();
         let text = "ক্ষ";
-        let glyphs = fonts.shape(text, 16.0, false, false, "Noto Sans Bengali");
+        let glyphs = fonts.shape(text, 16.0, false, false, "");
         assert!(
             glyphs.len() < text.chars().count(),
             "shaped {} chars {}",

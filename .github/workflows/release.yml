@@ -66,7 +66,7 @@ jobs:
             binary: target/release/mithu
           - os: windows-latest
             artifact: mithu-windows-x64
-            binary: target/release/mithu.exe
+            binary: target/release/mithu-windows-x64.zip
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,6 +83,17 @@ jobs:
             gstreamer1.0-plugins-good libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Build the Servo browser
         run: cargo build -p mithu --release
+      - name: Package Windows runtime and smoke-test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pwsh -NoProfile -File tools/package-windows.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:MITHU_NO_DIALOG = "1"
+          $exe = Join-Path (Get-Location) "target\release\mithu-windows\mithu.exe"
+          & $exe --smoke-test about:blank
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -165,11 +176,12 @@ jobs:
           mkdir -p release
           cp dist/mithu-linux-x64/mithu release/mithu-linux-x64
           cp dist/mithu-macos/mithu release/mithu-macos
-          cp dist/mithu-windows-x64/mithu.exe release/mithu-windows-x64.exe
+          cp dist/mithu-windows-x64/mithu-windows-x64.zip release/mithu-windows-x64.zip
           cp dist/mithu-lite-linux-x64/mithu-lite release/mithu-lite-linux-x64
           cp dist/mithu-lite-macos/mithu-lite release/mithu-lite-macos
           cp dist/mithu-lite-windows-x64/mithu-lite.exe release/mithu-lite-windows-x64.exe
           chmod +x release/mithu-linux-x64 release/mithu-macos release/mithu-lite-linux-x64 release/mithu-lite-macos
+          (cd release && sha256sum -- * > SHA256SUMS)
           prerelease=()
           case "$VERSION" in
             *-*) prerelease=(--prerelease) ;;

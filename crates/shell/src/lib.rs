@@ -5,27 +5,26 @@
 //! crate copies Servo's software framebuffer into the content rectangle.
 //! No product logo is drawn.
 
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dpi::PhysicalSize;
 use mithu_text::{FontBook, Glyph, glyph_top};
 use servo::{
-    Code, DevicePoint, InputEvent, ImeEvent, Key,
-    KeyState, KeyboardEvent, LoadStatus, Location, Modifiers, MouseButton, MouseButtonAction,
-    MouseButtonEvent, MouseMoveEvent, NamedKey, PixelFormat, RenderingContext, Servo,
-    ServoBuilder, SoftwareRenderingContext, Theme, WebView, WebViewBuilder, WebViewDelegate,
-    WebViewPoint, WheelDelta, WheelEvent, WheelMode,
+    Code, DevicePoint, ImeEvent, InputEvent, Key, KeyState, KeyboardEvent, LoadStatus, Location,
+    Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
+    PixelFormat, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext, Theme, WebView,
+    WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use url::Url;
 
-pub use mithu_ui::{
-    rgb, ADDRESS, ADDRESS_BORDER, BOOKMARK_BAR_H, CAPTION_W, INK, MUTED, PAGE, TAB_H, TOOLBAR_H,
-};
 use mithu_ui::chrome;
+pub use mithu_ui::{
+    ADDRESS, ADDRESS_BORDER, BOOKMARK_BAR_H, CAPTION_W, INK, MUTED, PAGE, TAB_H, TOOLBAR_H, rgb,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameHit {
@@ -53,11 +52,7 @@ impl WebViewDelegate for Delegate {
         self.frame.store(true, Ordering::SeqCst);
     }
 
-    fn request_create_new(
-        &self,
-        _parent: WebView,
-        request: servo::CreateNewWebViewRequest,
-    ) {
+    fn request_create_new(&self, _parent: WebView, request: servo::CreateNewWebViewRequest) {
         let size = PhysicalSize::new(800, 600);
         let Ok(context) = SoftwareRenderingContext::new(size) else {
             return;
@@ -67,7 +62,9 @@ impl WebViewDelegate for Delegate {
         let delegate: Rc<dyn WebViewDelegate> = Rc::new(self.clone());
         let webview = request.builder(dyn_ctx).delegate(delegate).build();
         webview.show();
-        self.opened.borrow_mut().push(PendingTab { webview, context });
+        self.opened
+            .borrow_mut()
+            .push(PendingTab { webview, context });
     }
 }
 
@@ -138,6 +135,13 @@ pub struct Browser {
 
 impl Browser {
     pub fn new() -> Self {
+        match Self::try_new() {
+            Ok(browser) => browser,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    pub fn try_new() -> Result<Self, String> {
         install_crypto();
         let frame = Rc::new(AtomicBool::new(false));
         let opened = Rc::new(RefCell::new(Vec::new()));
@@ -187,11 +191,11 @@ impl Browser {
             frame,
             status: String::new(),
         };
-        browser.open_tab(start_url());
+        browser.open_tab(start_url())?;
         browser.overlay = Some(Overlay::NewTab);
         browser.omnibox = "about:newtab".into();
         browser.spin();
-        browser
+        Ok(browser)
     }
 
     pub fn set_cooperative_scripts(&mut self, _on: bool) {}
@@ -326,7 +330,10 @@ impl Browser {
     }
 
     pub fn new_tab(&mut self) {
-        self.open_tab(Url::parse("about:blank").expect("about:blank"));
+        if let Err(error) = self.open_tab(Url::parse("about:blank").expect("about:blank")) {
+            self.status = error;
+            return;
+        }
         self.overlay = Some(Overlay::NewTab);
         self.omnibox = "about:newtab".into();
         self.omnibox_focused = false;
@@ -591,9 +598,10 @@ impl Browser {
                 self.tab_search = false;
                 self.active = index;
                 let keep_ntp = self.overlay == Some(Overlay::NewTab)
-                    && self.tabs.get(index).is_some_and(|tab| {
-                        tab.url.is_empty() || tab.url.starts_with("about:")
-                    });
+                    && self
+                        .tabs
+                        .get(index)
+                        .is_some_and(|tab| tab.url.is_empty() || tab.url.starts_with("about:"));
                 if !keep_ntp {
                     self.overlay = None;
                 }
@@ -634,7 +642,11 @@ impl Browser {
                 self.bump();
             }
             Click::MenuButton => {
-                self.menu = if self.menu == Some(MenuKind::App) { None } else { Some(MenuKind::App) };
+                self.menu = if self.menu == Some(MenuKind::App) {
+                    None
+                } else {
+                    Some(MenuKind::App)
+                };
                 self.tab_search = false;
                 self.extensions_open = false;
                 self.profile_open = false;
@@ -670,9 +682,13 @@ impl Browser {
                 if let Some((px, py)) = self.content_point(x, y) {
                     let point = WebViewPoint::Device(DevicePoint::new(px, py));
                     self.tabs[self.active].webview.set_focused(true);
-                    self.tabs[self.active].webview.notify_input_event(InputEvent::MouseButton(
-                        MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Primary, point),
-                    ));
+                    self.tabs[self.active]
+                        .webview
+                        .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                            MouseButtonAction::Down,
+                            MouseButton::Primary,
+                            point,
+                        )));
                     self.pressed_in_page = true;
                 }
             }
@@ -777,7 +793,11 @@ impl Browser {
             std::thread::sleep(Duration::from_millis(1));
         }
         self.frame.store(false, Ordering::SeqCst);
-        !self.load_settled() || self.tabs.get(self.active).is_some_and(|tab| tab.webview.animating())
+        !self.load_settled()
+            || self
+                .tabs
+                .get(self.active)
+                .is_some_and(|tab| tab.webview.animating())
     }
 
     pub fn animation_frames_pending(&self) -> bool {
@@ -826,11 +846,9 @@ impl Browser {
         pixels
     }
 
-    fn open_tab(&mut self, url: Url) {
+    fn open_tab(&mut self, url: Url) -> Result<(), String> {
         let size = self.content_physical();
-        let context = Rc::new(
-            SoftwareRenderingContext::new(size).expect("software rendering context"),
-        );
+        let context = Rc::new(software_context(size)?);
         let _ = context.make_current();
         let dyn_ctx: Rc<dyn RenderingContext> = context.clone();
         let delegate: Rc<dyn WebViewDelegate> = Rc::new(self.delegate.clone());
@@ -853,6 +871,7 @@ impl Browser {
             zoom: 1.0,
         });
         self.active = self.tabs.len() - 1;
+        Ok(())
     }
 
     fn adopt_pending(&mut self) {
@@ -1128,7 +1147,11 @@ impl Browser {
                 if index + 3 >= raw.len() {
                     break;
                 }
-                let pixel = rgb(raw[index] as u32, raw[index + 1] as u32, raw[index + 2] as u32);
+                let pixel = rgb(
+                    raw[index] as u32,
+                    raw[index + 1] as u32,
+                    raw[index + 2] as u32,
+                );
                 pixels[(dest_y as u32 * width + x as u32) as usize] = pixel;
             }
         }
@@ -1136,7 +1159,16 @@ impl Browser {
 
     fn draw_overlay(&self, pixels: &mut [u32], width: u32, height: u32) {
         let top = self.content_top();
-        fill_rect(pixels, width, height, 0.0, top, self.viewport_w, self.viewport_h - top, PAGE);
+        fill_rect(
+            pixels,
+            width,
+            height,
+            0.0,
+            top,
+            self.viewport_w,
+            self.viewport_h - top,
+            PAGE,
+        );
         let mut y = top + 36.0;
         match self.overlay {
             Some(Overlay::History) => {
@@ -1195,7 +1227,11 @@ impl Browser {
             .tabs
             .iter()
             .map(|tab| chrome::TabPaint {
-                title: if tab.title.is_empty() { "New Tab".into() } else { tab.title.clone() },
+                title: if tab.title.is_empty() {
+                    "New Tab".into()
+                } else {
+                    tab.title.clone()
+                },
                 favicon: tab.webview.favicon().map(|image| favicon_rgba(&image)),
             })
             .collect();
@@ -1232,10 +1268,20 @@ impl Browser {
             cursor: self.cursor,
             secure,
             bookmarked: self.bookmarks.iter().any(|mark| mark.url == location),
-            bookmarks: self.bookmarks.iter().map(|mark| (mark.title.clone(), mark.url.clone())).collect(),
+            bookmarks: self
+                .bookmarks
+                .iter()
+                .map(|mark| (mark.title.clone(), mark.url.clone()))
+                .collect(),
             bookmarks_open: self.bookmarks_open,
-            can_back: self.tabs.get(self.active).is_some_and(|tab| tab.webview.can_go_back()),
-            can_forward: self.tabs.get(self.active).is_some_and(|tab| tab.webview.can_go_forward()),
+            can_back: self
+                .tabs
+                .get(self.active)
+                .is_some_and(|tab| tab.webview.can_go_back()),
+            can_forward: self
+                .tabs
+                .get(self.active)
+                .is_some_and(|tab| tab.webview.can_go_forward()),
             loading,
             progress,
             link_status: self.link_status.clone(),
@@ -1243,11 +1289,18 @@ impl Browser {
             pressed: self.pressed,
             ntp: self.overlay == Some(Overlay::NewTab),
             menu,
-            menu_labels: menu_items(self.menu).into_iter().map(|item| item.label().to_string()).collect(),
+            menu_labels: menu_items(self.menu)
+                .into_iter()
+                .map(|item| item.label().to_string())
+                .collect(),
             tab_search: self.tab_search,
             extensions: self.extensions_open,
             profile: self.profile_open,
-            suggestions: if self.omnibox_focused { self.suggestions() } else { Vec::new() },
+            suggestions: if self.omnibox_focused {
+                self.suggestions()
+            } else {
+                Vec::new()
+            },
             suggestion: self.suggestion,
             find_open: self.find_open,
             find_query: self.find_query.clone(),
@@ -1255,7 +1308,17 @@ impl Browser {
         }
     }
 
-    fn draw_text(&self, pixels: &mut [u32], width: u32, height: u32, x: f32, baseline: f32, size: f32, color: u32, text: &str) {
+    fn draw_text(
+        &self,
+        pixels: &mut [u32],
+        width: u32,
+        height: u32,
+        x: f32,
+        baseline: f32,
+        size: f32,
+        color: u32,
+        text: &str,
+    ) {
         let glyphs = self.fonts.shape(text, size, false, false, "");
         let mut pen = x;
         let max_x = self.viewport_w - 8.0;
@@ -1292,8 +1355,16 @@ impl Browser {
             chrome::Hit::MenuItem(index) => {
                 let items = menu_items(self.menu);
                 match self.menu {
-                    Some(MenuKind::Context) => items.get(index).copied().map(Click::ContextItem).unwrap_or(Click::None),
-                    _ => items.get(index).copied().map(Click::MenuItem).unwrap_or(Click::None),
+                    Some(MenuKind::Context) => items
+                        .get(index)
+                        .copied()
+                        .map(Click::ContextItem)
+                        .unwrap_or(Click::None),
+                    _ => items
+                        .get(index)
+                        .copied()
+                        .map(Click::MenuItem)
+                        .unwrap_or(Click::None),
                 }
             }
             chrome::Hit::Suggestion(index) => Click::Suggestion(index),
@@ -1426,6 +1497,29 @@ fn euclid_scale() -> euclid::Scale<f32, servo::DeviceIndependentPixel, servo::De
     euclid::Scale::new(1.0)
 }
 
+/// Offscreen page context. Servo paints into this and Mithu copies the
+/// pixels into the window, so the window itself is never a GL surface.
+/// The first attempt is the requested size. If that context cannot be
+/// created, a 64×64 surface is created and resized — the software fallback
+/// when the GPU context fails.
+fn software_context(size: PhysicalSize<u32>) -> Result<SoftwareRenderingContext, String> {
+    let size = PhysicalSize::new(size.width.max(1), size.height.max(1));
+    match SoftwareRenderingContext::new(size) {
+        Ok(context) => Ok(context),
+        Err(first) => match SoftwareRenderingContext::new(PhysicalSize::new(64, 64)) {
+            Ok(context) => {
+                context.resize(size);
+                eprintln!("mithu: OpenGL context failed ({first:?}); using a software surface");
+                Ok(context)
+            }
+            Err(second) => Err(format!(
+                "the page renderer could not create an OpenGL context ({first:?}). \
+                 The software surface fallback failed too ({second:?})"
+            )),
+        },
+    }
+}
+
 fn start_url() -> Url {
     Url::parse("about:blank").expect("about:blank")
 }
@@ -1488,11 +1582,26 @@ fn favicon_rgba(image: &servo::Image) -> (u32, u32, Vec<u8>) {
                 return (image.width, image.height, rgba);
             }
             let (red, green, blue, alpha) = match image.format {
-                PixelFormat::RGBA8 => (data[index], data[index + 1], data[index + 2], data.get(index + 3).copied().unwrap_or(255)),
-                PixelFormat::BGRA8 => (data[index + 2], data[index + 1], data[index], data.get(index + 3).copied().unwrap_or(255)),
+                PixelFormat::RGBA8 => (
+                    data[index],
+                    data[index + 1],
+                    data[index + 2],
+                    data.get(index + 3).copied().unwrap_or(255),
+                ),
+                PixelFormat::BGRA8 => (
+                    data[index + 2],
+                    data[index + 1],
+                    data[index],
+                    data.get(index + 3).copied().unwrap_or(255),
+                ),
                 PixelFormat::RGB8 => (data[index], data[index + 1], data[index + 2], 255),
                 PixelFormat::K8 => (data[index], data[index], data[index], 255),
-                PixelFormat::KA8 => (data[index], data[index], data[index], data.get(index + 1).copied().unwrap_or(255)),
+                PixelFormat::KA8 => (
+                    data[index],
+                    data[index],
+                    data[index],
+                    data.get(index + 1).copied().unwrap_or(255),
+                ),
             };
             rgba.extend_from_slice(&[red, green, blue, alpha]);
         }
@@ -1500,7 +1609,15 @@ fn favicon_rgba(image: &servo::Image) -> (u32, u32, Vec<u8>) {
     (image.width, image.height, rgba)
 }
 
-fn blit_glyph(pixels: &mut [u32], width: u32, height: u32, pen: f32, baseline: f32, glyph: &Glyph, color: u32) {
+fn blit_glyph(
+    pixels: &mut [u32],
+    width: u32,
+    height: u32,
+    pen: f32,
+    baseline: f32,
+    glyph: &Glyph,
+    color: u32,
+) {
     let left = (pen + glyph.x_offset).round() as i32 + glyph.xmin;
     let top = glyph_top(baseline, glyph);
     for row in 0..glyph.height {
@@ -1522,7 +1639,16 @@ fn blit_glyph(pixels: &mut [u32], width: u32, height: u32, pen: f32, baseline: f
     }
 }
 
-fn fill_rect(pixels: &mut [u32], width: u32, height: u32, x: f32, y: f32, w: f32, h: f32, color: u32) {
+fn fill_rect(
+    pixels: &mut [u32],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: u32,
+) {
     let x0 = x.round().max(0.0) as u32;
     let y0 = y.round().max(0.0) as u32;
     let x1 = (x + w).round().clamp(0.0, width as f32) as u32;
@@ -1534,7 +1660,16 @@ fn fill_rect(pixels: &mut [u32], width: u32, height: u32, x: f32, y: f32, w: f32
     }
 }
 
-fn stroke_rect(pixels: &mut [u32], width: u32, height: u32, x: f32, y: f32, w: f32, h: f32, color: u32) {
+fn stroke_rect(
+    pixels: &mut [u32],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: u32,
+) {
     fill_rect(pixels, width, height, x, y, w, 1.0, color);
     fill_rect(pixels, width, height, x, y + h - 1.0, w, 1.0, color);
     fill_rect(pixels, width, height, x, y, 1.0, h, color);

@@ -95,15 +95,21 @@ These are the gaps that are real today.
 
 Release files are attached to [GitHub Releases](https://github.com/foisalislambd/mithu/releases) when a version is published. Nothing is published until `VERSION.md` is greater than the newest `v*` tag and the workflow on `main` succeeds. Until that first release, build from source.
 
-Each release has six files:
+Each release has these files, plus `SHA256SUMS`:
 
 | Platform | Full (Servo) | Lite |
 | --- | --- | --- |
 | Linux x86_64 | `mithu-linux-x64` | `mithu-lite-linux-x64` |
 | macOS | `mithu-macos` | `mithu-lite-macos` |
-| Windows x64 | `mithu-windows-x64.exe` | `mithu-lite-windows-x64.exe` |
+| Windows x64 | `mithu-windows-x64.zip` | `mithu-lite-windows-x64.exe` |
 
-Mark the Linux and macOS files executable (`chmod +x`) and run them. On Linux, Lite still needs WebKitGTK 4.1 at runtime (`libwebkit2gtk-4.1-0`) and `GDK_BACKEND=x11`. Windows Lite needs the WebView2 runtime, which current Windows already includes. The full binary does not need WebKit.
+`mithu-windows-x64.zip` holds `mithu.exe`, the Visual C++ runtime DLLs it links (`VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `MSVCP140.dll`), and a short readme. Unzip the folder and run `mithu.exe` from that folder. Servo's resources are compiled into the executable. Check a download with `sha256sum -c SHA256SUMS` from the release directory (on Windows, `Get-FileHash`).
+
+The binaries are not code-signed. Windows SmartScreen and Defender warn on an unsigned program downloaded from the internet because the file is new and carries a Mark-of-the-Web, not because a scanner found a payload. Signing later needs an Authenticode certificate for Windows and an Apple Developer ID plus notarization for macOS, stored as GitHub Actions secrets. Those secrets are not in this repository, so the release stays unsigned.
+
+Mark the Linux and macOS files executable (`chmod +x`) and run them. On Linux, Lite still needs WebKitGTK 4.1 at runtime (`libwebkit2gtk-4.1-0`) and `GDK_BACKEND=x11`. Windows Lite needs the WebView2 runtime, which current Windows already includes. The full binary does not need WebKit. If the Windows window closes at once, the reason is in `%LOCALAPPDATA%\Mithu\mithu.log`.
+
+The tab strip, address bar, and new-tab page are drawn with Noto Sans and Noto Sans Bengali embedded in the binary (SIL Open Font License, see `crates/text/fonts/OFL.txt`). System fonts are used only for characters those faces do not cover.
 
 ## Build from source
 
@@ -221,7 +227,7 @@ The version is the first line of [VERSION.md](VERSION.md). Right now that line i
 2. Run `python3 tools/version.py check`. It fails if they differ. CI runs that check too.
 3. Push to `main`.
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) reads `VERSION.md` and compares it with the newest `v*` tag. It builds `mithu` and `mithu-lite` for Linux, macOS, and Windows only when the version is strictly greater and `v<version>` does not already exist. It then creates that tag and a GitHub Release with the six artifacts and generated notes. An equal or lower version skips with success, so a normal push does not publish again. The Actions "Run workflow" button uses the same gate. The Lite job checks out the Servo submodule so Cargo can resolve `mithu-shell`, then compiles only `mithu-lite`. If any build fails, that job cancels the rest of the run. The publish job runs only when the full build and the Lite build both succeed.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) reads `VERSION.md` and compares it with the newest `v*` tag. It builds `mithu` and `mithu-lite` for Linux, macOS, and Windows only when the version is strictly greater and `v<version>` does not already exist. It then creates that tag and a GitHub Release with the artifacts, `SHA256SUMS`, and generated notes. The Windows Servo artifact is a zip of `mithu.exe` plus the VC++ runtime DLLs, and that job runs `mithu.exe --smoke-test about:blank` before upload. CI runs the same smoke test on `windows-latest`. An equal or lower version skips with success, so a normal push does not publish again. The Actions "Run workflow" button uses the same gate. The Lite job checks out the Servo submodule so Cargo can resolve `mithu-shell`, then compiles only `mithu-lite`. If any build fails, that job cancels the rest of the run. The publish job runs only when the full build and the Lite build both succeed.
 
 `python3 tools/version.py test` checks greater, equal, lower, and "no previous tag" on the comparer itself.
 
