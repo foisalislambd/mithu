@@ -33,6 +33,10 @@ fn paint_scale() -> f32 {
     PAINT_SCALE.get()
 }
 
+fn dip(logical: f32) -> f32 {
+    snap(logical, paint_scale())
+}
+
 fn tone(light: u32, dark: u32) -> u32 {
     if PAINT_DARK.get() { dark } else { light }
 }
@@ -192,48 +196,56 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
         if active {
             fill_polygon(pixels, width, height, &active_tab(geom.rect), TOOLBAR);
         } else if hovered {
-            fill_round(pixels, width, height, geom.rect.x, geom.rect.y, geom.rect.w, geom.rect.h - 4.0, 8.0, PLUS);
+            fill_round(pixels, width, height, geom.rect.x, geom.rect.y, geom.rect.w, geom.rect.h - dip(4.0), dip(8.0), PLUS);
         } else if index + 1 != state.active && index != state.active.saturating_add(1) {
             let sep_x = geom.rect.right() + 1.0;
-            fill_rect(pixels, width, height, sep_x, 14.0, 1.0, 16.0, rgb(160, 180, 210));
+            fill_rect(pixels, width, height, sep_x, dip(14.0), 1.0, dip(16.0), rgb(160, 180, 210));
         }
         let title = state.tabs.get(index).map(|tab| tab.title.as_str()).unwrap_or("New Tab");
+        let icon = dip(16.0).max(1.0);
         if let Some((fw, fh, bytes)) = state.tabs.get(index).and_then(|tab| tab.favicon.as_ref()) {
-            blit_favicon(pixels, width, height, geom.rect.x + 12.0, geom.rect.y + 9.0, *fw, *fh, bytes);
+            blit_favicon(pixels, width, height, geom.rect.x + dip(12.0), geom.rect.y + (geom.rect.h - icon) / 2.0, icon, *fw, *fh, bytes);
         } else {
-            let icon = snap(16.0, scale).max(1.0);
             crate::brand::blit(
                 pixels,
                 width,
                 height,
-                geom.rect.x + 10.0,
+                geom.rect.x + dip(10.0),
                 geom.rect.y + (geom.rect.h - icon) / 2.0,
                 icon,
                 icon,
                 crate::brand::mark(),
             );
         }
-        if geom.title_right - geom.title_left > 8.0 {
+        if geom.title_right - geom.title_left > dip(8.0) {
             draw_text_fade(
                 pixels,
                 width,
                 height,
                 state.fonts,
                 geom.title_left,
-                geom.rect.y + 22.0,
+                geom.rect.y + dip(22.0),
                 12.0,
                 INK,
                 title,
                 geom.title_left,
                 geom.title_right,
-                16.0,
+                dip(16.0),
             );
         }
         let show_close = active || geom.rect.contains(state.pointer.0, state.pointer.1);
-        if show_close && geom.rect.w >= 36.0 {
+        if show_close && geom.rect.w >= dip(36.0) {
             let over = geom.close.contains(state.pointer.0, state.pointer.1);
             if over {
-                fill_circle(pixels, width, height, geom.close.x + 8.0, geom.close.y + 8.0, 10.0, CLOSE_HOVER);
+                fill_circle(
+                    pixels,
+                    width,
+                    height,
+                    geom.close.x + geom.close.w / 2.0,
+                    geom.close.y + geom.close.h / 2.0,
+                    dip(10.0),
+                    CLOSE_HOVER,
+                );
             }
             icons::blit(
                 pixels,
@@ -241,16 +253,16 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
                 height,
                 geom.close.x,
                 geom.close.y,
-                16.0,
+                geom.close.w,
                 Kind::Close,
                 if over { TOOLBAR } else { ICON },
             );
         }
     }
     button_disc(pixels, width, height, plus, state, true);
-    icons::blit(pixels, width, height, plus.x + 6.0, plus.y + 6.0, 16.0, Kind::Plus, ICON);
+    centered_icon(pixels, width, height, plus, Kind::Plus, ICON);
     button_disc(pixels, width, height, search, state, true);
-    icons::blit(pixels, width, height, search.x + 6.0, search.y + 6.0, 16.0, Kind::Search, ICON);
+    centered_icon(pixels, width, height, search, Kind::Search, ICON);
     paint_captions(pixels, width, height, state);
     tip(pixels, width, height, state, plus, "New tab");
     tip(pixels, width, height, state, search, "Search tabs");
@@ -289,19 +301,21 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
             ADDRESS_FOCUS,
         );
     }
-    let mut text_left = tools.address.x + 14.0;
+    let mut text_left = tools.address.x + dip(14.0);
+    let baseline = tools.address.y + dip(22.0);
     match state.secure {
         Secure::Https => {
-            icons::blit(pixels, width, height, text_left, tools.address.y + 9.0, 16.0, Kind::Lock, ICON);
-            text_left += 24.0;
+            let icon = dip(16.0).max(1.0);
+            icons::blit(pixels, width, height, text_left, tools.address.y + (tools.address.h - icon) / 2.0, icon, Kind::Lock, ICON);
+            text_left += icon + dip(8.0);
         }
         Secure::Http => {
             let label = "Not secure";
-            draw_text(pixels, width, height, state.fonts, text_left, tools.address.y + 22.0, 13.0, NOT_SECURE, label);
-            text_left += text_width(state.fonts, label, 13.0) + 10.0;
+            draw_text(pixels, width, height, state.fonts, text_left, baseline, 13.0, NOT_SECURE, label);
+            text_left += text_width(state.fonts, label, 13.0) + dip(10.0);
         }
         Secure::Internal => {
-            let icon = snap(16.0, unit(state.scale)).max(1.0);
+            let icon = dip(16.0).max(1.0);
             crate::brand::blit(
                 pixels,
                 width,
@@ -312,7 +326,7 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
                 icon,
                 crate::brand::mark(),
             );
-            text_left += icon + snap(8.0, unit(state.scale));
+            text_left += icon + dip(8.0);
         }
     }
     let shown = omnibox_text(&state.omnibox);
@@ -324,7 +338,7 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
             height,
             state.fonts,
             text_left,
-            tools.address.y + 22.0,
+            baseline,
             14.0,
             ICON_OFF,
             "Search the web or type a URL",
@@ -339,7 +353,7 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
             height,
             state.fonts,
             text_left,
-            tools.address.y + 22.0,
+            baseline,
             14.0,
             INK,
             shown,
@@ -350,18 +364,16 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
         if state.omnibox_focused {
             let caret = text_left + text_width(state.fonts, &shown.chars().take(state.cursor).collect::<String>(), 14.0);
             if caret < text_right {
-                fill_rect(pixels, width, height, caret, tools.address.y + 8.0, 1.0, 18.0, INK);
+                fill_rect(pixels, width, height, caret, tools.address.y + dip(8.0), 1.0, dip(18.0), INK);
             }
         }
     }
     button_disc(pixels, width, height, tools.star, state, true);
-    icons::blit(
+    centered_icon(
         pixels,
         width,
         height,
-        tools.star.x + 9.0,
-        tools.star.y + 9.0,
-        16.0,
+        tools.star,
         if state.bookmarked { Kind::StarFilled } else { Kind::Star },
         if state.bookmarked { STAR } else { ICON },
     );
@@ -408,7 +420,7 @@ pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
     if let Some(popup) = state.menu {
         let rect = menu_rect(state, popup);
         if rect.contains(x, y) {
-            let index = ((y - rect.y - 8.0) / 32.0).floor() as isize;
+            let index = ((y - rect.y - dip(8.0)) / dip(32.0)).floor() as isize;
             if index >= 0 && (index as usize) < state.menu_labels.len() {
                 return Hit::MenuItem(index as usize);
             }
@@ -417,9 +429,9 @@ pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
     }
     if state.tab_search {
         let (_, _, search) = tab_layout(state.width, state.tabs.len().max(1), state.scale);
-        let rect = Rect { x: search.x, y: search.bottom() + 6.0, w: 280.0, h: 12.0 + state.tabs.len().max(1) as f32 * 32.0 };
+        let rect = tab_search_rect(state, search);
         if rect.contains(x, y) {
-            let index = ((y - rect.y - 6.0) / 32.0).floor() as isize;
+            let index = ((y - rect.y - dip(6.0)) / dip(32.0)).floor() as isize;
             if index >= 0 && (index as usize) < state.tabs.len() {
                 return Hit::Tab(index as usize);
             }
@@ -440,12 +452,12 @@ pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
     if state.omnibox_focused && !state.suggestions.is_empty() {
         let rect = Rect {
             x: tools.address.x,
-            y: tools.address.bottom() + 4.0,
+            y: tools.address.bottom() + dip(4.0),
             w: tools.address.w,
-            h: state.suggestions.len() as f32 * 32.0 + 8.0,
+            h: state.suggestions.len() as f32 * dip(32.0) + dip(8.0),
         };
         if rect.contains(x, y) {
-            let index = ((y - rect.y - 4.0) / 32.0).floor() as isize;
+            let index = ((y - rect.y - dip(4.0)) / dip(32.0)).floor() as isize;
             if index >= 0 && (index as usize) < state.suggestions.len() {
                 return Hit::Suggestion(index as usize);
             }
@@ -468,7 +480,7 @@ pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
             return Hit::TabSearch;
         }
         for (index, geom) in tabs.iter().enumerate() {
-            if geom.close.contains(x, y) && geom.rect.w >= 36.0 {
+            if geom.close.contains(x, y) && geom.rect.w >= dip(36.0) {
                 return Hit::CloseTab(index);
             }
             if geom.rect.contains(x, y) {
@@ -613,23 +625,23 @@ fn toolbar(width_px: f32, scale: f32, show_home: bool) -> Tools {
 fn bookmark_rects(state: &State<'_>) -> Vec<Rect> {
     let scale = unit(state.scale);
     let y = snap(TAB_H, scale) + snap(TOOLBAR_H, scale) + snap(3.0, scale);
-    let mut x = 8.0;
+    let mut x = dip(8.0);
     let mut rects = Vec::new();
     for (title, _) in &state.bookmarks {
         let text = text_width(state.fonts, title, 13.0);
-        let w = (text + 40.0).clamp(72.0, 180.0);
-        if x + w > state.width - 8.0 {
+        let w = (text + dip(40.0)).clamp(dip(72.0), dip(180.0));
+        if x + w > state.width - dip(8.0) {
             break;
         }
-        rects.push(Rect { x, y, w, h: 28.0 });
-        x += w + 4.0;
+        rects.push(Rect { x, y, w, h: dip(28.0) });
+        x += w + dip(4.0);
     }
     rects
 }
 
 fn active_tab(rect: Rect) -> Vec<(f32, f32)> {
-    let radius = 8.0;
-    let scoop = 10.0;
+    let radius = dip(8.0);
+    let scoop = dip(10.0);
     let bottom = rect.bottom();
     let right = rect.right();
     let mut points = Vec::new();
@@ -696,6 +708,20 @@ fn paint_captions(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>
     }
 }
 
+fn centered_icon(pixels: &mut [u32], width: u32, height: u32, rect: Rect, kind: Kind, color: u32) {
+    let icon = dip(16.0).max(1.0);
+    icons::blit(
+        pixels,
+        width,
+        height,
+        (rect.x + (rect.w - icon) / 2.0).round(),
+        (rect.y + (rect.h - icon) / 2.0).round(),
+        icon,
+        kind,
+        color,
+    );
+}
+
 fn tool_icon(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, rect: Rect, kind: Kind, enabled: bool, label: &str) {
     button_disc(pixels, width, height, rect, state, enabled);
     let icon = snap(16.0, unit(state.scale)).max(1.0);
@@ -719,7 +745,7 @@ fn button_disc(pixels: &mut [u32], width: u32, height: u32, rect: Rect, state: &
         return;
     }
     let alpha = if state.pressed { 36 } else { 18 };
-    fill_circle_alpha(pixels, width, height, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0, 16.0, ICON, alpha);
+    fill_circle_alpha(pixels, width, height, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0, rect.w * 0.46, ICON, alpha);
 }
 
 fn paint_profile(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, rect: Rect) {
@@ -737,8 +763,8 @@ fn paint_bookmarks(pixels: &mut [u32], width: u32, height: u32, state: &State<'_
             width,
             height,
             state.fonts,
-            16.0,
-            TAB_H + TOOLBAR_H + 22.0,
+            dip(16.0),
+            snap(TAB_H, paint_scale()) + snap(TOOLBAR_H, paint_scale()) + dip(22.0),
             13.0,
             MUTED,
             "Bookmarks",
@@ -747,21 +773,22 @@ fn paint_bookmarks(pixels: &mut [u32], width: u32, height: u32, state: &State<'_
     }
     for ((title, _), rect) in state.bookmarks.iter().zip(bookmark_rects(state)) {
         let over = rect.contains(state.pointer.0, state.pointer.1);
-        fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, 14.0, if over { CHIP } else { TOOLBAR });
-        icons::blit(pixels, width, height, rect.x + 8.0, rect.y + 6.0, 16.0, Kind::Globe, ICON_OFF);
+        fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, dip(14.0), if over { CHIP } else { TOOLBAR });
+        let icon = dip(16.0).max(1.0);
+        icons::blit(pixels, width, height, rect.x + dip(8.0), rect.y + (rect.h - icon) / 2.0, icon, Kind::Globe, ICON_OFF);
         draw_text_fade(
             pixels,
             width,
             height,
             state.fonts,
-            rect.x + 28.0,
-            rect.y + 19.0,
+            rect.x + dip(28.0),
+            rect.y + dip(19.0),
             13.0,
             INK,
             title,
-            rect.x + 28.0,
-            rect.right() - 8.0,
-            12.0,
+            rect.x + dip(28.0),
+            rect.right() - dip(8.0),
+            dip(12.0),
         );
     }
 }
@@ -776,72 +803,92 @@ fn paint_ntp(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
 }
 
 fn paint_find(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
-    let x = state.width - 280.0;
-    let y = content_chrome(state) + 8.0;
-    fill_round(pixels, width, height, x, y, 264.0, 36.0, 8.0, TOOLBAR);
-    stroke_round(pixels, width, height, x, y, 264.0, 36.0, 8.0, LINE);
+    let bar_w = dip(264.0);
+    let bar_h = dip(36.0);
+    let x = state.width - dip(280.0);
+    let y = content_chrome(state) + dip(8.0);
+    fill_round(pixels, width, height, x, y, bar_w, bar_h, dip(8.0), TOOLBAR);
+    stroke_round(pixels, width, height, x, y, bar_w, bar_h, dip(8.0), LINE);
     let text = if state.find_query.is_empty() { "Find" } else { state.find_query.as_str() };
     let color = if state.find_query.is_empty() { ICON_OFF } else { INK };
-    draw_text(pixels, width, height, state.fonts, x + 12.0, y + 23.0, 13.0, color, text);
+    draw_text(pixels, width, height, state.fonts, x + dip(12.0), y + dip(23.0), 13.0, color, text);
 }
 
 fn paint_suggestions(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, address: Rect) {
-    let h = state.suggestions.len() as f32 * 32.0 + 8.0;
-    let y = address.bottom() + 4.0;
+    let row_h = dip(32.0);
+    let h = state.suggestions.len() as f32 * row_h + dip(8.0);
+    let y = address.bottom() + dip(4.0);
     shadow(pixels, width, height, address.x, y, address.w, h);
-    fill_round(pixels, width, height, address.x, y, address.w, h, 12.0, TOOLBAR);
+    fill_round(pixels, width, height, address.x, y, address.w, h, dip(12.0), TOOLBAR);
     for (index, suggestion) in state.suggestions.iter().enumerate() {
-        let row = Rect { x: address.x + 4.0, y: y + 4.0 + index as f32 * 32.0, w: address.w - 8.0, h: 32.0 };
+        let row = Rect { x: address.x + dip(4.0), y: y + dip(4.0) + index as f32 * row_h, w: address.w - dip(8.0), h: row_h };
         if state.suggestion == Some(index) || row.contains(state.pointer.0, state.pointer.1) {
-            fill_round(pixels, width, height, row.x, row.y, row.w, row.h, 8.0, CHIP);
+            fill_round(pixels, width, height, row.x, row.y, row.w, row.h, dip(8.0), CHIP);
         }
-        draw_text_fade(pixels, width, height, state.fonts, row.x + 12.0, row.y + 21.0, 13.0, INK, suggestion, row.x + 12.0, row.right() - 12.0, 16.0);
+        draw_text_fade(pixels, width, height, state.fonts, row.x + dip(12.0), row.y + dip(21.0), 13.0, INK, suggestion, row.x + dip(12.0), row.right() - dip(12.0), dip(16.0));
+    }
+}
+
+fn tab_search_rect(state: &State<'_>, anchor: Rect) -> Rect {
+    let w = dip(280.0);
+    let h = dip(12.0) + state.tabs.len().max(1) as f32 * dip(32.0);
+    Rect {
+        x: anchor.x.min(state.width - w - dip(8.0)).max(dip(8.0)),
+        y: anchor.bottom() + dip(6.0),
+        w,
+        h,
     }
 }
 
 fn paint_tab_search(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, anchor: Rect) {
-    let h = 12.0 + state.tabs.len().max(1) as f32 * 32.0;
-    let x = anchor.x.min(state.width - 288.0).max(8.0);
-    let y = anchor.bottom() + 6.0;
-    shadow(pixels, width, height, x, y, 280.0, h);
-    fill_round(pixels, width, height, x, y, 280.0, h, 12.0, TOOLBAR);
+    let rect = tab_search_rect(state, anchor);
+    let row_h = dip(32.0);
+    shadow(pixels, width, height, rect.x, rect.y, rect.w, rect.h);
+    fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, dip(12.0), TOOLBAR);
     for (index, tab) in state.tabs.iter().enumerate() {
-        let row = Rect { x: x + 4.0, y: y + 6.0 + index as f32 * 32.0, w: 272.0, h: 32.0 };
+        let row = Rect {
+            x: rect.x + dip(4.0),
+            y: rect.y + dip(6.0) + index as f32 * row_h,
+            w: rect.w - dip(8.0),
+            h: row_h,
+        };
         if index == state.active || row.contains(state.pointer.0, state.pointer.1) {
-            fill_round(pixels, width, height, row.x, row.y, row.w, row.h, 8.0, CHIP);
+            fill_round(pixels, width, height, row.x, row.y, row.w, row.h, dip(8.0), CHIP);
         }
-        draw_text_fade(pixels, width, height, state.fonts, row.x + 12.0, row.y + 21.0, 13.0, INK, &tab.title, row.x + 12.0, row.right() - 12.0, 16.0);
+        draw_text_fade(pixels, width, height, state.fonts, row.x + dip(12.0), row.y + dip(21.0), 13.0, INK, &tab.title, row.x + dip(12.0), row.right() - dip(12.0), dip(16.0));
     }
 }
 
 fn extensions_rect(state: &State<'_>) -> Rect {
     let tools = toolbar(state.width, state.scale, state.show_home);
-    let w = 240.0;
+    let w = dip(240.0);
+    let h = dip(72.0);
     Rect {
-        x: (tools.extensions.x - 80.0).min(state.width - w - 8.0).max(8.0),
-        y: tools.extensions.bottom() + 6.0,
+        x: (tools.extensions.x - dip(80.0)).min(state.width - w - dip(8.0)).max(dip(8.0)),
+        y: tools.extensions.bottom() + dip(6.0),
         w,
-        h: 72.0,
+        h,
     }
 }
 
 fn profile_rect(state: &State<'_>) -> Rect {
     let tools = toolbar(state.width, state.scale, state.show_home);
-    let w = 220.0;
+    let w = dip(220.0);
+    let h = dip(88.0);
     Rect {
-        x: (tools.profile.x - 80.0).min(state.width - w - 8.0).max(8.0),
-        y: tools.profile.bottom() + 6.0,
+        x: (tools.profile.x - dip(80.0)).min(state.width - w - dip(8.0)).max(dip(8.0)),
+        y: tools.profile.bottom() + dip(6.0),
         w,
-        h: 88.0,
+        h,
     }
 }
 
 fn paint_extensions(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, _anchor: Rect) {
     let rect = extensions_rect(state);
     shadow(pixels, width, height, rect.x, rect.y, rect.w, rect.h);
-    fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, 12.0, TOOLBAR);
-    draw_text(pixels, width, height, state.fonts, rect.x + 16.0, rect.y + 28.0, 14.0, INK, "Extensions");
-    draw_text(pixels, width, height, state.fonts, rect.x + 16.0, rect.y + 50.0, 12.0, MUTED, "No extensions installed.");
+    fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, dip(12.0), TOOLBAR);
+    draw_text(pixels, width, height, state.fonts, rect.x + dip(16.0), rect.y + dip(28.0), 14.0, INK, "Extensions");
+    draw_text(pixels, width, height, state.fonts, rect.x + dip(16.0), rect.y + dip(50.0), 12.0, MUTED, "No extensions installed.");
 }
 
 fn paint_profile_card(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, _anchor: Rect) {
@@ -849,25 +896,28 @@ fn paint_profile_card(pixels: &mut [u32], width: u32, height: u32, state: &State
     let x = rect.x;
     let y = rect.y;
     let w = rect.w;
-    shadow(pixels, width, height, x, y, w, 88.0);
-    fill_round(pixels, width, height, x, y, w, 88.0, 12.0, TOOLBAR);
-    crate::brand::blit(pixels, width, height, x + 12.0, y + 16.0, 32.0, 32.0, crate::brand::mark());
-    draw_text(pixels, width, height, state.fonts, x + 56.0, y + 34.0, 15.0, INK, "Mithu");
-    draw_text(pixels, width, height, state.fonts, x + 56.0, y + 56.0, 12.0, MUTED, "Not signed in");
+    shadow(pixels, width, height, x, y, w, rect.h);
+    fill_round(pixels, width, height, x, y, w, rect.h, dip(12.0), TOOLBAR);
+    let mark = dip(32.0).max(1.0);
+    crate::brand::blit(pixels, width, height, x + dip(12.0), y + dip(16.0), mark, mark, crate::brand::mark());
+    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(34.0), 15.0, INK, "Mithu");
+    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(56.0), 12.0, MUTED, "Not signed in");
 }
 
 fn paint_menu(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, popup: Popup) {
     let rect = menu_rect(state, popup);
     shadow(pixels, width, height, rect.x, rect.y, rect.w, rect.h);
-    fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, 12.0, TOOLBAR);
+    fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, dip(12.0), TOOLBAR);
+    let row_h = dip(32.0);
     for (index, label) in state.menu_labels.iter().enumerate() {
-        let row = Rect { x: rect.x + 4.0, y: rect.y + 8.0 + index as f32 * 32.0, w: rect.w - 8.0, h: 32.0 };
+        let row = Rect { x: rect.x + dip(4.0), y: rect.y + dip(8.0) + index as f32 * row_h, w: rect.w - dip(8.0), h: row_h };
         if row.contains(state.pointer.0, state.pointer.1) {
-            fill_round(pixels, width, height, row.x, row.y, row.w, row.h, 8.0, CHIP);
+            fill_round(pixels, width, height, row.x, row.y, row.w, row.h, dip(8.0), CHIP);
         }
         let kind = menu_icon(label);
-        icons::blit(pixels, width, height, row.x + 8.0, row.y + 8.0, 16.0, kind, ICON);
-        draw_text(pixels, width, height, state.fonts, row.x + 32.0, row.y + 21.0, 13.0, INK, label);
+        let icon = dip(16.0).max(1.0);
+        icons::blit(pixels, width, height, row.x + dip(8.0), row.y + (row.h - icon) / 2.0, icon, kind, ICON);
+        draw_text(pixels, width, height, state.fonts, row.x + dip(32.0), row.y + dip(21.0), 13.0, INK, label);
     }
 }
 
@@ -885,21 +935,21 @@ fn menu_icon(label: &str) -> Kind {
 }
 
 fn menu_rect(state: &State<'_>, popup: Popup) -> Rect {
-    let h = 16.0 + state.menu_labels.len().max(1) as f32 * 32.0;
-    let w = 240.0;
+    let w = dip(240.0);
+    let h = dip(16.0) + state.menu_labels.len().max(1) as f32 * dip(32.0);
     match popup {
         Popup::App => {
             let tools = toolbar(state.width, state.scale, state.show_home);
             Rect {
-                x: (tools.menu.right() - w).max(8.0),
-                y: tools.menu.bottom() + 4.0,
+                x: (tools.menu.right() - w).max(dip(8.0)),
+                y: tools.menu.bottom() + dip(4.0),
                 w,
                 h,
             }
         }
         Popup::Context => Rect {
-            x: state.pointer.0.min(state.width - w - 8.0).max(8.0),
-            y: state.pointer.1.min(state.height - h - 8.0).max(TAB_H),
+            x: state.pointer.0.min(state.width - w - dip(8.0)).max(dip(8.0)),
+            y: state.pointer.1.min(state.height - h - dip(8.0)).max(snap(TAB_H, paint_scale())),
             w,
             h,
         },
@@ -915,22 +965,22 @@ fn paint_status(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) 
         return;
     };
     let text_w = text_width(state.fonts, text, 12.0).min(state.width * 0.6);
-    let bubble = Rect { x: 8.0, y: state.height - 32.0, w: text_w + 20.0, h: 24.0 };
-    fill_round(pixels, width, height, bubble.x, bubble.y, bubble.w, bubble.h, 4.0, BUBBLE);
-    stroke_round(pixels, width, height, bubble.x, bubble.y, bubble.w, bubble.h, 4.0, LINE);
+    let bubble = Rect { x: dip(8.0), y: state.height - dip(32.0), w: text_w + dip(20.0), h: dip(24.0) };
+    fill_round(pixels, width, height, bubble.x, bubble.y, bubble.w, bubble.h, dip(4.0), BUBBLE);
+    stroke_round(pixels, width, height, bubble.x, bubble.y, bubble.w, bubble.h, dip(4.0), LINE);
     draw_text_fade(
         pixels,
         width,
         height,
         state.fonts,
-        bubble.x + 10.0,
-        bubble.y + 16.0,
+        bubble.x + dip(10.0),
+        bubble.y + dip(16.0),
         12.0,
         MUTED,
         text,
-        bubble.x + 10.0,
-        bubble.right() - 8.0,
-        14.0,
+        bubble.x + dip(10.0),
+        bubble.right() - dip(8.0),
+        dip(14.0),
     );
 }
 
@@ -939,11 +989,12 @@ fn tip(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, anchor: R
         return;
     }
     let text_w = text_width(state.fonts, label, 12.0);
-    let mut x = anchor.x + anchor.w / 2.0 - (text_w + 16.0) / 2.0;
-    let y = anchor.bottom() + 6.0;
-    x = x.clamp(4.0, (state.width - text_w - 20.0).max(4.0));
-    fill_round(pixels, width, height, x, y, text_w + 16.0, 22.0, 4.0, rgb(60, 64, 67));
-    draw_text(pixels, width, height, state.fonts, x + 8.0, y + 15.0, 12.0, TOOLBAR, label);
+    let bubble_w = text_w + dip(16.0);
+    let mut x = anchor.x + anchor.w / 2.0 - bubble_w / 2.0;
+    let y = anchor.bottom() + dip(6.0);
+    x = x.clamp(dip(4.0), (state.width - bubble_w - dip(4.0)).max(dip(4.0)));
+    fill_round(pixels, width, height, x, y, bubble_w, dip(22.0), dip(4.0), rgb(60, 64, 67));
+    draw_text(pixels, width, height, state.fonts, x + dip(8.0), y + dip(15.0), 12.0, TOOLBAR, label);
 }
 
 fn omnibox_text(url: &str) -> &str {
@@ -954,17 +1005,18 @@ fn omnibox_text(url: &str) -> &str {
 }
 
 fn shadow(pixels: &mut [u32], width: u32, height: u32, x: f32, y: f32, w: f32, h: f32) {
-    fill_round(pixels, width, height, x + 1.0, y + 2.0, w, h, 12.0, rgb(230, 230, 230));
+    fill_round(pixels, width, height, x + dip(1.0), y + dip(2.0), w, h, dip(12.0), rgb(230, 230, 230));
 }
 
-fn blit_favicon(pixels: &mut [u32], width: u32, height: u32, x: f32, y: f32, fw: u32, fh: u32, bytes: &[u8]) {
+fn blit_favicon(pixels: &mut [u32], width: u32, height: u32, x: f32, y: f32, dest: f32, fw: u32, fh: u32, bytes: &[u8]) {
     if fw == 0 || fh == 0 {
         return;
     }
-    for row in 0..16 {
-        for col in 0..16 {
-            let sx = (col * fw / 16).min(fw - 1);
-            let sy = (row * fh / 16).min(fh - 1);
+    let dest_px = dest.round().max(1.0) as u32;
+    for row in 0..dest_px {
+        for col in 0..dest_px {
+            let sx = (col * fw / dest_px).min(fw - 1);
+            let sy = (row * fh / dest_px).min(fh - 1);
             let index = ((sy * fw + sx) * 4) as usize;
             if index + 3 >= bytes.len() {
                 return;
@@ -1283,6 +1335,48 @@ mod tests {
             assert!(tools.address.x >= tools.home.right() - 1.0);
             let hair = height - 1.0;
             assert_eq!(hair, hair.round());
+            PAINT_SCALE.set(scale);
+            let fonts = mithu_text::FontBook::bundled();
+            let state = State {
+                width: 1100.0 * scale,
+                height: 720.0 * scale,
+                tabs: Vec::new(),
+                active: 0,
+                omnibox: String::new(),
+                omnibox_focused: false,
+                cursor: 0,
+                secure: Secure::Https,
+                bookmarked: false,
+                bookmarks: Vec::new(),
+                bookmarks_open: true,
+                can_back: false,
+                can_forward: false,
+                loading: false,
+                progress: 0.0,
+                link_status: String::new(),
+                pointer: (0.0, 0.0),
+                pressed: false,
+                ntp: false,
+                menu: Some(Popup::App),
+                menu_labels: vec!["New tab".into(), "History".into(), "Downloads".into(), "Settings".into()],
+                tab_search: false,
+                extensions: false,
+                profile: false,
+                suggestions: Vec::new(),
+                suggestion: None,
+                find_open: false,
+                find_query: String::new(),
+                fonts: &fonts,
+                scale,
+                dark: false,
+                show_home: true,
+            };
+            let menu = menu_rect(&state, Popup::App);
+            assert_eq!(menu.w, (240.0 * scale).round());
+            assert!(menu.right() <= state.width + 0.5);
+            assert!(menu.x >= 0.0);
+            let label = text_width(&fonts, "Downloads", 13.0);
+            assert!(dip(32.0) + label < menu.w, "menu text fits at {scale}");
         }
     }
 }
