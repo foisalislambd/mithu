@@ -12,7 +12,7 @@ members = [
 exclude = ["third_party/servo"]
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -25,7 +25,8 @@ readme = "README.md"
 unsafe_code = "forbid"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "thin"
-codegen-units = 8
+codegen-units = 1
+panic = "abort"
 strip = true

@@ -10,7 +10,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 fn spawn_window(private: bool) {
@@ -31,7 +31,12 @@ fn app_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
 }
 
+mod engine;
+
+use engine::{Engine, Session, UiAction};
+
 fn main() {
+    mithu_shell::run_content_process_if_requested();
     mithu_host::init("mithu");
     // Windows rejects a winit event loop that is not on the main thread, and
     // the process then exits as soon as the console appears. The other
@@ -90,18 +95,27 @@ fn run() {
             return;
         }
         let event_loop = event_loop();
-        let mut app = App::new();
-        app.browser.navigate(&first);
+        let engine = Engine::spawn(event_loop.create_proxy());
+        let url = first.clone();
+        engine.post(move |session| {
+            session.browser.navigate(&url);
+            Vec::new()
+        });
+        let mut app = App::new(engine);
         if let Err(error) = event_loop.run_app(&mut app) {
             report_fatal(&format!("could not run the window: {error}"));
         }
-        return;
+        // Servo's multiprocess teardown can stall on a busy content process.
+        // The window is already gone, so end the process here.
+        std::process::exit(0);
     }
     let event_loop = event_loop();
-    let mut app = App::new();
+    let engine = Engine::spawn(event_loop.create_proxy());
+    let mut app = App::new(engine);
     if let Err(error) = event_loop.run_app(&mut app) {
         report_fatal(&format!("could not run the window: {error}"));
     }
+    std::process::exit(0);
 }
 
 fn smoke(url: &str) -> Result<(), String> {
@@ -244,70 +258,22 @@ fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 struct App {
-    browser: Browser,
+    engine: Engine,
     window: Option<Arc<Window>>,
     context: Option<softbuffer::Context<Arc<Window>>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
-    modifiers: ModifiersState,
     cursor: (f32, f32),
-    timer_mark: Instant,
 }
 
 impl App {
-    fn new() -> Self {
-        let mut browser = Browser::new();
-        browser.set_cooperative_scripts(true);
-        browser.follow_os_theme();
+    fn new(engine: Engine) -> Self {
         Self {
-            browser,
+            engine,
             window: None,
             context: None,
             surface: None,
-            modifiers: ModifiersState::default(),
             cursor: (0.0, 0.0),
-            timer_mark: Instant::now(),
         }
-    }
-
-    fn forward_key(&mut self, key: &Key, pressed: bool) {
-        if self.browser.omnibox_focused || self.browser.find_focused {
-            return;
-        }
-        let kind = match key {
-            Key::Named(NamedKey::Enter) => KeyKind::Enter,
-            Key::Named(NamedKey::Escape) => KeyKind::Escape,
-            Key::Named(NamedKey::Backspace) => KeyKind::Backspace,
-            Key::Named(NamedKey::Tab) => KeyKind::Tab,
-            Key::Named(NamedKey::ArrowLeft) => KeyKind::Left,
-            Key::Named(NamedKey::ArrowRight) => KeyKind::Right,
-            Key::Named(NamedKey::ArrowUp) => KeyKind::Up,
-            Key::Named(NamedKey::ArrowDown) => KeyKind::Down,
-            Key::Named(NamedKey::PageUp) => KeyKind::PageUp,
-            Key::Named(NamedKey::PageDown) => KeyKind::PageDown,
-            Key::Named(NamedKey::Home) => KeyKind::Home,
-            Key::Named(NamedKey::End) => KeyKind::End,
-            Key::Named(NamedKey::Space) => KeyKind::Space,
-            Key::Character(text) => {
-                for ch in text.chars().take(1) {
-                    self.browser.send_key(
-                        KeyKind::Char(ch),
-                        pressed,
-                        self.modifiers.control_key(),
-                        self.modifiers.alt_key(),
-                        self.modifiers.shift_key(),
-                    );
-                }
-                return;
-            }
-            _ => return,
-        };
-        self.browser.send_key(
-            kind,
-            pressed,
-            self.modifiers.control_key(),
-            self.modifiers.alt_key(),
-            self.modifiers.shift_key(),
-        );
     }
 
     fn request_redraw(&self) {
@@ -316,19 +282,13 @@ impl App {
         }
     }
 
-    fn open_requested_window(&mut self) {
-        if let Some(private) = self.browser.take_window() {
-            spawn_window(private);
-        }
-    }
-
-    fn sync_title(&self) {
+    fn sync_title(&self, title: &str) {
         if let Some(window) = &self.window {
             let private = if std::env::var_os("MITHU_PRIVATE").is_some() { "Private — " } else { "" };
-            let title = if self.browser.title().is_empty() {
+            let title = if title.is_empty() {
                 format!("{private}Mithu {}", env!("MITHU_VERSION"))
             } else {
-                format!("{private}{} — Mithu {}", self.browser.title(), env!("MITHU_VERSION"))
+                format!("{private}{title} — Mithu {}", env!("MITHU_VERSION"))
             };
             window.set_title(&title);
         }
@@ -355,14 +315,40 @@ impl App {
         }
         let px_w = width.get();
         let px_h = height.get();
-        let frame = self.browser.render(px_w as f32, px_h as f32);
+        let (frame, frame_w, frame_h, title) = self.engine.frame();
+        if frame_w != px_w || frame_h != px_h || frame.len() != (px_w as usize) * (px_h as usize) {
+            return;
+        }
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
         let count = buffer.len().min(frame.len());
         buffer[..count].copy_from_slice(&frame[..count]);
         let _ = buffer.present();
-        self.sync_title();
+        self.sync_title(&title);
+    }
+
+    fn apply(&mut self, event_loop: &ActiveEventLoop, actions: Vec<UiAction>) {
+        for action in actions {
+            match action {
+                UiAction::Exit => event_loop.exit(),
+                UiAction::Minimize => {
+                    if let Some(window) = &self.window {
+                        let _ = window.set_minimized(true);
+                    }
+                }
+                UiAction::Maximize => {
+                    if let Some(window) = &self.window {
+                        window.set_maximized(!window.is_maximized());
+                    }
+                }
+                UiAction::Drag => {
+                    if let Some(window) = &self.window {
+                        let _ = window.drag_window();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -389,267 +375,245 @@ impl ApplicationHandler for App {
             Err(error) => report_fatal(&format!("could not create a surface: {error}")),
         };
         let size = window.inner_size();
-        self.browser.set_scale(window.scale_factor() as f32);
-        self.browser
-            .resize(size.width.max(1) as f32, size.height.max(1) as f32);
+        let scale = window.scale_factor() as f32;
+        let width = size.width.max(1) as f32;
+        let height = size.height.max(1) as f32;
+        self.engine.post(move |session| {
+            session.width = width;
+            session.height = height;
+            session.browser.set_scale(scale);
+            session.browser.resize(width, height);
+            Vec::new()
+        });
         self.context = Some(context);
         self.surface = Some(surface);
         self.window = Some(window);
         self.request_redraw();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                if let Some(window) = &self.window {
-                    self.browser.set_scale(window.scale_factor() as f32);
-                }
-                self.browser
-                    .resize(size.width.max(1) as f32, size.height.max(1) as f32);
-                self.request_redraw();
-            }
-            WindowEvent::RedrawRequested => self.redraw(),
-            WindowEvent::ModifiersChanged(modifiers) => {
-                self.modifiers = modifiers.state();
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = (position.x as f32, position.y as f32);
-                self.browser.pointer_move(self.cursor.0, self.cursor.1);
-                self.request_redraw();
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                if state == ElementState::Pressed && button == MouseButton::Right {
-                    self.browser.context_menu(self.cursor.0, self.cursor.1);
-                    self.sync_title();
-                    self.request_redraw();
-                } else if button == MouseButton::Left && state == ElementState::Pressed {
-                    match self.browser.frame_hit(self.cursor.0, self.cursor.1) {
-                        Some(FrameHit::Close) => event_loop.exit(),
-                        Some(FrameHit::Minimize) => {
-                            if let Some(window) = &self.window {
-                                let _ = window.set_minimized(true);
-                            }
-                        }
-                        Some(FrameHit::Maximize) => {
-                            if let Some(window) = &self.window {
-                                window.set_maximized(!window.is_maximized());
-                            }
-                        }
-                        Some(FrameHit::Drag) => {
-                            if let Some(window) = &self.window {
-                                let _ = window.drag_window();
-                            }
-                        }
-                        None => {
-                            self.browser.pointer_down(self.cursor.0, self.cursor.1);
-                            if self.browser.consume_quit() {
-                                event_loop.exit();
-                            }
-                            if self.browser.consume_fullscreen() {
-                                if let Some(window) = &self.window {
-                                    window.set_maximized(!window.is_maximized());
-                                }
-                            }
-                            self.open_requested_window();
-                        }
-                    }
-                    self.sync_title();
-                    self.request_redraw();
-                } else if button == MouseButton::Left && state == ElementState::Released {
-                    self.browser.pointer_up();
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let dy = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -y * 64.0,
-                    MouseScrollDelta::PixelDelta(position) => -position.y as f32,
-                };
-                self.browser.scroll_by(dy);
-                self.request_redraw();
-            }
-            WindowEvent::Ime(Ime::Commit(text)) => {
-                self.browser.ime_commit(&text);
-                self.request_redraw();
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
-                    self.forward_key(&event.logical_key, false);
-                    return;
-                }
-                let ctrl = self.modifiers.control_key();
-                let alt = self.modifiers.alt_key();
-                let shift = self.modifiers.shift_key();
-                let focused = self.browser.omnibox_focused;
-                match event.logical_key {
-                    Key::Named(NamedKey::Enter) if self.browser.find_focused && shift => {
-                        self.browser.find_previous()
-                    }
-                    Key::Named(NamedKey::Enter) if self.browser.find_focused => {
-                        self.browser.find_next()
-                    }
-                    Key::Named(NamedKey::Enter) if focused => self.browser.submit_omnibox(),
-                    Key::Named(NamedKey::Enter) if self.browser.field_focused() => {
-                        self.browser.submit_field()
-                    }
-                    Key::Named(NamedKey::Escape) if self.browser.menu_open() => {
-                        self.browser.close_menu()
-                    }
-                    Key::Named(NamedKey::Escape) if self.browser.bookmarks_open() => {
-                        self.browser.close_bookmarks()
-                    }
-                    Key::Named(NamedKey::Escape) if self.browser.find_is_open() => {
-                        self.browser.close_find()
-                    }
-                    Key::Named(NamedKey::Escape) => self.browser.blur_page(),
-                    Key::Named(NamedKey::Backspace) if self.browser.find_focused => {
-                        self.browser.find_backspace()
-                    }
-                    Key::Named(NamedKey::Backspace) if focused => self.browser.backspace(),
-                    Key::Named(NamedKey::Backspace) if self.browser.field_focused() => {
-                        self.browser.field_backspace()
-                    }
-                    Key::Named(NamedKey::ArrowDown) if focused => self.browser.move_suggestion(1),
-                    Key::Named(NamedKey::ArrowUp) if focused => self.browser.move_suggestion(-1),
-                    Key::Named(NamedKey::ArrowLeft) if focused && !alt => {
-                        self.browser.move_cursor(-1)
-                    }
-                    Key::Named(NamedKey::ArrowRight) if focused && !alt => {
-                        self.browser.move_cursor(1)
-                    }
-                    Key::Named(NamedKey::ArrowLeft) if alt => self.browser.back(),
-                    Key::Named(NamedKey::ArrowRight) if alt => self.browser.forward(),
-                    Key::Named(NamedKey::ArrowDown) if !focused => self.browser.scroll_by(64.0),
-                    Key::Named(NamedKey::ArrowUp) if !focused => self.browser.scroll_by(-64.0),
-                    Key::Named(NamedKey::PageDown) if !focused => self.browser.scroll_page(1.0),
-                    Key::Named(NamedKey::PageUp) if !focused => self.browser.scroll_page(-1.0),
-                    Key::Named(NamedKey::Home) if !focused => self.browser.scroll_by(-1.0e9),
-                    Key::Named(NamedKey::End) if !focused => self.browser.scroll_by(1.0e9),
-                    Key::Named(NamedKey::Tab) if ctrl && shift => self.browser.previous_tab(),
-                    Key::Named(NamedKey::Tab) if ctrl => self.browser.next_tab(),
-                    Key::Named(NamedKey::F5) => self.browser.reload(),
-                    Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("t") => {
-                        self.browser.reopen_closed_tab()
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("t") => {
-                        self.browser.new_tab()
-                    }
-                    Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("n") => {
-                        spawn_window(true);
-                    }
-                    Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("i") => {
-                        self.browser.navigate("mithu://inspect");
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("n") => {
-                        spawn_window(false);
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("p") => self.browser.print(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("h") => {
-                        self.browser.navigate("about:history")
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("j") => {
-                        self.browser.navigate("about:downloads")
-                    }
-                    Key::Character(text) if ctrl && text == "," => {
-                        self.browser.navigate("about:settings")
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("w") => {
-                        self.browser.close_tab()
-                    }
-                    Key::Character(text) if ctrl && (text == "+" || text == "=") => {
-                        self.browser.zoom_in()
-                    }
-                    Key::Character(text) if ctrl && (text == "-" || text == "_") => {
-                        self.browser.zoom_out()
-                    }
-                    Key::Character(text) if ctrl && text == "0" => self.browser.zoom_reset(),
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("d") => {
-                        self.browser.toggle_bookmark()
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("b") => {
-                        self.browser.toggle_bookmark_list()
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("f") => {
-                        self.browser.open_find()
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("l") => {
-                        self.browser.focus_omnibox()
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("r") => {
-                        self.browser.reload()
-                    }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("a") && focused => {
-                        self.browser.select_all_text();
-                    }
-                    Key::Character(text) if self.browser.find_focused && !ctrl && !alt => {
-                        for ch in text.chars() {
-                            self.browser.find_insert(ch);
-                        }
-                    }
-                    Key::Character(text) if focused && !ctrl && !alt => {
-                        for ch in text.chars() {
-                            self.browser.insert_char(ch);
-                        }
-                    }
-                    Key::Character(text) if self.browser.field_focused() && !ctrl && !alt => {
-                        for ch in text.chars() {
-                            self.browser.field_insert(ch);
-                        }
-                    }
-                    Key::Named(NamedKey::Space) if self.browser.field_focused() => {
-                        self.browser.field_insert(' ')
-                    }
-                    Key::Named(NamedKey::Space) if !focused => self.browser.scroll_page(1.0),
-                    _ => self.forward_key(&event.logical_key, true),
-                }
-                self.open_requested_window();
-                self.sync_title();
-                self.request_redraw();
-            }
-            _ => {}
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let WindowEvent::RedrawRequested = &event {
+            self.redraw();
+            return;
         }
+        if let WindowEvent::CursorMoved { position, .. } = &event {
+            self.cursor = (position.x as f32, position.y as f32);
+        }
+        let cursor = self.cursor;
+        self.engine.post(move |session| on_window(session, event, cursor));
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
+        let actions = self.engine.take_actions();
+        self.apply(event_loop, actions);
+        self.request_redraw();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let elapsed = self.timer_mark.elapsed().as_millis() as u64;
-        self.timer_mark = Instant::now();
-        let scripts =
-            self.browser.pump_scripts(Duration::from_millis(12)) || self.browser.chrome_animating();
-        // Drive frames while scripts are still loading. A fromTo that starts
-        // in an effect would otherwise sit at opacity 0 until the bundles end.
-        if self.browser.animation_frames_pending() {
-            let step = elapsed.clamp(1, 34);
-            if self.browser.advance_frame(step) {
-                self.sync_title();
-                self.request_redraw();
-            }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(16),
-            ));
-            return;
-        }
-        if scripts {
-            if elapsed > 0 {
-                self.browser.advance_limited(elapsed.clamp(1, 34), None, 2);
-            }
-            self.sync_title();
-            self.request_redraw();
-            event_loop.set_control_flow(ControlFlow::Poll);
-            return;
-        }
-        if elapsed > 0 && self.browser.advance_timers(elapsed) {
-            self.sync_title();
-            self.request_redraw();
-        }
-        let wait = self
-            .browser
-            .next_timer_ms()
-            .unwrap_or(60_000)
-            .clamp(1, 60_000);
+        let actions = self.engine.take_actions();
+        self.apply(event_loop, actions);
         event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(wait),
+            Instant::now() + Duration::from_millis(32),
         ));
     }
+}
+
+fn on_window(session: &mut Session, event: WindowEvent, cursor: (f32, f32)) -> Vec<UiAction> {
+    match event {
+        WindowEvent::CloseRequested => vec![UiAction::Exit],
+        WindowEvent::Resized(size) => {
+            session.width = size.width.max(1) as f32;
+            session.height = size.height.max(1) as f32;
+            session.browser.resize(session.width, session.height);
+            Vec::new()
+        }
+        WindowEvent::RedrawRequested => Vec::new(),
+        WindowEvent::ModifiersChanged(modifiers) => {
+            let state = modifiers.state();
+            session.modifiers_control = state.control_key();
+            session.modifiers_alt = state.alt_key();
+            session.modifiers_shift = state.shift_key();
+            Vec::new()
+        }
+        WindowEvent::CursorMoved { position, .. } => {
+            session.cursor = (position.x as f32, position.y as f32);
+            session.browser.pointer_move(session.cursor.0, session.cursor.1);
+            Vec::new()
+        }
+        WindowEvent::MouseInput { state, button, .. } => {
+            session.cursor = cursor;
+            if state == ElementState::Pressed && button == MouseButton::Right {
+                session.browser.context_menu(session.cursor.0, session.cursor.1);
+                Vec::new()
+            } else if button == MouseButton::Left && state == ElementState::Pressed {
+                match session.browser.frame_hit(session.cursor.0, session.cursor.1) {
+                    Some(FrameHit::Close) => vec![UiAction::Exit],
+                    Some(FrameHit::Minimize) => vec![UiAction::Minimize],
+                    Some(FrameHit::Maximize) => vec![UiAction::Maximize],
+                    Some(FrameHit::Drag) => vec![UiAction::Drag],
+                    None => {
+                        session.browser.pointer_down(session.cursor.0, session.cursor.1);
+                        let mut actions = Vec::new();
+                        if session.browser.consume_quit() {
+                            actions.push(UiAction::Exit);
+                        }
+                        if session.browser.consume_fullscreen() {
+                            actions.push(UiAction::Maximize);
+                        }
+                        if let Some(private) = session.browser.take_window() {
+                            spawn_window(private);
+                        }
+                        actions
+                    }
+                }
+            } else if button == MouseButton::Left && state == ElementState::Released {
+                session.browser.pointer_up();
+                Vec::new()
+            } else {
+                Vec::new()
+            }
+        }
+        WindowEvent::MouseWheel { delta, .. } => {
+            let dy = match delta {
+                MouseScrollDelta::LineDelta(_, y) => -y * 64.0,
+                MouseScrollDelta::PixelDelta(position) => -position.y as f32,
+            };
+            session.browser.scroll_by(dy);
+            Vec::new()
+        }
+        WindowEvent::Ime(Ime::Commit(text)) => {
+            session.browser.ime_commit(&text);
+            Vec::new()
+        }
+        WindowEvent::KeyboardInput { event, .. } => on_key(session, event),
+        _ => Vec::new(),
+    }
+}
+
+fn on_key(session: &mut Session, event: winit::event::KeyEvent) -> Vec<UiAction> {
+    let pressed = event.state == ElementState::Pressed;
+    if !pressed {
+        forward_key(session, &event.logical_key, false);
+        return Vec::new();
+    }
+    let ctrl = session.modifiers_control;
+    let alt = session.modifiers_alt;
+    let shift = session.modifiers_shift;
+    let focused = session.browser.omnibox_focused;
+    match &event.logical_key {
+        Key::Named(NamedKey::Enter) if session.browser.find_focused && shift => session.browser.find_previous(),
+        Key::Named(NamedKey::Enter) if session.browser.find_focused => session.browser.find_next(),
+        Key::Named(NamedKey::Enter) if focused => session.browser.submit_omnibox(),
+        Key::Named(NamedKey::Enter) if session.browser.field_focused() => session.browser.submit_field(),
+        Key::Named(NamedKey::Escape) if session.browser.menu_open() => session.browser.close_menu(),
+        Key::Named(NamedKey::Escape) if session.browser.bookmarks_open() => session.browser.close_bookmarks(),
+        Key::Named(NamedKey::Escape) if session.browser.find_is_open() => session.browser.close_find(),
+        Key::Named(NamedKey::Escape) => session.browser.blur_page(),
+        Key::Named(NamedKey::Backspace) if session.browser.find_focused => session.browser.find_backspace(),
+        Key::Named(NamedKey::Backspace) if focused => session.browser.backspace(),
+        Key::Named(NamedKey::Backspace) if session.browser.field_focused() => session.browser.field_backspace(),
+        Key::Named(NamedKey::ArrowDown) if focused => session.browser.move_suggestion(1),
+        Key::Named(NamedKey::ArrowUp) if focused => session.browser.move_suggestion(-1),
+        Key::Named(NamedKey::ArrowLeft) if focused && !alt => session.browser.move_cursor(-1),
+        Key::Named(NamedKey::ArrowRight) if focused && !alt => session.browser.move_cursor(1),
+        Key::Named(NamedKey::ArrowLeft) if alt => session.browser.back(),
+        Key::Named(NamedKey::ArrowRight) if alt => session.browser.forward(),
+        Key::Named(NamedKey::ArrowDown) if !focused => session.browser.scroll_by(64.0),
+        Key::Named(NamedKey::ArrowUp) if !focused => session.browser.scroll_by(-64.0),
+        Key::Named(NamedKey::PageDown) if !focused => session.browser.scroll_page(1.0),
+        Key::Named(NamedKey::PageUp) if !focused => session.browser.scroll_page(-1.0),
+        Key::Named(NamedKey::Home) if !focused => session.browser.scroll_by(-1.0e9),
+        Key::Named(NamedKey::End) if !focused => session.browser.scroll_by(1.0e9),
+        Key::Named(NamedKey::Tab) if ctrl && shift => session.browser.previous_tab(),
+        Key::Named(NamedKey::Tab) if ctrl => session.browser.next_tab(),
+        Key::Named(NamedKey::F5) => session.browser.reload(),
+        Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("t") => {
+            session.browser.reopen_closed_tab()
+        }
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("t") => session.browser.new_tab(),
+        Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("n") => spawn_window(true),
+        Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("i") => {
+            session.browser.navigate("mithu://inspect")
+        }
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("n") => spawn_window(false),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("p") => session.browser.print(),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("h") => session.browser.navigate("about:history"),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("j") => session.browser.navigate("about:downloads"),
+        Key::Character(text) if ctrl && text == "," => session.browser.navigate("about:settings"),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("w") => session.browser.close_tab(),
+        Key::Character(text) if ctrl && (text == "+" || text == "=") => session.browser.zoom_in(),
+        Key::Character(text) if ctrl && (text == "-" || text == "_") => session.browser.zoom_out(),
+        Key::Character(text) if ctrl && text == "0" => session.browser.zoom_reset(),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("d") => session.browser.toggle_bookmark(),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("b") => session.browser.toggle_bookmark_list(),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("f") => session.browser.open_find(),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("l") => session.browser.focus_omnibox(),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("r") => session.browser.reload(),
+        Key::Character(text) if ctrl && text.eq_ignore_ascii_case("a") && focused => session.browser.select_all_text(),
+        Key::Character(text) if session.browser.find_focused && !ctrl && !alt => {
+            for ch in text.chars() {
+                session.browser.find_insert(ch);
+            }
+        }
+        Key::Character(text) if focused && !ctrl && !alt => {
+            for ch in text.chars() {
+                session.browser.insert_char(ch);
+            }
+        }
+        Key::Character(text) if session.browser.field_focused() && !ctrl && !alt => {
+            for ch in text.chars() {
+                session.browser.field_insert(ch);
+            }
+        }
+        Key::Named(NamedKey::Space) if session.browser.field_focused() => session.browser.field_insert(' '),
+        Key::Named(NamedKey::Space) if !focused => session.browser.scroll_page(1.0),
+        _ => forward_key(session, &event.logical_key, true),
+    }
+    if let Some(private) = session.browser.take_window() {
+        spawn_window(private);
+    }
+    Vec::new()
+}
+
+fn forward_key(session: &mut Session, key: &Key, pressed: bool) {
+    if session.browser.omnibox_focused || session.browser.find_focused {
+        return;
+    }
+    let kind = match key {
+        Key::Named(NamedKey::Enter) => KeyKind::Enter,
+        Key::Named(NamedKey::Escape) => KeyKind::Escape,
+        Key::Named(NamedKey::Backspace) => KeyKind::Backspace,
+        Key::Named(NamedKey::Tab) => KeyKind::Tab,
+        Key::Named(NamedKey::ArrowLeft) => KeyKind::Left,
+        Key::Named(NamedKey::ArrowRight) => KeyKind::Right,
+        Key::Named(NamedKey::ArrowUp) => KeyKind::Up,
+        Key::Named(NamedKey::ArrowDown) => KeyKind::Down,
+        Key::Named(NamedKey::PageUp) => KeyKind::PageUp,
+        Key::Named(NamedKey::PageDown) => KeyKind::PageDown,
+        Key::Named(NamedKey::Home) => KeyKind::Home,
+        Key::Named(NamedKey::End) => KeyKind::End,
+        Key::Named(NamedKey::Space) => KeyKind::Space,
+        Key::Character(text) => {
+            for ch in text.chars().take(1) {
+                session.browser.send_key(
+                    KeyKind::Char(ch),
+                    pressed,
+                    session.modifiers_control,
+                    session.modifiers_alt,
+                    session.modifiers_shift,
+                );
+            }
+            return;
+        }
+        _ => return,
+    };
+    session.browser.send_key(
+        kind,
+        pressed,
+        session.modifiers_control,
+        session.modifiers_alt,
+        session.modifiers_shift,
+    );
 }
 
 fn report_fatal(message: &str) -> ! {

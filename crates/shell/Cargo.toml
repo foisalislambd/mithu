@@ -14,13 +14,18 @@ euclid = "0.22"
 mithu-text = { path = "../text" }
 mithu-ui = { path = "../ui" }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
-servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit"] }
+servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit", "multiprocess"] }
 url = "2"
 
 # Servo's Windows WGL backend needs WGL_NV_DX_interop, which is absent on
 # the GitHub runner and on many GPUs. Servoshell uses ANGLE instead.
 [target.'cfg(target_os = "windows")'.dependencies]
-servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit", "no-wgl"] }
+servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit", "multiprocess", "no-wgl"] }
+
+# jemalloc replaces the system allocator on the platforms Servo supports it.
+# Windows keeps the system allocator.
+[target.'cfg(not(any(windows, target_env = "ohos")))'.dependencies]
+servo-allocator = { path = "../../third_party/servo/components/allocator", features = ["use-jemalloc"] }
 
 [lints]
 workspace = true
