@@ -87,9 +87,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          powershell -NoProfile -File tools/package-windows.ps1
+          $ErrorActionPreference = "Stop"
+          pwsh -NoProfile -File tools/package-windows.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:MITHU_NO_DIALOG = "1"
-          & target\release\mithu-windows\mithu.exe --smoke-test about:blank
+          $exe = Join-Path (Get-Location) "target\release\mithu-windows\mithu.exe"
+          & $exe --smoke-test about:blank
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:

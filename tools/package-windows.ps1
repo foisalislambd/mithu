@@ -1,11 +1,13 @@
 # Package the Windows Servo build: the exe, the VC++ runtime DLLs it imports,
 # and a short note. Servo's resources are compiled into the binary
 # (servo feature "bundled"), so there is no resources directory to copy.
+# ASCII only. Windows PowerShell reads a UTF-8 script without a BOM as
+# the system code page, and a multibyte dash was being parsed as a quote.
 $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
 $exe = Join-Path $repo "target\release\mithu.exe"
 if (-not (Test-Path $exe)) {
-    throw "missing $exe — build with: cargo build -p mithu --release"
+    throw "missing $exe. Build with: cargo build -p mithu --release"
 }
 $out = Join-Path $repo "target\release\mithu-windows"
 if (Test-Path $out) {
@@ -22,15 +24,16 @@ foreach ($dll in $dlls) {
     }
     Copy-Item $src (Join-Path $out $dll)
 }
-@"
-Mithu for Windows.
-
-mithu.exe contains the Servo resources it needs. The three DLL files are the
-Visual C++ runtime the binary is linked against. Keep them in this folder.
-
-If the window closes immediately, the error is in
-%LOCALAPPDATA%\Mithu\mithu.log
-"@ | Set-Content -Encoding utf8 (Join-Path $out "README.txt")
+$note = @(
+    "Mithu for Windows."
+    ""
+    "mithu.exe contains the Servo resources it needs. The three DLL files are the"
+    "Visual C++ runtime the binary is linked against. Keep them in this folder."
+    ""
+    "If the window closes immediately, the error is in"
+    "%LOCALAPPDATA%\Mithu\mithu.log"
+) -join "`r`n"
+Set-Content -Encoding ascii -Path (Join-Path $out "README.txt") -Value $note
 $zip = Join-Path $repo "target\release\mithu-windows-x64.zip"
 if (Test-Path $zip) {
     Remove-Item -Force $zip

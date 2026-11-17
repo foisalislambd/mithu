@@ -32,8 +32,12 @@ jobs:
       - name: Build, package, and smoke-test Mithu
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           cargo build -p mithu --release
-          powershell -NoProfile -File tools/package-windows.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tools/package-windows.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:MITHU_NO_DIALOG = "1"
-          & target\release\mithu-windows\mithu.exe --smoke-test about:blank
+          $exe = Join-Path (Get-Location) "target\release\mithu-windows\mithu.exe"
+          & $exe --smoke-test about:blank
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
