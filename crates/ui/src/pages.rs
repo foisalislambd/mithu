@@ -127,11 +127,17 @@ impl Prefs {
 }
 
 pub fn directory() -> PathBuf {
-    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(base).join("Mithu");
+    let base = if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        PathBuf::from(base).join("Mithu")
+    } else {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        home.join(".local").join("share").join("Mithu")
+    };
+    if std::env::var_os("MITHU_PRIVATE").is_some() {
+        base.join("Private")
+    } else {
+        base
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local").join("share").join("Mithu")
 }
 
 pub fn path() -> PathBuf {
@@ -340,7 +346,7 @@ fn attr(tag: &str, name: &str) -> Option<String> {
 fn strip_data_uris(html: &str) -> String {
     let mut out = String::new();
     let mut rest = html;
-    while let Some(start) = rest.find("data:image") {
+    while let Some(start) = rest.find("data:") {
         out.push_str(&rest[..start]);
         rest = &rest[start..];
         let end = rest.find('"').unwrap_or(rest.len());
@@ -377,6 +383,8 @@ enum Kind {
     Extensions,
     NewTab,
     Version,
+    Translate,
+    Inspect,
 }
 
 fn classify(spec: &str) -> Option<Kind> {
@@ -395,6 +403,8 @@ fn classify(spec: &str) -> Option<Kind> {
         ("mithu", "extensions", _) => Some(Kind::Extensions),
         ("mithu", "newtab", _) | ("about", "", "newtab" | "home" | "mithu") => Some(Kind::NewTab),
         ("mithu", "version", _) => Some(Kind::Version),
+        ("mithu", "translate", _) => Some(Kind::Translate),
+        ("mithu", "inspect", _) => Some(Kind::Inspect),
         _ => None,
     }
 }
@@ -403,17 +413,63 @@ fn render(kind: Kind, spec: &str, prefs: &Prefs, version: &str) -> Document {
     let (url, title, body) = match kind {
         Kind::Settings => ("mithu://settings", "Settings", settings_body(spec, prefs)),
         Kind::History => ("mithu://history", "History", history_body(spec, prefs)),
-        Kind::Downloads => ("mithu://downloads", "Downloads", downloads_body(prefs)),
-        Kind::Bookmarks => ("mithu://bookmarks", "Bookmarks", bookmarks_body(prefs)),
-        Kind::Extensions => ("mithu://extensions", "Extensions", extensions_body()),
+        Kind::Downloads => ("mithu://downloads", "Downloads", downloads_body(spec, prefs)),
+        Kind::Bookmarks => ("mithu://bookmarks", "Bookmarks", bookmarks_body(spec, prefs)),
+        Kind::Extensions => ("mithu://extensions", "Extensions", extensions_body(spec)),
         Kind::NewTab => ("mithu://newtab", "New Tab", newtab_body(prefs)),
         Kind::Version => ("mithu://version", "Version", version_body(version)),
+        Kind::Translate => ("mithu://translate", "Translate", translate_body()),
+        Kind::Inspect => ("mithu://inspect", "Developer tools", inspect_body()),
     };
     Document {
         url: url.into(),
         title: title.into(),
         html: shell(title, prefs, version, &body),
     }
+}
+
+fn roboto_faces() -> String {
+    fn face(weight: u16, bytes: &[u8]) -> String {
+        format!(
+            "@font-face{{font-family:Roboto;font-style:normal;font-weight:{weight};font-display:swap;src:url(data:font/woff2;base64,{}) format('woff2');}}",
+            b64(bytes)
+        )
+    }
+    format!(
+        "{}{}{}",
+        face(400, include_bytes!("../../../assets/fonts/roboto/roboto-regular.woff2")),
+        face(500, include_bytes!("../../../assets/fonts/roboto/roboto-medium.woff2")),
+        face(700, include_bytes!("../../../assets/fonts/roboto/roboto-bold.woff2")),
+    )
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let n = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8) | bytes[index + 2] as u32;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        out.push(TABLE[(n & 63) as usize] as char);
+        index += 3;
+    }
+    let left = bytes.len() - index;
+    if left == 1 {
+        let n = (bytes[index] as u32) << 16;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if left == 2 {
+        let n = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8);
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        out.push('=');
+    }
+    out
 }
 
 fn shell(title: &str, prefs: &Prefs, version: &str, body: &str) -> String {
@@ -427,34 +483,73 @@ fn shell(title: &str, prefs: &Prefs, version: &str, body: &str) -> String {
 <title>{title} — Mithu</title>
 <link rel="icon" href="{icon}">
 <style>
-:root {{ color-scheme: light; --bg:#f4f1ea; --card:#fff; --ink:#1c1b19; --muted:#5f5a54; --line:#e4ddd2; --field:#f7f4ee; --accent:#0f766e; --accent-ink:#fff; --side:#efeae2; --hover:#e7f3f1; --danger:#9f1239; }}
-html[data-theme="dark"] {{ color-scheme: dark; --bg:#14161a; --card:#1e2128; --ink:#e7e4de; --muted:#b0aaa2; --line:#343841; --field:#171a20; --accent:#5eead4; --accent-ink:#08332f; --side:#191c22; --hover:#243330; --danger:#fda4af; }}
+{fonts}
+:root {{
+  color-scheme: light;
+  --bg: #fff;
+  --card: #fff;
+  --ink: #1f1f1f;
+  --muted: #5f6368;
+  --line: rgba(0, 0, 0, .06);
+  --hairline: rgba(0, 0, 0, .14);
+  --field: #f1f3f4;
+  --accent: #0b57d0;
+  --accent-ink: #fff;
+  --side: #fff;
+  --nav: #202124;
+  --nav-selected: #1967d2;
+  --nav-bg: #e8f0fe;
+  --hover: #e8eaed;
+  --danger: #d93025;
+}}
+html[data-theme="dark"] {{
+  color-scheme: dark;
+  --bg: #1f1f1f;
+  --card: #292a2d;
+  --ink: #e3e3e3;
+  --muted: #9aa0a6;
+  --line: rgba(255, 255, 255, .1);
+  --hairline: rgba(255, 255, 255, .14);
+  --field: #3c3c3c;
+  --accent: #a8c7fa;
+  --accent-ink: #062e6f;
+  --side: #1f1f1f;
+  --nav: #fff;
+  --nav-selected: #202124;
+  --nav-bg: #8ab4f8;
+  --hover: #3c4043;
+  --danger: #f28b82;
+}}
 * {{ box-sizing: border-box; }}
-html, body {{ margin:0; background:var(--bg); color:var(--ink); font: {font}px/1.45 "Noto Sans", sans-serif; }}
+html, body {{ margin:0; background:var(--bg); color:var(--ink); font: {font}px/1.54 Roboto, "Noto Sans", Arial, sans-serif; }}
 a {{ color: var(--accent); text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
 button, input, select, textarea {{ font: inherit; color: inherit; }}
-.top {{ display:flex; align-items:center; gap:16px; height:56px; padding:0 20px; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:0; }}
-.markimg {{ width:28px; height:28px; }}
-img.logo {{ width:min(280px, 72vw); height:auto; display:block; margin:0 auto 8px; }}
-.brand {{ font-weight:650; letter-spacing:-0.02em; }}
-.search {{ margin-left:auto; width:min(360px, 46vw); background:var(--field); border:1px solid var(--line); border-radius:999px; padding:8px 14px; }}
-.layout {{ display:grid; grid-template-columns: 232px 1fr; min-height: calc(100vh - 56px); }}
-nav {{ background:var(--side); padding:12px; border-right:1px solid var(--line); }}
-nav a {{ display:block; padding:8px 12px; border-radius:8px; color:var(--ink); margin:2px 0; }}
-nav a:hover, nav a.on {{ background:var(--hover); text-decoration:none; }}
-main {{ padding:28px 32px 64px; max-width:860px; }}
-h1 {{ font-size:28px; line-height:1.2; margin:0 0 8px; letter-spacing:-0.03em; }}
-h2 {{ font-size:18px; margin:28px 0 8px; }}
-.lead {{ color:var(--muted); margin:0 0 20px; }}
-.card {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:4px 16px; margin:12px 0 20px; }}
-.row {{ display:flex; align-items:center; gap:16px; min-height:52px; border-top:1px solid var(--line); padding:8px 0; }}
+.markimg {{ width:24px; height:24px; border-radius:50%; }}
+img.logo {{ width:min(240px, 70vw); height:auto; display:block; margin:0 auto 8px; }}
+.app {{ display:flex; min-height:100vh; }}
+aside {{ width:256px; flex:none; padding:8px 0 24px; }}
+.pagetitle {{ display:flex; align-items:center; gap:12px; height:48px; padding:8px 20px 0; font-size:22px; font-weight:400; }}
+.maincol {{ flex:1; min-width:0; display:flex; flex-direction:column; }}
+.searchrow {{ height:56px; display:flex; align-items:center; padding:8px 24px 0; }}
+.search {{ width:min(720px, 100%); height:40px; background:var(--field); border:0; border-radius:20px; padding:0 16px 0 16px; }}
+nav a, .folders a {{ display:flex; align-items:center; gap:12px; min-height:40px; margin:0 8px 0 0; padding:0 16px 0 20px; border-radius:0 100px 100px 0; color:var(--nav); font-size:13px; font-weight:500; text-decoration:none; }}
+nav a svg {{ width:20px; height:20px; flex:none; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }}
+nav a:hover, .folders a:hover {{ background:var(--hover); }}
+nav a.on, .folders a.on {{ background:var(--nav-bg); color:var(--nav-selected); }}
+main {{ flex:1; padding:8px 24px 64px; max-width:760px; }}
+h1 {{ font-size:15px; font-weight:400; line-height:1.4; margin:12px 0 12px; color:var(--muted); }}
+h2 {{ font-size:13px; font-weight:500; margin:16px 0 8px; color:var(--muted); }}
+section.on > h2 {{ display:none; }}
+.lead {{ color:var(--muted); margin:0 0 16px; font-size:13px; }}
+.card {{ background:var(--card); border:1px solid var(--hairline); border-radius:8px; padding:0 16px; margin:0 0 16px; }}
+.row {{ display:flex; align-items:center; gap:16px; min-height:48px; border-top:1px solid var(--line); padding:8px 0; }}
 .card .row:first-child {{ border-top:0; }}
 .row .grow {{ flex:1; }}
-.row small {{ display:block; color:var(--muted); }}
-select, .text {{ background:var(--field); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }}
-.btn {{ border:0; background:var(--accent); color:var(--accent-ink); border-radius:999px; padding:8px 14px; cursor:pointer; }}
-.btn.quiet {{ background:transparent; color:var(--ink); border:1px solid var(--line); }}
+.row small {{ display:block; color:var(--muted); font-size:12px; font-weight:400; }}
+select, .text {{ background:var(--field); border:0; border-radius:4px; padding:8px 10px; min-height:36px; }}
+.btn {{ border:0; background:var(--accent); color:var(--accent-ink); border-radius:18px; min-height:36px; padding:0 16px; cursor:pointer; font-weight:500; }}
+.btn.quiet {{ background:transparent; color:var(--accent); border:1px solid var(--hairline); }}
 .btn.danger {{ background:transparent; color:var(--danger); border:1px solid var(--danger); }}
 .tiles {{ display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:12px; }}
 .tile {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; min-height:88px; }}
@@ -463,22 +558,50 @@ select, .text {{ background:var(--field); border:1px solid var(--line); border-r
 table {{ width:100%; border-collapse:collapse; }}
 td {{ padding:10px 8px; border-top:1px solid var(--line); vertical-align:top; }}
 .hidden {{ display:none !important; }}
+.solo-title {{ display:none; align-items:center; gap:12px; font-size:22px; margin-right:16px; white-space:nowrap; }}
+.app.solo aside {{ display:none; }}
+.app.solo .solo-title {{ display:flex; }}
+.app.solo .searchrow {{ padding-left:20px; }}
+.app.solo main {{ max-width:none; }}
+.empty {{ min-height:60vh; display:grid; place-items:center; color:var(--muted); text-align:center; }}
+.tabs {{ display:flex; gap:16px; border-bottom:1px solid var(--line); margin-bottom:16px; }}
+.tabs a {{ color:var(--muted); padding:10px 4px; font-weight:500; font-size:13px; }}
+.tabs a.on {{ color:var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }}
+nav .sep {{ height:1px; margin:8px 16px; background:var(--line); }}
+.day {{ font-size:15px; font-weight:500; color:var(--ink); margin:8px 0 8px; }}
+.hrow {{ display:flex; align-items:center; min-height:36px; gap:8px; padding:0 14px; }}
+.hrow + .hrow {{ box-shadow: inset 0 1px 0 var(--line); }}
+.htime {{ width:64px; flex:none; color:#646464; font-size:13px; }}
+html[data-theme="dark"] .htime {{ color:#9aa0a6; }}
+.favicon {{ width:16px; height:16px; border-radius:2px; background:var(--field); flex:none; }}
+.hmain {{ flex:1; min-width:0; }}
+.hmain a {{ color:var(--ink); font-size:13px; }}
+.hmain small {{ display:block; color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.dl {{ display:flex; align-items:center; gap:16px; min-height:64px; padding:8px 0; border-top:1px solid var(--line); }}
+.dl:first-child {{ border-top:0; }}
+.dl .grow a {{ color:var(--accent); font-weight:500; }}
+.fileico {{ width:24px; height:24px; border-radius:4px; background:var(--field); flex:none; }}
+.sw {{ width:36px; height:20px; border-radius:10px; border:0; background:#bdc1c6; position:relative; padding:0; cursor:pointer; flex:none; }}
+.sw.on {{ background:var(--accent); }}
+.sw i {{ display:block; width:16px; height:16px; border-radius:50%; background:#fff; position:absolute; top:2px; left:2px; }}
+.sw.on i {{ left:18px; }}
+.aboutbox {{ text-align:center; padding:32px 0 8px; }}
+.aboutbox .logo {{ margin-bottom:12px; }}
+.sub {{ color:var(--muted); font-size:13px; margin:4px 0 16px; }}
 </style>
 </head>
 <body>
-<header class="top"><img class="markimg" src="{mark}" alt=""><div class="brand">Mithu</div>
-<input class="search" id="q" placeholder="Search settings" aria-label="Search settings"></header>
-<div class="layout">
+<div class="app {layout}">
+<aside>
+<div class="pagetitle"><img class="markimg" src="{mark}" alt="">{page_title}</div>
 <nav>
-<a href="mithu://newtab">New tab</a>
-<a href="mithu://settings">Settings</a>
-<a href="mithu://history">History</a>
-<a href="mithu://downloads">Downloads</a>
-<a href="mithu://bookmarks">Bookmarks</a>
-<a href="mithu://extensions">Extensions</a>
-<a href="mithu://version">About</a>
+{nav}
 </nav>
+</aside>
+<div class="maincol">
+<div class="searchrow"><div class="solo-title"><img class="markimg" src="{mark}" alt="">{page_title}</div><input class="search" id="q" placeholder="{search_label}" aria-label="{search_label}"></div>
 <main>{body}</main>
+</div>
 </div>
 <script>
 var q = document.getElementById("q");
@@ -486,8 +609,15 @@ q.addEventListener("input", function () {{
   var needle = q.value.toLowerCase();
   document.querySelectorAll("[data-section]").forEach(function (node) {{
     var hay = (node.getAttribute("data-section") || "").toLowerCase();
-    node.classList.toggle("hidden", needle && hay.indexOf(needle) < 0);
+    var show = needle ? hay.indexOf(needle) >= 0 : node.classList.contains("on");
+    node.classList.toggle("hidden", !show);
   }});
+}});
+q.addEventListener("keydown", function (event) {{
+  if (event.key !== "Enter") return;
+  var page = location.href;
+  var key = page.indexOf("history") >= 0 ? "mithu://history?q=" : page.indexOf("downloads") >= 0 ? "mithu://downloads?q=" : page.indexOf("bookmarks") >= 0 ? "mithu://bookmarks?q=" : "";
+  if (key) location.href = key + encodeURIComponent(q.value);
 }});
 function go(op, params, back) {{
   var url = "mithu://do?op=" + encodeURIComponent(op) + "&back=" + encodeURIComponent(back || location.href.split("?")[0]);
@@ -499,21 +629,156 @@ function go(op, params, back) {{
 </script>
 <p style="display:none">Mithu {version}</p>
 </body></html>"#,
+        fonts = roboto_faces(),
         theme = theme,
         font = prefs.font_px.clamp(12, 24),
         title = esc(title),
         icon = crate::brand::favicon_data_uri(),
         mark = crate::brand::mark_data_uri(),
+        layout = if matches!(title, "Downloads" | "New Tab") { "solo" } else { "" },
+        page_title = page_title(title),
+        search_label = search_label(title),
+        nav = nav_html(title, body, prefs),
         body = body,
         version = esc(version),
     )
 }
 
+fn page_title(title: &str) -> &'static str {
+    match title {
+        "Downloads" => "Download history",
+        "Extensions" => "Extensions",
+        "History" => "History",
+        "Bookmarks" => "Bookmarks",
+        "New Tab" => "New tab",
+        _ => "Settings",
+    }
+}
+
+fn search_label(title: &str) -> &'static str {
+    match title {
+        "History" => "Search history",
+        "Downloads" => "Search download history",
+        "Bookmarks" => "Search bookmarks",
+        "Extensions" => "Search extensions",
+        "New Tab" => "Search",
+        _ => "Search settings",
+    }
+}
+
+fn nav_link(href: &str, label: &str, on: bool) -> String {
+    format!(
+        "<a href=\"{href}\"{class}>{icon}{label}</a>",
+        class = if on { " class=\"on\"" } else { "" },
+        icon = nav_icon(label),
+        label = esc(label),
+    )
+}
+
+fn nav_icon(label: &str) -> &'static str {
+    match label {
+        "You" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"8\" r=\"3\"/><path d=\"M5 19c1.5-3 4-4.5 7-4.5S17.5 16 19 19\"/></svg>",
+        "Autofill and passwords" => "<svg viewBox=\"0 0 24 24\"><rect x=\"6\" y=\"10\" width=\"12\" height=\"9\" rx=\"1\"/><path d=\"M9 10V8a3 3 0 0 1 6 0v2\"/></svg>",
+        "Privacy and security" => "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z\"/></svg>",
+        "Performance" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 8v5l3 2\"/></svg>",
+        "Appearance" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M12 3v2M12 19v2M3 12h2M19 12h2\"/></svg>",
+        "Search engine" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"11\" cy=\"11\" r=\"6\"/><path d=\"M16 16l4 4\"/></svg>",
+        "Default browser" => "<svg viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"6\" width=\"16\" height=\"12\" rx=\"1\"/></svg>",
+        "On startup" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 8v4\"/></svg>",
+        "Languages" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M4 12h16M12 4c2 3 2 13 0 16M12 4c-2 3-2 13 0 16\"/></svg>",
+        "Downloads" => "<svg viewBox=\"0 0 24 24\"><path d=\"M12 4v10M8 10l4 4 4-4M5 19h14\"/></svg>",
+        "Accessibility" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"5\" r=\"2\"/><path d=\"M5 9h14M12 9v11M8 20l4-6 4 6\"/></svg>",
+        "System" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M12 3v3M12 18v3M3 12h3M18 12h3\"/></svg>",
+        "Reset settings" => "<svg viewBox=\"0 0 24 24\"><path d=\"M4 12a8 8 0 1 0 2-5\"/><path d=\"M4 4v5h5\"/></svg>",
+        "Extensions" | "My extensions" => "<svg viewBox=\"0 0 24 24\"><path d=\"M8 8h3V4H8v4zm5 0h3V4h-3v4zM8 14h8v6H8z\"/></svg>",
+        "About Mithu" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 11v5M12 8h.01\"/></svg>",
+        "History" | "Mithu history" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 8v5l3 2\"/></svg>",
+        "Tabs from other devices" => "<svg viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"6\" width=\"12\" height=\"10\" rx=\"1\"/><path d=\"M16 10h4v8H8\"/></svg>",
+        "Delete browsing data" => "<svg viewBox=\"0 0 24 24\"><path d=\"M5 7h14M9 7V5h6v2M8 7l1 12h6l1-12\"/></svg>",
+        "Keyboard shortcuts" => "<svg viewBox=\"0 0 24 24\"><rect x=\"3\" y=\"6\" width=\"18\" height=\"12\" rx=\"1\"/></svg>",
+        "Bookmarks bar" | "Other bookmarks" => "<svg viewBox=\"0 0 24 24\"><path d=\"M4 6h7l2 2h7v10H4z\"/></svg>",
+        _ => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/></svg>",
+    }
+}
+
+fn nav_html(title: &str, body: &str, prefs: &Prefs) -> String {
+    if title == "Settings" || title == "Version" {
+        let mut out = String::new();
+        for (id, label) in SETTINGS_NAV {
+            if *id == "about" {
+                continue;
+            }
+            if *id == "languages" {
+                out.push_str("<div class=\"sep\"></div>");
+            }
+            let selected = body.contains(&format!("id=\"{id}\" class=\"on\""));
+            out.push_str(&nav_link(&format!("mithu://settings/{id}"), label, selected));
+        }
+        out.push_str("<div class=\"sep\"></div>");
+        out.push_str(&nav_link("mithu://extensions", "Extensions", false));
+        let about_on = body.contains("id=\"about\" class=\"on\"");
+        out.push_str(&nav_link("mithu://settings/about", "About Mithu", about_on));
+        return out;
+    }
+    if title == "History" {
+        let synced = body.contains("data-view=\"synced\"");
+        let mut out = nav_link("mithu://history", "Mithu history", !synced);
+        out.push_str(&nav_link("mithu://history?view=synced", "Tabs from other devices", synced));
+        out.push_str("<div class=\"sep\"></div>");
+        out.push_str(&nav_link("mithu://settings/privacy", "Delete browsing data", false));
+        return out;
+    }
+    if title == "Bookmarks" {
+        let mut folders = vec!["Bookmarks bar".to_string(), "Other bookmarks".to_string()];
+        for mark in &prefs.bookmarks {
+            if !folders.iter().any(|folder| folder == &mark.folder) {
+                folders.push(mark.folder.clone());
+            }
+        }
+        let mut out = String::new();
+        for folder in folders {
+            let on = body.contains(&format!("data-folder=\"{}\"", esc(&folder)));
+            out.push_str(&nav_link(
+                &format!("mithu://bookmarks?folder={}", percent(&folder)),
+                &folder,
+                on,
+            ));
+        }
+        return out;
+    }
+    if title == "Extensions" {
+        let shortcuts = body.contains("data-view=\"shortcuts\"");
+        let mut out = nav_link("mithu://extensions", "My extensions", !shortcuts);
+        out.push_str(&nav_link("mithu://extensions?view=shortcuts", "Keyboard shortcuts", shortcuts));
+        return out;
+    }
+    String::new()
+}
+
+const SETTINGS_NAV: &[(&str, &str)] = &[
+    ("you", "You"),
+    ("autofill", "Autofill and passwords"),
+    ("privacy", "Privacy and security"),
+    ("performance", "Performance"),
+    ("appearance", "Appearance"),
+    ("search", "Search engine"),
+    ("default", "Default browser"),
+    ("startup", "On startup"),
+    ("languages", "Languages"),
+    ("downloads", "Downloads"),
+    ("accessibility", "Accessibility"),
+    ("system", "System"),
+    ("reset", "Reset settings"),
+    ("about", "About Mithu"),
+];
+
 fn settings_body(spec: &str, prefs: &Prefs) -> String {
-    let focus = spec.split('/').nth(3).unwrap_or("").split('?').next().unwrap_or("");
-    let mut out = String::from("<h1>Settings</h1><p class=\"lead\">Mithu stores these on this computer and applies them in both editions.</p>");
+    let raw = spec.split('/').nth(3).unwrap_or("").split('?').next().unwrap_or("");
+    let focus = if raw.is_empty() { "you" } else { raw };
+    let heading = SETTINGS_NAV.iter().find(|(id, _)| *id == focus).map(|(_, label)| *label).unwrap_or("Settings");
+    let mut out = format!("<h1>{}</h1>", esc(heading));
     out.push_str(&section("you profile name", "You", &you_card(prefs), focus == "you"));
-    out.push_str(&section("autofill passwords", "Autofill and passwords", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Passwords and cards stay empty until a lock is added. Nothing is sent off this computer.</div></div></div>", focus == "autofill"));
+    out.push_str(&section("autofill passwords", "Autofill and passwords", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Password manager<small>Nothing is stored until a lock is added. Nothing leaves this computer.</small></div></div><div class=\"row\"><div class=\"grow\">Payment methods</div></div><div class=\"row\"><div class=\"grow\">Addresses and more</div></div></div>", focus == "autofill"));
     out.push_str(&section("privacy security clear", "Privacy and security", &privacy_card(), focus == "privacy"));
     out.push_str(&section("performance memory", "Performance", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Memory saver<small>Open tabs stay as they are. Mithu does not discard them in the background yet.</small></div></div></div>", focus == "performance"));
     out.push_str(&section("appearance theme font zoom home bookmarks", "Appearance", &appearance_card(prefs), focus == "appearance"));
@@ -529,8 +794,8 @@ fn settings_body(spec: &str, prefs: &Prefs) -> String {
         "about version",
         "About Mithu",
         &format!(
-            "<img class=\"logo\" src=\"{}\" alt=\"Mithu Browser\"><div class=\"card\"><div class=\"row\"><div class=\"grow\">Version<small>Also at mithu://version</small></div><a href=\"mithu://version\">Open</a></div></div>",
-            crate::brand::logo_data_uri()
+            "<div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\"><strong>Mithu</strong></div></div><div class=\"row\"><div class=\"grow\">Version<small>Also at mithu://version</small></div><a href=\"mithu://version\">Open</a></div><div class=\"row\"><div class=\"grow\">Open source notices<small>THIRD_PARTY_NOTICES.md</small></div></div></div>",
+            mark = crate::brand::mark_data_uri(),
         ),
         focus == "about",
     ));
@@ -539,19 +804,20 @@ fn settings_body(spec: &str, prefs: &Prefs) -> String {
 
 fn section(keys: &str, title: &str, body: &str, on: bool) -> String {
     format!(
-        "<section data-section=\"{keys} {title}\" id=\"{id}\"><h2>{title}</h2>{body}</section>",
+        "<section data-section=\"{keys} {title}\" id=\"{id}\" class=\"{class}\"><h2>{title}</h2>{body}</section>",
         keys = esc(keys),
         title = esc(title),
         id = esc(keys.split_whitespace().next().unwrap_or("section")),
+        class = if on { "on" } else { "hidden" },
         body = body,
-        // on is reserved for a future scroll; the id is enough
-    ) + if on { "" } else { "" }
+    )
 }
 
 fn you_card(prefs: &Prefs) -> String {
     format!(
-        "<div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\">{name}<small>Local profile. Not an account.</small></div>
-<button class=\"btn quiet\" onclick=\"go('set', {{key:'name', value: prompt('Profile name', '{name}') || '{name}'}}, 'mithu://settings/you')\">Edit</button></div></div>",
+        "<div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\">{name}<small>Local profile. Not an account.</small></div></div>
+<div class=\"row\"><div class=\"grow\">Customize profile</div><button class=\"btn quiet\" onclick=\"go('set', {{key:'name', value: prompt('Profile name', '{name}') || '{name}'}}, 'mithu://settings/you')\">Edit</button></div>
+<div class=\"row\"><div class=\"grow\">Import bookmarks</div><a href=\"mithu://bookmarks\">Open</a></div></div>",
         name = esc(&prefs.name),
         mark = crate::brand::mark_data_uri(),
     )
@@ -638,90 +904,143 @@ fn system_card(prefs: &Prefs) -> String {
 }
 
 fn privacy_card() -> String {
-    "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Clear history<small>Pages you visited in Mithu on this computer.</small></div>
-<button class=\"btn danger\" onclick=\"go('forget-all', {}, 'mithu://history')\">Clear</button></div></div>".into()
+    "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Delete browsing data<small>History stored by Mithu on this computer.</small></div>
+<button class=\"btn danger\" onclick=\"go('forget-all', {}, 'mithu://settings/privacy')\">Delete data</button></div>
+<div class=\"row\"><div class=\"grow\">Cookies and site data<small>Mithu does not keep a separate cookie list in this build.</small></div></div>
+<div class=\"row\"><div class=\"grow\">Site settings<small>Permissions stay with the page until a site list is added.</small></div></div>
+<div class=\"row\"><div class=\"grow\">Security<small>HTTPS pages show a lock in the address bar.</small></div></div></div>".into()
 }
 
 fn history_body(spec: &str, prefs: &Prefs) -> String {
-    let q = query_value(spec, "q").to_ascii_lowercase();
-    let mut rows = String::new();
-    let mut last_day = String::new();
-    for visit in prefs.history.iter().rev() {
-        if !q.is_empty() && !visit.url.to_ascii_lowercase().contains(&q) && !visit.title.to_ascii_lowercase().contains(&q) {
-            continue;
-        }
-        let day = day_label(visit.at);
-        if day != last_day {
-            rows.push_str(&format!("<h2>{}</h2><div class=\"card\"><table>", esc(&day)));
-            last_day = day;
-        }
-        rows.push_str(&format!(
-            "<tr><td><a href=\"{}\">{}</a><small style=\"display:block;color:var(--muted)\">{}</small></td><td><button class=\"btn quiet\" onclick=\"go('forget', {{value:'{}'}}, 'mithu://history')\">Delete</button></td></tr>",
-            esc(&visit.url),
-            esc(&visit.title),
-            esc(&visit.url),
-            js(&visit.url),
-        ));
+    let view = query_value(spec, "view");
+    if view == "synced" {
+        return "<div data-view=\"synced\"><h1>Tabs from other devices</h1><div class=\"empty\">No tabs from other devices</div></div>".into();
     }
-    if !rows.is_empty() {
-        rows.push_str("</table></div>");
+    let q = query_value(spec, "q").to_ascii_lowercase();
+    let grouped = query_value(spec, "group") == "host";
+    let mut rows = String::new();
+    if grouped {
+        let mut hosts: Vec<String> = Vec::new();
+        for visit in prefs.history.iter().rev() {
+            if !q.is_empty() && !visit.url.to_ascii_lowercase().contains(&q) && !visit.title.to_ascii_lowercase().contains(&q) {
+                continue;
+            }
+            let host = host_of(&visit.url);
+            if !hosts.iter().any(|item| item == &host) {
+                hosts.push(host);
+            }
+        }
+        for host in hosts {
+            rows.push_str(&format!("<h2>{}</h2><div class=\"card\">", esc(&host)));
+            for visit in prefs.history.iter().rev() {
+                if host_of(&visit.url) == host {
+                    rows.push_str(&history_row(visit));
+                }
+            }
+            rows.push_str("</div>");
+        }
+    } else {
+        let mut last_day = String::new();
+        for visit in prefs.history.iter().rev() {
+            if !q.is_empty() && !visit.url.to_ascii_lowercase().contains(&q) && !visit.title.to_ascii_lowercase().contains(&q) {
+                continue;
+            }
+            let day = day_heading(visit.at);
+            if day != last_day {
+                if !last_day.is_empty() {
+                    rows.push_str("</div>");
+                }
+                rows.push_str(&format!("<h2 class=\"day\">{}</h2><div class=\"card\">", esc(&day)));
+                last_day = day;
+            }
+            rows.push_str(&history_row(visit));
+        }
+        if !rows.is_empty() {
+            rows.push_str("</div>");
+        }
     }
     if rows.is_empty() {
-        rows = "<p class=\"lead\">No matching history.</p>".into();
+        rows = "<div class=\"empty\">Your browsing history appears here</div>".into();
     }
+    let date_on = if grouped { "" } else { " class=\"on\"" };
+    let group_on = if grouped { " class=\"on\"" } else { "" };
     format!(
-        "<h1>History</h1><div class=\"card\"><div class=\"row\"><input class=\"text grow\" placeholder=\"Search history\" value=\"{}\" onchange=\"location.href='mithu://history?q='+encodeURIComponent(this.value)\"></div></div>{rows}",
-        esc(&q)
+        "<div data-view=\"history\"><div class=\"tabs\"><a href=\"mithu://history\"{date_on}>By date</a><a href=\"mithu://history?group=host\"{group_on}>By group</a></div>{rows}</div>"
     )
 }
 
-fn downloads_body(prefs: &Prefs) -> String {
-    if prefs.downloads.is_empty() {
-        return "<h1>Downloads</h1><p class=\"lead\">Files you save show up here.</p>".into();
-    }
-    let mut rows = String::from("<div class=\"card\"><table>");
+fn history_row(visit: &Visit) -> String {
+    format!(
+        "<div class=\"hrow\"><div class=\"htime\">{}</div><div class=\"favicon\"></div><div class=\"hmain\"><a href=\"{}\">{}</a><small>{}</small></div><button class=\"btn quiet\" onclick=\"go('forget', {{value:'{}'}}, 'mithu://history')\">Delete</button></div>",
+        esc(&clock_label(visit.at)),
+        esc(&visit.url),
+        esc(if visit.title.is_empty() { visit.url.as_str() } else { visit.title.as_str() }),
+        esc(&host_of(&visit.url)),
+        js(&visit.url),
+    )
+}
+
+fn downloads_body(spec: &str, prefs: &Prefs) -> String {
+    let q = query_value(spec, "q").to_ascii_lowercase();
+    let mut rows = String::new();
     for item in prefs.downloads.iter().rev() {
+        let name = std::path::Path::new(&item.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(item.path.as_str());
+        if !q.is_empty() && !name.to_ascii_lowercase().contains(&q) && !item.url.to_ascii_lowercase().contains(&q) {
+            continue;
+        }
         rows.push_str(&format!(
-            "<tr><td>{}<small style=\"display:block;color:var(--muted)\">{} · {}</small></td><td>
-<button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'open'}}, 'mithu://downloads')\">Open</button>
-<button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'reveal'}}, 'mithu://downloads')\">Show in folder</button>
-<button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'cancel'}}, 'mithu://downloads')\">Cancel</button>
-<button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'retry'}}, 'mithu://downloads')\">Retry</button>
-</td></tr>",
-            esc(&item.path),
+            "<div class=\"dl\"><div class=\"fileico\"></div><div class=\"grow\"><a href=\"{}\">{}</a><small style=\"display:block;color:var(--muted)\">{}</small></div>
+<button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'reveal'}}, 'mithu://downloads')\">Show in folder</button></div>",
             esc(&item.url),
+            esc(name),
             esc(&item.state),
-            js(&item.path),
-            js(&item.path),
-            js(&item.path),
             js(&item.path),
         ));
     }
-    rows.push_str("</table></div>");
-    format!("<h1>Downloads</h1>{rows}")
+    if rows.is_empty() {
+        return "<div class=\"empty\">Files you download appear here</div>".into();
+    }
+    format!("<div class=\"card\">{rows}</div>")
 }
 
-fn bookmarks_body(prefs: &Prefs) -> String {
+fn bookmarks_body(spec: &str, prefs: &Prefs) -> String {
     let export = export_html(prefs);
-    let mut groups: Vec<(String, String)> = Vec::new();
-    for mark in &prefs.bookmarks {
-        if let Some((_, html)) = groups.iter_mut().find(|(folder, _)| folder == &mark.folder) {
-            html.push_str(&bookmark_row(mark));
-        } else {
-            groups.push((mark.folder.clone(), bookmark_row(mark)));
+    let requested = query_value(spec, "folder");
+    let selected = if requested.is_empty() { "Bookmarks bar".to_string() } else { requested };
+    let q = query_value(spec, "q").to_ascii_lowercase();
+    let mut list = String::new();
+    let shown: Vec<_> = prefs
+        .bookmarks
+        .iter()
+        .filter(|mark| mark.folder == selected)
+        .filter(|mark| q.is_empty() || mark.title.to_ascii_lowercase().contains(&q) || mark.url.to_ascii_lowercase().contains(&q))
+        .collect();
+    if shown.is_empty() {
+        list.push_str("<div class=\"empty\">To bookmark pages, click the star in the address bar</div>");
+    } else {
+        list.push_str("<div class=\"card\">");
+        for mark in shown {
+            list.push_str(&bookmark_row(mark));
         }
+        list.push_str("</div>");
     }
-    let mut body = String::from("<h1>Bookmarks</h1><p class=\"lead\">Folders live in the Mithu profile.</p>");
-    body.push_str("<div class=\"card\"><div class=\"row\"><button class=\"btn\" onclick=\"go('bookmark', {value: prompt('URL')||'', title: prompt('Name')||'', folder: prompt('Folder', 'Bookmarks bar')||'Bookmarks bar'}, 'mithu://bookmarks')\">Add</button>");
-    body.push_str("<button class=\"btn quiet\" onclick=\"go('import', {value: prompt('Paste bookmark HTML')||''}, 'mithu://bookmarks')\">Import HTML</button>");
-    body.push_str(&format!("<a class=\"btn quiet\" href=\"data:text/html,{export}\" download=\"mithu-bookmarks.html\">Export HTML</a></div></div>"));
-    if groups.is_empty() {
-        body.push_str("<p class=\"lead\">No bookmarks yet.</p>");
-    }
-    for (folder, rows) in groups {
-        body.push_str(&format!("<h2>{}</h2><div class=\"card\"><table>{rows}</table></div>", esc(&folder)));
-    }
-    body
+    format!(
+        "<div data-folder=\"{folder}\"><div class=\"row\" style=\"border:0\"><button class=\"btn quiet\" onclick=\"go('bookmark', {{value: prompt('URL')||'', title: prompt('Name')||'', folder: '{js_folder}'}}, 'mithu://bookmarks?folder={enc}')\">Add</button><button class=\"btn quiet\" onclick=\"go('import', {{value: prompt('Paste bookmark HTML')||''}}, 'mithu://bookmarks')\">Import</button><a class=\"btn quiet\" href=\"data:text/html,{export}\" download=\"mithu-bookmarks.html\">Export</a></div>{list}</div>",
+        folder = esc(&selected),
+        js_folder = js(&selected),
+        enc = percent(&selected),
+    )
+}
+
+fn translate_body() -> String {
+    "<h1>Translate</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">Mithu does not translate pages.<small>The page stays on this computer. Nothing is sent to a translation service.</small></div><a class=\"btn quiet\" href=\"mithu://settings/languages\">Languages</a></div></div>".into()
+}
+
+fn inspect_body() -> String {
+    "<h1>Developer tools</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">Mithu Lite opens the system page inspector.<small>The Servo edition has no remote inspector in this build. Print uses the page's own print dialog when the engine provides one.</small></div></div></div>".into()
 }
 
 fn bookmark_row(mark: &Bookmark) -> String {
@@ -750,8 +1069,11 @@ fn export_html(prefs: &Prefs) -> String {
     percent(&html)
 }
 
-fn extensions_body() -> String {
-    "<h1>Extensions</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">No extensions installed.<small>Mithu does not load third-party extension packages yet. This page is the place they will be managed.</small></div></div></div>".into()
+fn extensions_body(spec: &str) -> String {
+    if query_value(spec, "view") == "shortcuts" {
+        return "<div data-view=\"shortcuts\"><h1>Keyboard shortcuts</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">No extension shortcuts<small>Mithu does not load extension packages yet.</small></div></div></div></div>".into();
+    }
+    "<div data-view=\"extensions\"><h1>All extensions</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">No extensions installed<small>Mithu does not load extension packages yet.</small></div></div></div></div>".into()
 }
 
 fn newtab_body(prefs: &Prefs) -> String {
@@ -775,20 +1097,19 @@ fn newtab_body(prefs: &Prefs) -> String {
 
 fn version_body(version: &str) -> String {
     format!(
-        "<h1>About Mithu</h1><img class=\"logo\" src=\"{logo}\" alt=\"Mithu Browser\"><div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\">Mithu<small>Version {version}</small></div></div>
-<div class=\"row\"><div class=\"grow\">Revision source<small>The first line of VERSION.md, copied into the binary.</small></div></div>
-<div class=\"row\"><div class=\"grow\">Updates<small>A newer tag is published from that same line.</small></div></div></div>",
+        "<div id=\"about\" class=\"on\"><h1>About Mithu</h1><div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\"><strong>Mithu</strong><small>Version {version}</small></div></div>
+<div class=\"row\"><div class=\"grow\">Open source notices<small>THIRD_PARTY_NOTICES.md</small></div></div></div></div>",
         version = esc(version),
-        logo = crate::brand::logo_data_uri(),
         mark = crate::brand::mark_data_uri(),
     )
 }
 
 fn toggle(key: &str, on: bool, back: &str) -> String {
     let next = if on { "0" } else { "1" };
+    let class = if on { "sw on" } else { "sw" };
     let label = if on { "On" } else { "Off" };
     format!(
-        "<button class=\"btn quiet\" onclick=\"go('set', {{key:'{key}', value:'{next}'}}, '{back}')\">{label}</button>"
+        "<button class=\"{class}\" aria-pressed=\"{on}\" aria-label=\"{label}\" onclick=\"go('set', {{key:'{key}', value:'{next}'}}, '{back}')\"><i></i></button>"
     )
 }
 
@@ -827,6 +1148,45 @@ fn query_value(spec: &str, key: &str) -> String {
         }
     }
     String::new()
+}
+
+fn clock_label(at: u64) -> String {
+    if at == 0 {
+        return String::new();
+    }
+    let secs = at % 86_400;
+    format!("{:02}:{:02}", secs / 3600, (secs % 3600) / 60)
+}
+
+fn host_of(url: &str) -> String {
+    Url::parse(url).ok().and_then(|url| url.host_str().map(str::to_string)).unwrap_or_else(|| url.to_string())
+}
+
+fn day_heading(at: u64) -> String {
+    let iso = day_label(at);
+    let Some((year, rest)) = iso.split_once('-') else {
+        return iso;
+    };
+    let Some((month, day)) = rest.split_once('-') else {
+        return iso;
+    };
+    let name = match month {
+        "01" => "January",
+        "02" => "February",
+        "03" => "March",
+        "04" => "April",
+        "05" => "May",
+        "06" => "June",
+        "07" => "July",
+        "08" => "August",
+        "09" => "September",
+        "10" => "October",
+        "11" => "November",
+        "12" => "December",
+        _ => return iso,
+    };
+    let day_n: u32 = day.parse().unwrap_or(0);
+    format!("{day_n} {name} {year}")
 }
 
 fn day_label(at: u64) -> String {
@@ -1001,6 +1361,13 @@ mod tests {
         assert!(!visible.contains("google"));
         assert!(!visible.contains("chrome"));
         assert!(doc.html.contains("Appearance"));
+        assert!(doc.html.contains("class=\"on\""));
+        let translate = open("mithu://translate", &loaded, "0.1.5").unwrap();
+        let visible = strip_data_uris(&translate.html).to_ascii_lowercase();
+        assert!(visible.contains("does not translate"));
+        assert!(!visible.contains("google"));
+        assert!(open("mithu://inspect", &loaded, "0.1.5").unwrap().html.contains("Developer tools"));
+        assert!(open("mithu://settings", &loaded, "0.1.5").unwrap().html.contains("id=\"you\" class=\"on\""));
         assert!(open("mithu://version", &loaded, "9.9.9").unwrap().html.contains("9.9.9"));
         assert!(open("about:history", &loaded, "0.1.3").unwrap().html.contains("example.com/a"));
         assert_eq!(day_label(1_700_000_000), "2023-11-14");
@@ -1038,6 +1405,7 @@ mod tests {
             prefs.theme = theme.into();
             for spec in [
                 "mithu://settings",
+                "mithu://settings/privacy",
                 "mithu://history",
                 "mithu://downloads",
                 "mithu://bookmarks",
@@ -1048,6 +1416,9 @@ mod tests {
                 let doc = open(spec, &prefs, "0.1.3").expect(spec);
                 let name = spec.trim_start_matches("mithu://");
                 let path = std::path::Path::new(&dir).join(format!("{name}-{suffix}.html"));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("page dir");
+                }
                 std::fs::write(path, doc.html).expect("write page");
             }
         }

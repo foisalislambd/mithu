@@ -124,6 +124,7 @@ pub struct Browser {
     submenu: Option<mithu_ui::menus::MenuId>,
     quit: bool,
     fullscreen_toggle: bool,
+    window_private: Option<bool>,
     suggestion: Option<usize>,
     pointer: (f32, f32),
     pressed: bool,
@@ -189,6 +190,7 @@ impl Browser {
             submenu: None,
             quit: false,
             fullscreen_toggle: false,
+            window_private: None,
             suggestion: None,
             pointer: (-1.0, -1.0),
             pressed: false,
@@ -612,6 +614,11 @@ impl Browser {
         let toggle = self.fullscreen_toggle;
         self.fullscreen_toggle = false;
         toggle
+    }
+
+    /// `Some(true)` asks the host for a private window. `Some(false)` asks for another normal window.
+    pub fn take_window(&mut self) -> Option<bool> {
+        self.window_private.take()
     }
 
     pub fn context_target(&mut self, kind: &str, x: f32, y: f32) {
@@ -1231,7 +1238,18 @@ impl Browser {
             MenuId::Back => self.back(),
             MenuId::Forward => self.forward(),
             MenuId::Reload => self.reload(),
-            MenuId::NewTab | MenuId::NewWindow | MenuId::OpenLinkTab | MenuId::OpenLinkWindow | MenuId::OpenImageTab => self.new_tab(),
+            MenuId::NewTab | MenuId::OpenLinkTab | MenuId::OpenImageTab => self.new_tab(),
+            MenuId::NewWindow | MenuId::OpenLinkWindow => {
+                self.window_private = Some(false);
+                self.bump();
+            }
+            MenuId::PrivateWindow | MenuId::OpenLinkPrivate => {
+                self.window_private = Some(true);
+                self.bump();
+            }
+            MenuId::Print => self.print(),
+            MenuId::Translate => self.navigate("mithu://translate"),
+            MenuId::DevTools => self.navigate("mithu://inspect"),
             MenuId::Bookmark | MenuId::BookmarkManager => {
                 if item == MenuId::BookmarkManager {
                     self.navigate("mithu://bookmarks");
@@ -1277,12 +1295,19 @@ impl Browser {
             MenuId::Exit => self.quit = true,
             MenuId::Fullscreen => self.fullscreen_toggle = true,
             MenuId::CopyLink | MenuId::CopyLinkAddress | MenuId::CopyImage | MenuId::Copy => {}
-            MenuId::Print | MenuId::Translate | MenuId::PrivateWindow | MenuId::OpenLinkPrivate
-            | MenuId::SavePage | MenuId::SaveLink | MenuId::SaveImage | MenuId::SendDevice
-            | MenuId::CreateShortcut | MenuId::NameWindow | MenuId::TaskManager | MenuId::DevTools
+            MenuId::SavePage | MenuId::SaveLink | MenuId::SaveImage | MenuId::SendDevice
+            | MenuId::CreateShortcut | MenuId::NameWindow | MenuId::TaskManager
             | MenuId::NewTabGroup | MenuId::PasteAndGo | MenuId::Cut | MenuId::Paste | MenuId::SelectAll
             | MenuId::Zoom | MenuId::TabGroups | MenuId::SaveShare | MenuId::MoreTools | MenuId::Separator => {}
         }
+    }
+
+    pub fn print(&mut self) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            tab.webview.evaluate_javascript("window.print()", |_| {});
+        }
+        self.status = "Print requested.".into();
+        self.bump();
     }
 
     fn suggestions(&self) -> Vec<String> {

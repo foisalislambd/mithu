@@ -31,7 +31,7 @@ pub const MUTED: u32 = rgb(94, 94, 94);
 pub const HOVER: u32 = rgb(168, 199, 250);
 pub const PLUS: u32 = rgb(236, 243, 254);
 pub const STAR: u32 = rgb(242, 180, 0);
-pub const PAGE: u32 = rgb(244, 241, 234);
+pub const PAGE: u32 = rgb(255, 255, 255);
 
 pub const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     (r << 16) | (g << 8) | b

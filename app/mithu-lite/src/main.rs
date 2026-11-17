@@ -25,6 +25,17 @@ use wry::dpi::{PhysicalPosition as WryPos, PhysicalSize as WrySize};
 use wry::{PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 
 
+fn spawn_window(private: bool) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = std::process::Command::new(exe);
+    if private {
+        command.env("MITHU_PRIVATE", "1");
+    }
+    let _ = command.spawn();
+}
+
 fn app_icon() -> Option<winit::window::Icon> {
     let image = mithu_ui::brand::window_icon(true);
     winit::window::Icon::from_rgba(image.rgba, image.width, image.height).ok()
@@ -354,6 +365,7 @@ impl App {
         let shared = self.shared.clone();
         let bounds = self.content_rect();
         WebViewBuilder::new_with_web_context(&mut self.web_context)
+            .with_devtools(true)
             .with_bounds(bounds)
             .with_visible(false)
             .with_focused(false)
@@ -768,9 +780,18 @@ impl App {
             model.submenu = None;
         }
         match id {
-            MenuId::NewTab | MenuId::NewWindow | MenuId::OpenLinkTab | MenuId::OpenLinkWindow | MenuId::OpenImageTab => {
+            MenuId::NewTab | MenuId::OpenLinkTab | MenuId::OpenImageTab => {
                 self.open_tab("mithu://newtab", false);
             }
+            MenuId::NewWindow | MenuId::OpenLinkWindow => spawn_window(false),
+            MenuId::PrivateWindow | MenuId::OpenLinkPrivate => spawn_window(true),
+            MenuId::Print => {
+                if let Some(webview) = self.active_webview() {
+                    let _ = webview.print();
+                }
+            }
+            MenuId::Translate => self.load_in_active("mithu://translate"),
+            MenuId::DevTools => self.open_inspector(),
             MenuId::History => self.load_in_active("mithu://history"),
             MenuId::Downloads => self.load_in_active("mithu://downloads"),
             MenuId::Bookmarks | MenuId::BookmarkManager => self.load_in_active("mithu://bookmarks"),
@@ -904,9 +925,37 @@ impl App {
         self.load_in_active(&text);
     }
 
+    fn open_inspector(&mut self) {
+        if self.try_devtools() {
+            return;
+        }
+        self.load_in_active("mithu://inspect");
+    }
+
+    fn try_devtools(&mut self) -> bool {
+        #[cfg(any(debug_assertions, feature = "devtools"))]
+        {
+            if let Some(webview) = self.active_webview() {
+                webview.open_devtools();
+                return true;
+            }
+        }
+        #[cfg(not(any(debug_assertions, feature = "devtools")))]
+        {
+            let _ = self.active_webview();
+        }
+        false
+    }
+
     fn shortcut(&mut self, key: &str) {
         match key {
             "new" => self.open_tab("about:newtab", true),
+            "print" => {
+                if let Some(webview) = self.active_webview() {
+                    let _ = webview.print();
+                }
+            }
+            "devtools" => self.open_inspector(),
             "close" => {
                 let index = self.model().active;
                 self.close_index(index);
@@ -1056,10 +1105,11 @@ impl App {
         self.apply_bounds();
         if let Some(window) = &self.window {
             let title = self.model().active().map(|tab| tab.title.clone()).unwrap_or_default();
+            let private = if std::env::var_os("MITHU_PRIVATE").is_some() { "Private — " } else { "" };
             if title.is_empty() || title == "New Tab" {
-                window.set_title(&format!("Mithu Lite {}", env!("MITHU_VERSION")));
+                window.set_title(&format!("{private}Mithu Lite {}", env!("MITHU_VERSION")));
             } else {
-                window.set_title(&format!("{title} — Mithu Lite {}", env!("MITHU_VERSION")));
+                window.set_title(&format!("{private}{title} — Mithu Lite {}", env!("MITHU_VERSION")));
             }
         }
     }
@@ -1302,6 +1352,10 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::F5) => self.reload_or_stop(),
                     Key::Named(NamedKey::Tab) if ctrl && shift => self.shortcut("prev"),
                     Key::Named(NamedKey::Tab) if ctrl => self.shortcut("next"),
+                    Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("n") => spawn_window(true),
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("n") => spawn_window(false),
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("p") => self.shortcut("print"),
+                    Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("i") => self.shortcut("devtools"),
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("t") => self.shortcut("new"),
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("w") => self.shortcut("close"),
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("l") => self.shortcut("location"),

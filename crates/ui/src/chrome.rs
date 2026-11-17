@@ -175,10 +175,10 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
     let tool_h = snap(TOOLBAR_H, scale);
     let book_h = snap(BOOKMARK_BAR_H, scale);
     let bar = content_chrome(state);
-    fill_rect(pixels, width, height, 0.0, 0.0, w, tab_h, tone(TAB_STRIP, rgb(27, 29, 33)));
-    fill_rect(pixels, width, height, 0.0, tab_h, w, tool_h, tone(TOOLBAR, rgb(32, 34, 38)));
+    fill_rect(pixels, width, height, 0.0, 0.0, w, tab_h, tone(TAB_STRIP, rgb(31, 32, 32)));
+    fill_rect(pixels, width, height, 0.0, tab_h, w, tool_h, tone(TOOLBAR, rgb(60, 60, 60)));
     if state.bookmarks_open {
-        fill_rect(pixels, width, height, 0.0, tab_h + tool_h, w, book_h, tone(TOOLBAR, rgb(32, 34, 38)));
+        fill_rect(pixels, width, height, 0.0, tab_h + tool_h, w, book_h, tone(TOOLBAR, rgb(60, 60, 60)));
     }
     fill_rect(pixels, width, height, 0.0, bar - 1.0, w, 1.0, tone(LINE, rgb(60, 64, 67)));
     let app_mark = snap(22.0, scale).max(1.0);
@@ -794,7 +794,7 @@ fn paint_bookmarks(pixels: &mut [u32], width: u32, height: u32, state: &State<'_
 
 fn paint_ntp(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
     let top = content_chrome(state);
-    fill_rect(pixels, width, height, 0.0, top, state.width, state.height - top, if state.dark { rgb(20, 22, 26) } else { rgb(244, 241, 234) });
+    fill_rect(pixels, width, height, 0.0, top, state.width, state.height - top, if state.dark { rgb(31, 31, 31) } else { rgb(255, 255, 255) });
     let size = snap(220.0, unit(state.scale)).min(state.width * 0.46).max(1.0);
     let cx = state.width / 2.0;
     let y = top + snap(48.0, unit(state.scale));
@@ -872,8 +872,8 @@ fn extensions_rect(state: &State<'_>) -> Rect {
 
 fn profile_rect(state: &State<'_>) -> Rect {
     let tools = toolbar(state.width, state.scale, state.show_home);
-    let w = dip(220.0);
-    let h = dip(88.0);
+    let w = dip(280.0);
+    let h = dip(132.0);
     Rect {
         x: (tools.profile.x - dip(80.0)).min(state.width - w - dip(8.0)).max(dip(8.0)),
         y: tools.profile.bottom() + dip(6.0),
@@ -899,8 +899,10 @@ fn paint_profile_card(pixels: &mut [u32], width: u32, height: u32, state: &State
     fill_round(pixels, width, height, x, y, w, rect.h, dip(12.0), TOOLBAR);
     let mark = dip(32.0).max(1.0);
     crate::brand::blit(pixels, width, height, x + dip(12.0), y + dip(16.0), mark, mark, crate::brand::mark());
-    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(34.0), 15.0, INK, "Mithu");
-    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(56.0), 12.0, MUTED, "Not signed in");
+    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(28.0), 15.0, INK, "Mithu");
+    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(48.0), 12.0, MUTED, "Not signed in");
+    draw_text(pixels, width, height, state.fonts, x + dip(16.0), y + dip(84.0), 13.0, INK, "Customize profile");
+    draw_text(pixels, width, height, state.fonts, x + dip(16.0), y + dip(110.0), 13.0, INK, "Settings");
 }
 
 fn paint_menu(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, popup: Popup) {
@@ -1065,7 +1067,7 @@ fn menu_icon(label: &str) -> Kind {
 }
 
 fn menu_rect(state: &State<'_>, popup: Popup) -> Rect {
-    let w = dip(400.0);
+    let w = dip(336.0);
     let h = menu_block_height(&state.menu_labels);
     match popup {
         Popup::App => {
@@ -1504,7 +1506,7 @@ mod tests {
                 show_home: true,
             };
             let menu = menu_rect(&state, Popup::App);
-            assert_eq!(menu.w, (400.0 * scale).round());
+            assert_eq!(menu.w, (336.0 * scale).round());
             assert!(menu.right() <= state.width + 0.5);
             assert!(menu.x >= 0.0);
             let label = text_width(&fonts, "Downloads", 13.0);

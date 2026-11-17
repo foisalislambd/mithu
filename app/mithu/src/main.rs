@@ -13,6 +13,17 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+fn spawn_window(private: bool) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = std::process::Command::new(exe);
+    if private {
+        command.env("MITHU_PRIVATE", "1");
+    }
+    let _ = command.spawn();
+}
+
 fn app_icon() -> Option<winit::window::Icon> {
     let image = image::load_from_memory(include_bytes!("../../../assets/brand/png/mark-128.png")).ok()?;
     let rgba = image.to_rgba8();
@@ -305,12 +316,19 @@ impl App {
         }
     }
 
+    fn open_requested_window(&mut self) {
+        if let Some(private) = self.browser.take_window() {
+            spawn_window(private);
+        }
+    }
+
     fn sync_title(&self) {
         if let Some(window) = &self.window {
+            let private = if std::env::var_os("MITHU_PRIVATE").is_some() { "Private — " } else { "" };
             let title = if self.browser.title().is_empty() {
-                format!("Mithu {}", env!("MITHU_VERSION"))
+                format!("{private}Mithu {}", env!("MITHU_VERSION"))
             } else {
-                format!("{} — Mithu {}", self.browser.title(), env!("MITHU_VERSION"))
+                format!("{private}{} — Mithu {}", self.browser.title(), env!("MITHU_VERSION"))
             };
             window.set_title(&title);
         }
@@ -433,6 +451,7 @@ impl ApplicationHandler for App {
                                     window.set_maximized(!window.is_maximized());
                                 }
                             }
+                            self.open_requested_window();
                         }
                     }
                     self.sync_title();
@@ -515,9 +534,16 @@ impl ApplicationHandler for App {
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("t") => {
                         self.browser.new_tab()
                     }
-                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("n") => {
-                        self.browser.new_tab()
+                    Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("n") => {
+                        spawn_window(true);
                     }
+                    Key::Character(text) if ctrl && shift && text.eq_ignore_ascii_case("i") => {
+                        self.browser.navigate("mithu://inspect");
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("n") => {
+                        spawn_window(false);
+                    }
+                    Key::Character(text) if ctrl && text.eq_ignore_ascii_case("p") => self.browser.print(),
                     Key::Character(text) if ctrl && text.eq_ignore_ascii_case("h") => {
                         self.browser.navigate("about:history")
                     }
@@ -576,6 +602,7 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::Space) if !focused => self.browser.scroll_page(1.0),
                     _ => self.forward_key(&event.logical_key, true),
                 }
+                self.open_requested_window();
                 self.sync_title();
                 self.request_redraw();
             }
