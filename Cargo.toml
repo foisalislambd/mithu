@@ -5,6 +5,7 @@ members = [
     "crates/ui",
     "crates/shell",
     "crates/host",
+    "crates/mobile",
     "app/mithu",
     "app/mithu-lite",
 ]
