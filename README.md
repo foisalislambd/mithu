@@ -194,7 +194,7 @@ cargo test --workspace
 
 ## Mobile
 
-The phone projects are in the tree. They are not published as release artifacts, and neither one links Servo yet. Both open the shared new-tab page in the system web view.
+The phone projects are in the tree. They are not published as release artifacts, and neither one links Servo yet. Both open the shared new-tab page in the system web view. `tools/install-mobile-assets.sh` writes that page, the logo, and the fonts at build time. Those files are not committed.
 
 | | Android | iOS |
 | --- | --- | --- |

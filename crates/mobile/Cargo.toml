@@ -11,5 +11,9 @@ description = "Shared page and identity logic for the Android and iOS Mithu apps
 [dependencies]
 mithu-ui = { path = "../ui" }
 
+[[bin]]
+name = "mithu-mobile-assets"
+path = "src/bin/mithu-mobile-assets.rs"
+
 [lints]
 workspace = true

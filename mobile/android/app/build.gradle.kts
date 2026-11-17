@@ -3,6 +3,21 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val repoRoot = rootProject.projectDir.parentFile.parentFile
+val generatedAssets = layout.buildDirectory.dir("generated/mobile-assets")
+
+val installMobileAssets = tasks.register<Exec>("installMobileAssets") {
+    workingDir = repoRoot
+    val dest = generatedAssets.map { it.asFile.absolutePath }
+    commandLine("sh", repoRoot.resolve("tools/install-mobile-assets.sh").absolutePath, dest.get())
+    inputs.file(repoRoot.resolve("VERSION.md"))
+    inputs.file(repoRoot.resolve("tools/install-mobile-assets.sh"))
+    inputs.dir(repoRoot.resolve("assets/fonts/roboto"))
+    inputs.file(repoRoot.resolve("assets/brand/png/logo-512.png"))
+    inputs.file(repoRoot.resolve("assets/brand/png/mark-64.png"))
+    outputs.dir(generatedAssets)
+}
+
 android {
     namespace = "org.mithu.lite"
     compileSdk = 35
@@ -41,8 +56,16 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    sourceSets.named("main") {
+        assets.srcDir(generatedAssets)
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(installMobileAssets)
 }
 
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.webkit:webkit:1.12.1")
 }
