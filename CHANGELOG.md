@@ -2,6 +2,10 @@
 
 Mithu follows the first line of `VERSION.md`. Dates are the day the release is tagged.
 
+## 0.1.9
+
+The Servo edition keeps the window thread off the engine. Script for each site runs in a content process, blank and internal pages stay in-process, and site processes stop at four. The chrome font book skips faces larger than 1 MB so a blank window stays under the previous idle RAM. Shutting down that in-process script thread on Windows no longer panics the constellation. Layout, network, and image work use a pool sized to the machine. Pages are stored in a small disk cache, background tabs are frozen, and the release build is optimized and stripped. See `docs/PROCESS.md`.
+
 ## 0.1.8
 
 The phone new-tab page is generated at build time and loads the logo and fonts as files, so those copies are not stored in git.

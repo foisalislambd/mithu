@@ -6,18 +6,20 @@
 //! No product logo is drawn.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use dpi::PhysicalSize;
 use mithu_text::{FontBook, Glyph, glyph_top};
 use servo::{
-    Code, DevicePoint, ImeEvent, InputEvent, Key, KeyState, KeyboardEvent, LoadStatus, Location,
-    Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
-    PixelFormat, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext, Theme, WebView,
-    WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
+    Code, DevicePoint, EventLoopWaker, ImeEvent, InputEvent, Key, KeyState, KeyboardEvent,
+    LoadStatus, Location, Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent,
+    MouseMoveEvent, NamedKey, Opts, OutputOptions, PixelFormat, RenderingContext, Servo,
+    ServoBuilder, SoftwareRenderingContext, Theme, WebView, WebViewBuilder, WebViewDelegate,
+    WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use url::Url;
 
@@ -43,6 +45,10 @@ struct PendingPermission {
 #[derive(Clone)]
 struct Delegate {
     frame: Rc<AtomicBool>,
+    /// Stays set after the first paint of this navigation. `frame` is cleared
+    /// on every spin, so a page that paints once and then goes quiet would
+    /// never count as settled.
+    painted: Rc<AtomicBool>,
     opened: Rc<RefCell<Vec<PendingTab>>>,
     shot: Rc<RefCell<Option<servo::RgbaImage>>>,
     saves: Rc<RefCell<Vec<String>>>,
@@ -58,6 +64,7 @@ impl WebViewDelegate for Delegate {
     fn notify_new_frame_ready(&self, webview: WebView) {
         webview.paint();
         self.frame.store(true, Ordering::SeqCst);
+        self.painted.store(true, Ordering::SeqCst);
     }
 
     fn request_create_new(&self, _parent: WebView, request: servo::CreateNewWebViewRequest) {
@@ -117,6 +124,77 @@ struct Tab {
     status: LoadStatus,
     zoom: f32,
     group_id: u8,
+}
+
+/// Wakes the engine thread when Servo has work, the same role as Chrome's
+/// task-runner wake on the browser UI thread.
+pub struct EngineWake {
+    pending: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl EngineWake {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            pending: Mutex::new(false),
+            cv: Condvar::new(),
+        })
+    }
+
+    pub fn poke(&self) {
+        let mut pending = self.pending.lock().expect("engine wake");
+        *pending = true;
+        self.cv.notify_one();
+    }
+
+    /// Wait until [`Self::poke`] or `limit` elapses.
+    pub fn wait(&self, limit: Duration) {
+        let pending = self.pending.lock().expect("engine wake");
+        if *pending {
+            return;
+        }
+        let _ = self.cv.wait_timeout(pending, limit);
+    }
+
+    pub fn take(&self) -> bool {
+        let mut pending = self.pending.lock().expect("engine wake");
+        let was = *pending;
+        *pending = false;
+        was
+    }
+}
+
+struct ServoWake(Arc<EngineWake>);
+
+impl EventLoopWaker for ServoWake {
+    fn clone_box(&self) -> Box<dyn EventLoopWaker> {
+        Box::new(ServoWake(self.0.clone()))
+    }
+
+    fn wake(&self) {
+        self.0.poke();
+    }
+}
+
+thread_local! {
+    static ENGINE_WAKE: RefCell<Option<Arc<EngineWake>>> = const { RefCell::new(None) };
+}
+
+/// The engine thread calls this before [`Browser::new`] so Servo can wake it.
+pub fn bind_engine_wake(wake: Arc<EngineWake>) {
+    ENGINE_WAKE.with(|slot| *slot.borrow_mut() = Some(wake));
+}
+
+/// Child processes spawned for a site re-exec this binary. Servo passes
+/// `--content-process` and a channel token, the same shape as a Chromium renderer.
+pub fn run_content_process_if_requested() {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("--content-process") {
+        if let Some(token) = args.next() {
+            servo::run_content_process(token);
+            std::process::exit(0);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -198,12 +276,14 @@ pub struct Browser {
     fonts: FontBook,
     revision: u64,
     frame: Rc<AtomicBool>,
+    painted: Rc<AtomicBool>,
     status: String,
     groups: Vec<TabGroup>,
     group_editor: bool,
     window_name: String,
     field: Field,
     permission_prompt: String,
+    visibility_stamp: Option<(usize, usize, bool)>,
 }
 
 impl Browser {
@@ -217,19 +297,58 @@ impl Browser {
     pub fn try_new() -> Result<Self, String> {
         install_crypto();
         let frame = Rc::new(AtomicBool::new(false));
+        let painted = Rc::new(AtomicBool::new(false));
         let opened = Rc::new(RefCell::new(Vec::new()));
         let delegate = Delegate {
             frame: frame.clone(),
+            painted: painted.clone(),
             opened,
             shot: Rc::new(RefCell::new(None)),
             saves: Rc::new(RefCell::new(Vec::new())),
             permissions: Rc::new(RefCell::new(Vec::new())),
         };
+        let config = mithu_config_dir();
+        let _ = std::fs::create_dir_all(&config);
+        let cores = std::thread::available_parallelism()
+            .map(|count| count.get() as u64)
+            .unwrap_or(4)
+            .clamp(2, 8);
         let mut preferences = servo::Preferences::default();
         preferences.network_http_proxy_uri = String::new();
         preferences.network_https_proxy_uri = String::new();
         preferences.user_agent = strip_servo_token(&preferences.user_agent);
-        let servo = ServoBuilder::default().preferences(preferences).build();
+        // Stylo and the shared pools follow the machine, the way Chrome sizes
+        // its thread pool and renderer compositor threads.
+        preferences.layout_threads = cores;
+        preferences.layout_parallelism_job_count_minimum = 2;
+        preferences.thread_pool_workers_max = cores;
+        preferences.thread_pool_async_runtime_workers_max = cores;
+        preferences.thread_pool_fallback_workers = cores.min(4);
+        preferences.thread_pool_webrender_workers_max = cores.min(4);
+        preferences.thread_pool_canvas_workers = cores.min(4);
+        preferences.js_offthread_compilation_enabled = true;
+        // SpiderMonkey's cap is in megabytes and must be below 256.
+        preferences.js_mem_max = 192;
+        preferences.network_http_cache_size = 1024;
+        preferences.network_http_disk_cache = config.join("http-cache.sqlite").display().to_string();
+        preferences.network_http_disk_cache_size = 32 * 1024 * 1024;
+        preferences.session_history_max_length = 8;
+        let mut opts = Opts::default();
+        opts.multiprocess = true;
+        opts.sandbox = false;
+        opts.config_dir = Some(config);
+        if let Ok(path) = std::env::var("MITHU_TIME_PROFILE") {
+            if path == "-" {
+                opts.time_profiling = Some(OutputOptions::Stdout(2.0));
+            } else if !path.is_empty() {
+                opts.time_profiling = Some(OutputOptions::FileName(path));
+            }
+        }
+        let mut builder = ServoBuilder::default().preferences(preferences).opts(opts);
+        if let Some(wake) = ENGINE_WAKE.with(|slot| slot.borrow().clone()) {
+            builder = builder.event_loop_waker(Box::new(ServoWake(wake)));
+        }
+        let servo = builder.build();
         servo.setup_logging();
         let mut browser = Self {
             servo,
@@ -272,12 +391,14 @@ impl Browser {
             fonts: FontBook::load(),
             revision: 1,
             frame,
+            painted,
             status: String::new(),
             groups: Vec::new(),
             group_editor: false,
             window_name: String::new(),
             field: Field::None,
             permission_prompt: String::new(),
+            visibility_stamp: None,
         };
         browser.open_tab(start_url())?;
         browser.apply_prefs();
@@ -340,9 +461,22 @@ impl Browser {
             .map(|tab| tab.url.as_str())
             .unwrap_or("");
         if want.starts_with("http") {
-            return done && have.starts_with("http") && self.frame.load(Ordering::SeqCst);
+            return done && have.starts_with("http") && self.painted.load(Ordering::SeqCst);
         }
         done && same_url(have, want)
+    }
+
+    pub fn hold_status(&self) -> String {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return "no tab".into();
+        };
+        let state = match tab.status {
+            LoadStatus::Started => "started",
+            LoadStatus::HeadParsed => "head",
+            LoadStatus::Complete => "complete",
+            LoadStatus::Stopped => "stopped",
+        };
+        format!("{state} {}", tab.url)
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -378,6 +512,7 @@ impl Browser {
         }
         self.overlay = None;
         self.frame.store(false, Ordering::SeqCst);
+        self.painted.store(false, Ordering::SeqCst);
         self.pending_url = Some(url.to_string());
         self.wait_for_context();
         self.tabs[self.active].webview.load(url.clone());
@@ -1127,6 +1262,10 @@ impl Browser {
         }
     }
 
+    pub fn spin_once(&mut self) {
+        self.spin();
+    }
+
     fn spin(&mut self) {
         if let Some(tab) = self.tabs.get(self.active) {
             let _ = tab.context.make_current();
@@ -1136,6 +1275,7 @@ impl Browser {
         self.drain_downloads();
         self.drain_permissions();
         self.sync_active();
+        self.sync_visibility();
         if self.frame.swap(false, Ordering::SeqCst) {
             self.bump();
         }
@@ -2378,6 +2518,66 @@ fn blend(pixels: &mut [u32], width: u32, height: u32, x: i32, y: i32, color: u32
     *dest = (((sr * a + dr * inv) / 255) << 16)
         | (((sg * a + dg * inv) / 255) << 8)
         | ((sb * a + db * inv) / 255);
+}
+
+impl Drop for Browser {
+    fn drop(&mut self) {
+        // Close every webview before Servo asks the constellation to exit.
+        // In multiprocess mode that shutdown waits until each content process
+        // has been told to stop, and Servo's own drop spins until it finishes.
+        self.tabs.clear();
+        self.delegate.opened.borrow_mut().clear();
+    }
+}
+
+fn mithu_config_dir() -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        if !appdata.is_empty() {
+            return PathBuf::from(appdata).join("mithu");
+        }
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("mithu");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".config").join("mithu");
+        }
+    }
+    std::env::temp_dir().join("mithu")
+}
+
+impl Browser {
+    /// Hide and throttle every tab except the focused one.
+    ///
+    /// Servo treats `about:blank` as its own site, so loading it in a
+    /// background tab starts another content process and does not free the
+    /// one that was already running. Hiding is the freeze step Servo
+    /// implements: timers and animation frames are throttled.
+    fn sync_visibility(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let focused = !self.omnibox_focused && !self.find_focused && self.overlay.is_none();
+        let stamp = (self.active, self.tabs.len(), focused);
+        if self.visibility_stamp == Some(stamp) {
+            return;
+        }
+        self.visibility_stamp = Some(stamp);
+        let active = self.active;
+        for (index, tab) in self.tabs.iter().enumerate() {
+            if index == active {
+                tab.webview.show();
+                tab.webview.set_focused(focused);
+            } else {
+                tab.webview.hide();
+                tab.webview.set_focused(false);
+            }
+        }
+    }
 }
 
 fn strip_servo_token(agent: &str) -> String {

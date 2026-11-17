@@ -92,6 +92,13 @@ impl FontBook {
     pub fn load() -> Self {
         let mut book = Self::bundled();
         for path in SYSTEM_FALLBACKS {
+            // fontdue keeps every outline. A CJK fallback is a few megabytes
+            // on disk and well over 100 MB once parsed, which blows the idle
+            // window. The chrome can shape the smaller faces; page text is
+            // Servo's problem.
+            if std::fs::metadata(path).map(|meta| meta.len() > 1024 * 1024).unwrap_or(true) {
+                continue;
+            }
             if let face @ Face::Vector(_) = load_face(&[path]) {
                 book.fallbacks.push(face);
             }
