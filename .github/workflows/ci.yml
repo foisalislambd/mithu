@@ -95,7 +95,10 @@ jobs:
 
   ios:
     name: Unsigned iOS build
-    runs-on: macos-latest
+    # One job, on the Intel pool. macos-latest is arm64, and those runners
+    # are often cancelled after 15 minutes with no machine assigned.
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
         with:
