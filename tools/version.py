@@ -124,13 +124,19 @@ def write_version_line(text: str, version: str) -> str:
 
 
 def sync_readme(text: str, version: str) -> str:
+    """Point every version badge at VERSION.md's line.
+
+    The badge is an HTML image, because a Markdown image inside a centered
+    HTML block is shown as raw text on GitHub. The older Markdown form is
+    still rewritten if it is present.
+    """
     text = re.sub(
         r"(https://img\.shields\.io/badge/version-)[^-]+-",
         rf"\g<1>{version}-",
         text,
-        count=1,
     )
-    text = re.sub(r"(\[!\[Version )[^]]+(\])", rf"\g<1>{version}\2", text, count=1)
+    text = re.sub(r"(\[!\[Version )[^]]+(\])", rf"\g<1>{version}\2", text)
+    text = re.sub(r'(alt="Version )[^"]+(")', rf"\g<1>{version}\2", text)
     text = re.sub(
         r"(Right now that line is `)[^`]+(`)",
         rf"\g<1>{version}\2",
@@ -416,6 +422,10 @@ def run_tests() -> None:
             encoding="utf-8",
         )
         (root / "README.md").write_text(
+            '<p align="center">\n'
+            '  <a href="VERSION.md"><img alt="Version 0.1.0" src="https://img.shields.io/badge/version-0.1.0-2ea44f"></a>\n'
+            "</p>\n"
+            "\n"
             "[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-2ea44f)](VERSION.md)\n"
             "Right now that line is `0.1.0`.\n",
             encoding="utf-8",
