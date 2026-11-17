@@ -1,9 +1,24 @@
 import UIKit
 import WebKit
 
-/// System web view for Mithu Lite. The Servo edition would use the same
-/// documents from the mithu-mobile crate once a Servo iOS embedding exists.
-/// The bundle id in Info.plist is org.mithu.lite.
+@main
+final class AppDelegate: UIResponder, UIApplicationDelegate {
+    var window: UIWindow?
+
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool {
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = ViewController()
+        window.makeKeyAndVisible()
+        self.window = window
+        return true
+    }
+}
+
+/// System web view. The bundle id is org.mithu.lite. This target is built
+/// unsigned on the macOS CI runner.
 final class ViewController: UIViewController, WKNavigationDelegate {
     private let web = WKWebView(frame: .zero)
 

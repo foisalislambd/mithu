@@ -150,6 +150,8 @@ struct TabInfo {
     can_back: bool,
     can_forward: bool,
     group: u8,
+    group_name: String,
+    collapsed: bool,
 }
 
 struct Model {
@@ -185,6 +187,8 @@ struct Model {
     settled: bool,
     navigate: Option<String>,
     prefs: mithu_ui::pages::Prefs,
+    group_editor: bool,
+    window_name: String,
 }
 
 impl Model {
@@ -226,6 +230,8 @@ impl Model {
             settled: false,
             navigate: None,
             prefs,
+            group_editor: false,
+            window_name: String::new(),
         }
     }
 
@@ -334,6 +340,8 @@ impl App {
                 can_back: false,
                 can_forward: false,
                 group: 0,
+                group_name: String::new(),
+                collapsed: false,
             });
             model.active = model.tabs.len() - 1;
             model.ntp = show_ntp;
@@ -717,6 +725,33 @@ impl App {
                     let _ = webview.focus();
                 }
             }
+            Hit::GroupBar(_) => {
+                let mut model = self.model();
+                model.group_editor = model.active().is_some_and(|tab| tab.group > 0);
+            }
+            Hit::GroupCollapse => self.collapse_group(),
+            Hit::Ungroup => {
+                let mut model = self.model();
+                if let Some(tab) = model.active_mut() {
+                    tab.group = 0;
+                    tab.group_name.clear();
+                    tab.collapsed = false;
+                }
+                model.group_editor = false;
+            }
+            Hit::CloseGroup => self.close_group(),
+            Hit::GroupColor(color) => {
+                let mut model = self.model();
+                let current = model.active().map(|tab| tab.group).unwrap_or(0);
+                if current != 0 {
+                    for tab in model.tabs.iter_mut() {
+                        if tab.group == current {
+                            tab.group = color;
+                        }
+                    }
+                }
+            }
+            Hit::AllowPermission | Hit::BlockPermission => {}
             Hit::Panel | Hit::None => {}
         }
         self.request_redraw();
@@ -831,14 +866,136 @@ impl App {
                 self.close_index(index);
             }
             MenuId::SavePage | MenuId::SaveLink | MenuId::SaveImage => self.save_active_page(),
+            MenuId::Copy | MenuId::Cut | MenuId::Paste | MenuId::SelectAll => self.edit_command(id),
+            MenuId::CopyLink | MenuId::CopyLinkAddress | MenuId::CopyImage => {
+                let text = self.model().active().map(|tab| tab.url.clone()).unwrap_or_default();
+                mithu_ui::clipboard::set_text(&text);
+            }
+            MenuId::PasteAndGo => {
+                let text = mithu_ui::clipboard::get_text();
+                if !text.trim().is_empty() {
+                    self.load_in_active(text.trim());
+                }
+            }
+            MenuId::CreateShortcut => self.create_shortcut(),
+            MenuId::NameWindow => {
+                let mut model = self.model();
+                if model.window_name.is_empty() {
+                    model.window_name = model.active().map(|tab| tab.title.clone()).unwrap_or_default();
+                }
+            }
+            MenuId::SendDevice => {
+                let text = self.model().active().map(|tab| tab.url.clone()).unwrap_or_default();
+                mithu_ui::clipboard::set_text(&text);
+                eprintln!("mithu-lite: link copied; no other devices are paired");
+            }
             MenuId::TaskManager => self.load_in_active("mithu://tasks"),
             MenuId::NewTabGroup => {
                 let mut model = self.model();
                 if let Some(tab) = model.active_mut() {
                     tab.group = if tab.group == 0 { 1 } else { tab.group % 8 + 1 };
+                    tab.group_name = "Group".into();
+                    tab.collapsed = false;
                 }
+                model.group_editor = true;
             }
+            MenuId::CollapseGroup => self.collapse_group(),
+            MenuId::CloseGroup => self.close_group(),
             _ => {}
+        }
+    }
+
+    fn edit_command(&mut self, id: mithu_ui::menus::MenuId) {
+        use mithu_ui::menus::MenuId;
+        let focused = self.model().omnibox_focused;
+        if focused {
+            let mut model = self.model();
+            match id {
+                MenuId::Copy => mithu_ui::clipboard::set_text(if model.select_all { &model.omnibox } else { "" }),
+                MenuId::Cut => {
+                    mithu_ui::clipboard::set_text(if model.select_all { &model.omnibox } else { "" });
+                    if model.select_all {
+                        model.omnibox.clear();
+                        model.cursor = 0;
+                        model.select_all = false;
+                    }
+                }
+                MenuId::Paste => {
+                    let text = mithu_ui::clipboard::get_text();
+                    if model.select_all {
+                        model.omnibox.clear();
+                        model.cursor = 0;
+                        model.select_all = false;
+                    }
+                    model.omnibox.push_str(&text.chars().take(2000).collect::<String>());
+                    model.cursor = model.omnibox.chars().count();
+                }
+                MenuId::SelectAll => model.select_all = true,
+                _ => {}
+            }
+            return;
+        }
+        let command = match id {
+            MenuId::Copy => "copy",
+            MenuId::Cut => "cut",
+            MenuId::Paste => "paste",
+            MenuId::SelectAll => "selectAll",
+            _ => return,
+        };
+        if let Some(webview) = self.active_webview() {
+            let _ = webview.evaluate_script(&format!("document.execCommand('{command}')"));
+        }
+    }
+
+    fn create_shortcut(&mut self) {
+        let (url, title) = {
+            let model = self.model();
+            let tab = model.active();
+            (
+                tab.map(|tab| tab.url.clone()).unwrap_or_default(),
+                tab.map(|tab| tab.title.clone()).unwrap_or_else(|| "Mithu".into()),
+            )
+        };
+        let name = title.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' }).take(40).collect::<String>();
+        let path = mithu_ui::pages::downloads_folder().join(format!("{}.url", if name.is_empty() { "mithu" } else { &name }));
+        let _ = std::fs::write(&path, format!("[InternetShortcut]\r\nURL={url}\r\n"));
+    }
+
+    fn collapse_group(&mut self) {
+        let mut model = self.model();
+        let color = model.active().map(|tab| tab.group).unwrap_or(0);
+        if color == 0 {
+            return;
+        }
+        let head = model.tabs.iter().position(|tab| tab.group == color);
+        let hide = model.tabs.iter().enumerate().any(|(index, tab)| tab.group == color && Some(index) != head && !tab.collapsed);
+        for (index, tab) in model.tabs.iter_mut().enumerate() {
+            if tab.group == color && Some(index) != head {
+                tab.collapsed = hide;
+            }
+        }
+    }
+
+    fn close_group(&mut self) {
+        let empty = {
+            let mut model = self.model();
+            let color = model.active().map(|tab| tab.group).unwrap_or(0);
+            if color == 0 {
+                return;
+            }
+            model.tabs.retain(|tab| tab.group != color);
+            model.group_editor = false;
+            if model.tabs.is_empty() {
+                true
+            } else {
+                if model.active >= model.tabs.len() {
+                    model.active = model.tabs.len() - 1;
+                }
+                false
+            }
+        };
+        if empty {
+            self.open_tab("mithu://newtab", true);
         }
     }
 
@@ -1052,6 +1209,8 @@ impl App {
                 title: if tab.title.is_empty() { "New Tab".into() } else { tab.title.clone() },
                 favicon: None,
                 group: tab.group,
+                group_name: tab.group_name.clone(),
+                collapsed: tab.collapsed,
             })
             .collect();
         let location = model.active().map(|tab| tab.url.as_str()).unwrap_or("");
@@ -1102,6 +1261,8 @@ impl App {
             scale: self.scale,
             dark: model.prefs.dark(),
             show_home: model.prefs.show_home,
+            group_editor: model.group_editor,
+            permission_prompt: "",
         }
     }
 
@@ -1148,7 +1309,9 @@ impl App {
         let _ = buffer.present();
         self.apply_bounds();
         if let Some(window) = &self.window {
-            let title = self.model().active().map(|tab| tab.title.clone()).unwrap_or_default();
+            let page = self.model().active().map(|tab| tab.title.clone()).unwrap_or_default();
+            let named = self.model().window_name.clone();
+            let title = if named.is_empty() { page } else { format!("{named} — {page}") };
             let private = if std::env::var_os("MITHU_PRIVATE").is_some() { "Private — " } else { "" };
             if title.is_empty() || title == "New Tab" {
                 window.set_title(&format!("{private}Mithu Lite {}", env!("MITHU_VERSION")));

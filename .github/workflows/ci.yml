@@ -65,3 +65,40 @@ jobs:
             Write-Error "Lite wrote nothing to the parent console: $output"
             exit 1
           }
+
+  android:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Build the debug APK
+        working-directory: mobile/android
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mithu-android-debug
+          path: mobile/android/app/build/outputs/apk/**/debug/*.apk
+
+  ios:
+    name: Unsigned iOS build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Compile the unsigned iOS app
+        run: sh tools/ios-unsigned.sh

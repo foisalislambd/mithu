@@ -47,6 +47,8 @@ pub enum MenuId {
     Addresses,
     ManageExtensions,
     NewTabGroup,
+    CollapseGroup,
+    CloseGroup,
     OpenLinkTab,
     OpenLinkWindow,
     OpenLinkPrivate,
@@ -121,7 +123,11 @@ pub fn children(id: MenuId) -> Vec<Row> {
             row(MenuId::Bookmark, "Bookmark this tab", "Ctrl+D", false),
             row(MenuId::ShowBookmarksBar, "Show bookmarks bar", "Ctrl+Shift+B", false),
         ],
-        MenuId::TabGroups => vec![row(MenuId::NewTabGroup, "New tab group", "", false)],
+        MenuId::TabGroups => vec![
+            row(MenuId::NewTabGroup, "New tab group", "", false),
+            row(MenuId::CollapseGroup, "Collapse group", "", false),
+            row(MenuId::CloseGroup, "Close group", "", false),
+        ],
         MenuId::Extensions => vec![row(MenuId::ManageExtensions, "Manage extensions", "", false)],
         MenuId::Find => vec![
             row(MenuId::Find, "Find", "Ctrl+F", false),

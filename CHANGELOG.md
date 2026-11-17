@@ -2,6 +2,10 @@
 
 Mithu follows the first line of `VERSION.md`. Dates are the day the release is tagged.
 
+## 0.1.7
+
+Cut, copy, paste, and select all work in the address bar and are sent to the page. Paste and go opens the clipboard text. Copy link, create shortcut, name window, and send to devices do something visible. A site link whose address looks like a file download is saved into the downloads folder. Permission exceptions are stored per site, and the Servo edition allows or blocks the request from that choice. Tab groups have a name, a color, a collapse control, and an editor. CI builds a debug Android APK and an unsigned iOS app.
+
 ## 0.1.6
 
 Site settings lists the common permissions and content types, each with Ask, Allow, and Block. Empty history and downloads show an illustration. Toolbar icons are filled Material paths. Save page writes the file into the downloads folder. Task manager lists the open tabs. New tab group paints a color bar on the active tab. The Servo edition sends a desktop user agent without an engine token, and Save page stores the file the same way.

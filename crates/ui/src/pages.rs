@@ -29,8 +29,17 @@ pub struct Prefs {
     pub bookmarks: Vec<Bookmark>,
     pub history: Vec<Visit>,
     pub downloads: Vec<Download>,
-    /// Site permission id and choice: ask, allow, or block.
+    /// Site permission id and choice: ask, allow, or block. This is the default.
     pub site: Vec<(String, String)>,
+    /// Per-origin exceptions. The engine uses these before the default.
+    pub exceptions: Vec<Exception>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Exception {
+    pub origin: String,
+    pub feature: String,
+    pub choice: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +98,7 @@ impl Default for Prefs {
             history: Vec::new(),
             downloads: Vec::new(),
             site: Vec::new(),
+            exceptions: Vec::new(),
         }
     }
 }
@@ -365,6 +375,7 @@ fn apply_set(prefs: &mut Prefs, key: &str, value: &str) {
                 prefs.name = value.trim().to_string();
             }
         }
+        "exception" => set_exception(prefs, value),
         "perm" => {
             let Some((id, choice)) = value.split_once(':') else { return };
             if !matches!(choice, "ask" | "allow" | "block") || !site_known(id) {
@@ -1013,6 +1024,50 @@ fn site_choice<'a>(prefs: &'a Prefs, id: &str) -> &'a str {
     prefs.site.iter().find(|(key, _)| key == id).map(|(_, value)| value.as_str()).unwrap_or("ask")
 }
 
+/// The choice the engine should enforce for one origin and one feature.
+pub fn permission_for(prefs: &Prefs, origin: &str, feature: &str) -> String {
+    if let Some(item) = prefs.exceptions.iter().find(|item| item.origin == origin && item.feature == feature) {
+        return item.choice.clone();
+    }
+    site_choice(prefs, feature).to_string()
+}
+
+fn set_exception(prefs: &mut Prefs, value: &str) {
+    let mut parts = value.splitn(3, ':');
+    let origin = parts.next().unwrap_or("");
+    let feature = parts.next().unwrap_or("");
+    let choice = parts.next().unwrap_or("");
+    if origin.is_empty() || !site_known(feature) || !matches!(choice, "ask" | "allow" | "block") {
+        return;
+    }
+    prefs.exceptions.retain(|item| !(item.origin == origin && item.feature == feature));
+    if choice != "ask" {
+        prefs.exceptions.push(Exception {
+            origin: origin.to_string(),
+            feature: feature.to_string(),
+            choice: choice.to_string(),
+        });
+    }
+}
+
+/// True when a main-frame navigation should be saved instead of shown.
+pub fn is_download_url(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return false;
+    }
+    let Some(name) = parsed.path_segments().and_then(|segments| segments.filter(|part| !part.is_empty()).last()) else {
+        return false;
+    };
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some("zip" | "7z" | "rar" | "gz" | "tgz" | "bz2" | "xz" | "dmg" | "exe" | "msi" | "apk" | "deb" | "rpm" | "iso" | "pkg" | "crx" | "bin" | "tar")
+    )
+}
+
 fn site_settings_body(path: &str, prefs: &Prefs) -> String {
     let mut out = String::from("<section id=\"privacy\" class=\"on\" hidden></section>");
     if let Some(id) = path.strip_prefix("site/") {
@@ -1030,6 +1085,19 @@ fn site_settings_body(path: &str, prefs: &Prefs) -> String {
             ));
         }
         out.push_str("</div>");
+        let mut listed = String::new();
+        for item in prefs.exceptions.iter().filter(|item| item.feature == id) {
+            listed.push_str(&format!(
+                "<div class=\"row\"><div class=\"grow\">{}<small>{}</small></div><button class=\"btn quiet\" onclick=\"go('set', {{key:'exception', value:'{}:{id}:ask'}}, 'mithu://settings/site/{id}')\">Remove</button></div>",
+                esc(&item.origin),
+                esc(&item.choice),
+                esc(&item.origin),
+            ));
+        }
+        if listed.is_empty() {
+            listed = "<div class=\"row\"><div class=\"grow\">No site exceptions<small>The engine uses the choice above until a site is allowed or blocked.</small></div></div>".into();
+        }
+        out.push_str(&format!("<p class=\"lead\">Exceptions</p><div class=\"card\">{listed}</div>"));
         return out;
     }
     out.push_str("<h1>Site settings</h1><p class=\"lead\">Permissions</p><div class=\"card\">");
@@ -1470,6 +1538,9 @@ fn format_prefs(prefs: &Prefs) -> String {
     for (id, choice) in &prefs.site {
         out.push_str(&format!("site\t{id}\t{choice}\n"));
     }
+    for item in &prefs.exceptions {
+        out.push_str(&format!("exception\t{}\t{}\t{}\n", item.origin, item.feature, item.choice));
+    }
     out
 }
 
@@ -1510,6 +1581,16 @@ fn parse_prefs(text: &str) -> Prefs {
             let url = parts.next().unwrap_or("").to_string();
             let path = parts.next().unwrap_or("").to_string();
             prefs.downloads.push(Download { url, path, state });
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("exception\t") {
+            let mut parts = rest.splitn(3, '\t');
+            let origin = parts.next().unwrap_or("").to_string();
+            let feature = parts.next().unwrap_or("").to_string();
+            let choice = parts.next().unwrap_or("ask").to_string();
+            if !origin.is_empty() && site_known(&feature) && matches!(choice.as_str(), "allow" | "block") {
+                prefs.exceptions.push(Exception { origin, feature, choice });
+            }
             continue;
         }
         if let Some(rest) = line.strip_prefix("site\t") {
@@ -1580,7 +1661,7 @@ mod tests {
         assert!(is_internal("mithu://tasks"));
         assert!(!is_internal("https://example.com"));
         command("mithu://do?op=set&key=perm&value=camera:block&back=mithu://settings/site/camera", &mut prefs).unwrap();
-        let stored = parse_prefs(&format_prefs(&prefs));
+        let mut stored = parse_prefs(&format_prefs(&prefs));
         assert_eq!(stored.site, vec![("camera".into(), "block".into())]);
         let site = open("mithu://settings/site/camera", &stored, "0.1.6").unwrap();
         assert!(site.html.contains("Block"));
@@ -1588,6 +1669,11 @@ mod tests {
         set_tasks(vec![("Notes".into(), "https://example.com".into(), 1)]);
         assert!(open("mithu://tasks", &stored, "0.1.6").unwrap().html.contains("Notes"));
         assert_eq!(download_name("https://example.com/a/page.html?q=1"), "page.html");
+        set_exception(&mut stored, "example.com:camera:allow");
+        assert_eq!(permission_for(&stored, "example.com", "camera"), "allow");
+        assert_eq!(permission_for(&stored, "other.test", "camera"), "block");
+        assert!(is_download_url("https://example.com/files/mithu.zip"));
+        assert!(!is_download_url("https://example.com/watch"));
     }
 
     #[test]
