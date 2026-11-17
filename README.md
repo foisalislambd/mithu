@@ -13,7 +13,7 @@
   <a href="https://github.com/foisalislambd/mithu/releases"><img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey"></a>
 </p>
 
-<p align="center">[![Version 0.1.4](https://img.shields.io/badge/version-0.1.4-2ea44f)](VERSION.md)</p>
+<p align="center">[![Version 0.1.5](https://img.shields.io/badge/version-0.1.5-2ea44f)](VERSION.md)</p>
 
 <p align="center">
   <img src="docs/screenshots/lite-wikipedia.png" alt="Mithu Lite showing the English Wikipedia main page" width="880">
@@ -189,7 +189,7 @@ Linux desktop entries and hicolor icons are in `assets/linux`. macOS `.icns` fil
 
 ## Releases
 
-The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.1.4`. That file is the only place to change it.
+The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.1.5`. That file is the only place to change it.
 
 `python3 tools/version.py sync` copies the line into `[workspace.package] version`, the workspace packages in `Cargo.lock`, the badge at the top of this file, and, when those projects are in the tree, Android `versionName` / `versionCode` and iOS `CFBundleShortVersionString`, `CFBundleVersion`, `MARKETING_VERSION`, and `CURRENT_PROJECT_VERSION`. The numeric code is `major * 1000000 + minor * 1000 + patch` (0.1.1 is 1001). `python3 tools/version.py check` prints any files that still differ and exits 0.
 

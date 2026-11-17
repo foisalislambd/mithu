@@ -127,11 +127,17 @@ impl Prefs {
 }
 
 pub fn directory() -> PathBuf {
-    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(base).join("Mithu");
+    let base = if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        PathBuf::from(base).join("Mithu")
+    } else {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        home.join(".local").join("share").join("Mithu")
+    };
+    if std::env::var_os("MITHU_PRIVATE").is_some() {
+        base.join("Private")
+    } else {
+        base
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local").join("share").join("Mithu")
 }
 
 pub fn path() -> PathBuf {
@@ -377,6 +383,8 @@ enum Kind {
     Extensions,
     NewTab,
     Version,
+    Translate,
+    Inspect,
 }
 
 fn classify(spec: &str) -> Option<Kind> {
@@ -395,6 +403,8 @@ fn classify(spec: &str) -> Option<Kind> {
         ("mithu", "extensions", _) => Some(Kind::Extensions),
         ("mithu", "newtab", _) | ("about", "", "newtab" | "home" | "mithu") => Some(Kind::NewTab),
         ("mithu", "version", _) => Some(Kind::Version),
+        ("mithu", "translate", _) => Some(Kind::Translate),
+        ("mithu", "inspect", _) => Some(Kind::Inspect),
         _ => None,
     }
 }
@@ -408,6 +418,8 @@ fn render(kind: Kind, spec: &str, prefs: &Prefs, version: &str) -> Document {
         Kind::Extensions => ("mithu://extensions", "Extensions", extensions_body()),
         Kind::NewTab => ("mithu://newtab", "New Tab", newtab_body(prefs)),
         Kind::Version => ("mithu://version", "Version", version_body(version)),
+        Kind::Translate => ("mithu://translate", "Translate", translate_body()),
+        Kind::Inspect => ("mithu://inspect", "Developer tools", inspect_body()),
     };
     Document {
         url: url.into(),
@@ -444,8 +456,8 @@ nav {{ background:var(--side); padding:12px; border-right:1px solid var(--line);
 nav a {{ display:block; padding:8px 12px; border-radius:8px; color:var(--ink); margin:2px 0; }}
 nav a:hover, nav a.on {{ background:var(--hover); text-decoration:none; }}
 main {{ padding:28px 32px 64px; max-width:860px; }}
-h1 {{ font-size:28px; line-height:1.2; margin:0 0 8px; letter-spacing:-0.03em; }}
-h2 {{ font-size:18px; margin:28px 0 8px; }}
+h1 {{ font-size:22px; font-weight:500; line-height:1.3; margin:0 0 16px; letter-spacing:0; }}
+h2 {{ font-size:14px; font-weight:650; margin:20px 0 8px; }}
 .lead {{ color:var(--muted); margin:0 0 20px; }}
 .card {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:4px 16px; margin:12px 0 20px; }}
 .row {{ display:flex; align-items:center; gap:16px; min-height:52px; border-top:1px solid var(--line); padding:8px 0; }}
@@ -463,20 +475,17 @@ select, .text {{ background:var(--field); border:1px solid var(--line); border-r
 table {{ width:100%; border-collapse:collapse; }}
 td {{ padding:10px 8px; border-top:1px solid var(--line); vertical-align:top; }}
 .hidden {{ display:none !important; }}
+.manager {{ display:grid; grid-template-columns: 220px 1fr; gap: 20px; align-items:start; }}
+.folders a {{ display:block; padding:8px 12px; border-radius:8px; color:var(--ink); }}
+.folders a.on, .folders a:hover {{ background:var(--hover); text-decoration:none; }}
 </style>
 </head>
 <body>
 <header class="top"><img class="markimg" src="{mark}" alt=""><div class="brand">Mithu</div>
-<input class="search" id="q" placeholder="Search settings" aria-label="Search settings"></header>
+<input class="search" id="q" placeholder="{search_label}" aria-label="{search_label}"></header>
 <div class="layout">
 <nav>
-<a href="mithu://newtab">New tab</a>
-<a href="mithu://settings">Settings</a>
-<a href="mithu://history">History</a>
-<a href="mithu://downloads">Downloads</a>
-<a href="mithu://bookmarks">Bookmarks</a>
-<a href="mithu://extensions">Extensions</a>
-<a href="mithu://version">About</a>
+{nav}
 </nav>
 <main>{body}</main>
 </div>
@@ -486,7 +495,8 @@ q.addEventListener("input", function () {{
   var needle = q.value.toLowerCase();
   document.querySelectorAll("[data-section]").forEach(function (node) {{
     var hay = (node.getAttribute("data-section") || "").toLowerCase();
-    node.classList.toggle("hidden", needle && hay.indexOf(needle) < 0);
+    var show = needle ? hay.indexOf(needle) >= 0 : node.classList.contains("on");
+    node.classList.toggle("hidden", !show);
   }});
 }});
 function go(op, params, back) {{
@@ -504,13 +514,71 @@ function go(op, params, back) {{
         title = esc(title),
         icon = crate::brand::favicon_data_uri(),
         mark = crate::brand::mark_data_uri(),
+        search_label = if title == "Settings" { "Search settings" } else { "Search" },
+        nav = nav_html(title, body),
         body = body,
         version = esc(version),
     )
 }
 
+fn nav_html(title: &str, body: &str) -> String {
+    if title == "Settings" {
+        let mut out = String::new();
+        for (id, label) in SETTINGS_NAV {
+            let selected = body.contains(&format!("id=\"{id}\" class=\"on\""));
+            out.push_str(&format!(
+                "<a href=\"mithu://settings/{id}\"{class}>{label}</a>",
+                class = if selected { " class=\"on\"" } else { "" },
+                label = esc(label),
+            ));
+        }
+        return out;
+    }
+    let current = match title {
+        "History" => "mithu://history",
+        "Downloads" => "mithu://downloads",
+        "Bookmarks" => "mithu://bookmarks",
+        "Extensions" => "mithu://extensions",
+        "Version" | "About" => "mithu://version",
+        _ => "mithu://newtab",
+    };
+    let items = [
+        ("mithu://newtab", "New tab"),
+        ("mithu://settings", "Settings"),
+        ("mithu://history", "History"),
+        ("mithu://downloads", "Downloads"),
+        ("mithu://bookmarks", "Bookmarks"),
+        ("mithu://extensions", "Extensions"),
+        ("mithu://version", "About"),
+    ];
+    let mut out = String::new();
+    for (href, label) in items {
+        let class = if href == current { " class=\"on\"" } else { "" };
+        out.push_str(&format!("<a href=\"{href}\"{class}>{}</a>", esc(label)));
+    }
+    out
+}
+
+const SETTINGS_NAV: &[(&str, &str)] = &[
+    ("you", "You"),
+    ("autofill", "Autofill and passwords"),
+    ("privacy", "Privacy and security"),
+    ("performance", "Performance"),
+    ("appearance", "Appearance"),
+    ("search", "Search engine"),
+    ("default", "Default browser"),
+    ("startup", "On startup"),
+    ("languages", "Languages"),
+    ("downloads", "Downloads"),
+    ("accessibility", "Accessibility"),
+    ("system", "System"),
+    ("reset", "Reset settings"),
+    ("about", "About Mithu"),
+];
+
 fn settings_body(spec: &str, prefs: &Prefs) -> String {
-    let focus = spec.split('/').nth(3).unwrap_or("").split('?').next().unwrap_or("");
+    let raw = spec.split('/').nth(3).unwrap_or("").split('?').next().unwrap_or("");
+    let focus = if raw.is_empty() { "you" } else { raw };
     let mut out = String::from("<h1>Settings</h1><p class=\"lead\">Mithu stores these on this computer and applies them in both editions.</p>");
     out.push_str(&section("you profile name", "You", &you_card(prefs), focus == "you"));
     out.push_str(&section("autofill passwords", "Autofill and passwords", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Passwords and cards stay empty until a lock is added. Nothing is sent off this computer.</div></div></div>", focus == "autofill"));
@@ -539,13 +607,13 @@ fn settings_body(spec: &str, prefs: &Prefs) -> String {
 
 fn section(keys: &str, title: &str, body: &str, on: bool) -> String {
     format!(
-        "<section data-section=\"{keys} {title}\" id=\"{id}\"><h2>{title}</h2>{body}</section>",
+        "<section data-section=\"{keys} {title}\" id=\"{id}\" class=\"{class}\"><h2>{title}</h2>{body}</section>",
         keys = esc(keys),
         title = esc(title),
         id = esc(keys.split_whitespace().next().unwrap_or("section")),
+        class = if on { "on" } else { "hidden" },
         body = body,
-        // on is reserved for a future scroll; the id is enough
-    ) + if on { "" } else { "" }
+    )
 }
 
 fn you_card(prefs: &Prefs) -> String {
@@ -652,14 +720,18 @@ fn history_body(spec: &str, prefs: &Prefs) -> String {
         }
         let day = day_label(visit.at);
         if day != last_day {
+            if !last_day.is_empty() {
+                rows.push_str("</table></div>");
+            }
             rows.push_str(&format!("<h2>{}</h2><div class=\"card\"><table>", esc(&day)));
             last_day = day;
         }
         rows.push_str(&format!(
-            "<tr><td><a href=\"{}\">{}</a><small style=\"display:block;color:var(--muted)\">{}</small></td><td><button class=\"btn quiet\" onclick=\"go('forget', {{value:'{}'}}, 'mithu://history')\">Delete</button></td></tr>",
+            "<tr><td style=\"width:64px;color:var(--muted)\">{}</td><td><a href=\"{}\">{}</a><small style=\"display:block;color:var(--muted)\">{}</small></td><td style=\"width:88px\"><button class=\"btn quiet\" onclick=\"go('forget', {{value:'{}'}}, 'mithu://history')\">Delete</button></td></tr>",
+            esc(&clock_label(visit.at)),
             esc(&visit.url),
-            esc(&visit.title),
-            esc(&visit.url),
+            esc(if visit.title.is_empty() { visit.url.as_str() } else { visit.title.as_str() }),
+            esc(&host_of(&visit.url)),
             js(&visit.url),
         ));
     }
@@ -670,7 +742,7 @@ fn history_body(spec: &str, prefs: &Prefs) -> String {
         rows = "<p class=\"lead\">No matching history.</p>".into();
     }
     format!(
-        "<h1>History</h1><div class=\"card\"><div class=\"row\"><input class=\"text grow\" placeholder=\"Search history\" value=\"{}\" onchange=\"location.href='mithu://history?q='+encodeURIComponent(this.value)\"></div></div>{rows}",
+        "<h1>History</h1><div class=\"card\"><div class=\"row\"><input class=\"text grow\" placeholder=\"Search history\" value=\"{}\" onchange=\"location.href='mithu://history?q='+encodeURIComponent(this.value)\"><a class=\"btn quiet\" href=\"mithu://settings/privacy\">Delete browsing data</a></div></div>{rows}",
         esc(&q)
     )
 }
@@ -681,47 +753,72 @@ fn downloads_body(prefs: &Prefs) -> String {
     }
     let mut rows = String::from("<div class=\"card\"><table>");
     for item in prefs.downloads.iter().rev() {
+        let name = std::path::Path::new(&item.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(item.path.as_str());
         rows.push_str(&format!(
-            "<tr><td>{}<small style=\"display:block;color:var(--muted)\">{} · {}</small></td><td>
+            "<tr><td><strong>{}</strong><small style=\"display:block;color:var(--muted)\">{} · {}</small></td><td>
 <button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'open'}}, 'mithu://downloads')\">Open</button>
 <button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'reveal'}}, 'mithu://downloads')\">Show in folder</button>
-<button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'cancel'}}, 'mithu://downloads')\">Cancel</button>
-<button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'retry'}}, 'mithu://downloads')\">Retry</button>
 </td></tr>",
-            esc(&item.path),
+            esc(name),
             esc(&item.url),
             esc(&item.state),
-            js(&item.path),
-            js(&item.path),
             js(&item.path),
             js(&item.path),
         ));
     }
     rows.push_str("</table></div>");
-    format!("<h1>Downloads</h1>{rows}")
+    format!("<h1>Downloads</h1><p class=\"lead\">Saved on this computer.</p>{rows}")
 }
 
 fn bookmarks_body(prefs: &Prefs) -> String {
     let export = export_html(prefs);
-    let mut groups: Vec<(String, String)> = Vec::new();
+    let mut folders: Vec<String> = Vec::new();
     for mark in &prefs.bookmarks {
-        if let Some((_, html)) = groups.iter_mut().find(|(folder, _)| folder == &mark.folder) {
-            html.push_str(&bookmark_row(mark));
-        } else {
-            groups.push((mark.folder.clone(), bookmark_row(mark)));
+        if !folders.iter().any(|folder| folder == &mark.folder) {
+            folders.push(mark.folder.clone());
         }
     }
-    let mut body = String::from("<h1>Bookmarks</h1><p class=\"lead\">Folders live in the Mithu profile.</p>");
-    body.push_str("<div class=\"card\"><div class=\"row\"><button class=\"btn\" onclick=\"go('bookmark', {value: prompt('URL')||'', title: prompt('Name')||'', folder: prompt('Folder', 'Bookmarks bar')||'Bookmarks bar'}, 'mithu://bookmarks')\">Add</button>");
-    body.push_str("<button class=\"btn quiet\" onclick=\"go('import', {value: prompt('Paste bookmark HTML')||''}, 'mithu://bookmarks')\">Import HTML</button>");
-    body.push_str(&format!("<a class=\"btn quiet\" href=\"data:text/html,{export}\" download=\"mithu-bookmarks.html\">Export HTML</a></div></div>"));
-    if groups.is_empty() {
-        body.push_str("<p class=\"lead\">No bookmarks yet.</p>");
+    if folders.is_empty() {
+        folders.push("Bookmarks bar".into());
     }
-    for (folder, rows) in groups {
-        body.push_str(&format!("<h2>{}</h2><div class=\"card\"><table>{rows}</table></div>", esc(&folder)));
+    let selected = if folders.iter().any(|folder| folder == "Bookmarks bar") {
+        "Bookmarks bar".to_string()
+    } else {
+        folders[0].clone()
+    };
+    let mut side = String::from("<div class=\"folders card\">");
+    for folder in &folders {
+        let class = if folder == &selected { " class=\"on\"" } else { "" };
+        side.push_str(&format!("<a href=\"#folder-{id}\"{class}>{name}</a>", id = esc(folder), name = esc(folder)));
     }
-    body
+    side.push_str("</div>");
+    let mut list = String::new();
+    let shown: Vec<_> = prefs.bookmarks.iter().filter(|mark| mark.folder == selected).collect();
+    if shown.is_empty() {
+        list.push_str("<p class=\"lead\">This folder is empty.</p>");
+    } else {
+        list.push_str("<div class=\"card\"><table>");
+        for mark in shown {
+            list.push_str(&bookmark_row(mark));
+        }
+        list.push_str("</table></div>");
+    }
+    format!(
+        "<h1>Bookmarks</h1><div class=\"card\"><div class=\"row\"><button class=\"btn\" onclick=\"go('bookmark', {{value: prompt('URL')||'', title: prompt('Name')||'', folder: '{folder}'}}, 'mithu://bookmarks')\">Add</button><button class=\"btn quiet\" onclick=\"go('import', {{value: prompt('Paste bookmark HTML')||''}}, 'mithu://bookmarks')\">Import HTML</button><a class=\"btn quiet\" href=\"data:text/html,{export}\" download=\"mithu-bookmarks.html\">Export HTML</a></div></div><div class=\"manager\">{side}<div><h2>{title}</h2>{list}</div></div>",
+        folder = js(&selected),
+        title = esc(&selected),
+    )
+}
+
+fn translate_body() -> String {
+    "<h1>Translate</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">Mithu does not translate pages.<small>The page stays on this computer. Nothing is sent to a translation service.</small></div><a class=\"btn quiet\" href=\"mithu://settings/languages\">Languages</a></div></div>".into()
+}
+
+fn inspect_body() -> String {
+    "<h1>Developer tools</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">Mithu Lite opens the system page inspector.<small>The Servo edition has no remote inspector in this build. Print uses the page's own print dialog when the engine provides one.</small></div></div></div>".into()
 }
 
 fn bookmark_row(mark: &Bookmark) -> String {
@@ -827,6 +924,18 @@ fn query_value(spec: &str, key: &str) -> String {
         }
     }
     String::new()
+}
+
+fn clock_label(at: u64) -> String {
+    if at == 0 {
+        return String::new();
+    }
+    let secs = at % 86_400;
+    format!("{:02}:{:02}", secs / 3600, (secs % 3600) / 60)
+}
+
+fn host_of(url: &str) -> String {
+    Url::parse(url).ok().and_then(|url| url.host_str().map(str::to_string)).unwrap_or_else(|| url.to_string())
 }
 
 fn day_label(at: u64) -> String {
@@ -1001,6 +1110,13 @@ mod tests {
         assert!(!visible.contains("google"));
         assert!(!visible.contains("chrome"));
         assert!(doc.html.contains("Appearance"));
+        assert!(doc.html.contains("class=\"on\""));
+        let translate = open("mithu://translate", &loaded, "0.1.5").unwrap();
+        let visible = strip_data_uris(&translate.html).to_ascii_lowercase();
+        assert!(visible.contains("does not translate"));
+        assert!(!visible.contains("google"));
+        assert!(open("mithu://inspect", &loaded, "0.1.5").unwrap().html.contains("Developer tools"));
+        assert!(open("mithu://settings", &loaded, "0.1.5").unwrap().html.contains("id=\"you\" class=\"on\""));
         assert!(open("mithu://version", &loaded, "9.9.9").unwrap().html.contains("9.9.9"));
         assert!(open("about:history", &loaded, "0.1.3").unwrap().html.contains("example.com/a"));
         assert_eq!(day_label(1_700_000_000), "2023-11-14");
@@ -1038,6 +1154,7 @@ mod tests {
             prefs.theme = theme.into();
             for spec in [
                 "mithu://settings",
+                "mithu://settings/privacy",
                 "mithu://history",
                 "mithu://downloads",
                 "mithu://bookmarks",
@@ -1048,6 +1165,9 @@ mod tests {
                 let doc = open(spec, &prefs, "0.1.3").expect(spec);
                 let name = spec.trim_start_matches("mithu://");
                 let path = std::path::Path::new(&dir).join(format!("{name}-{suffix}.html"));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("page dir");
+                }
                 std::fs::write(path, doc.html).expect("write page");
             }
         }

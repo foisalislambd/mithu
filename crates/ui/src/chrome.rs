@@ -872,8 +872,8 @@ fn extensions_rect(state: &State<'_>) -> Rect {
 
 fn profile_rect(state: &State<'_>) -> Rect {
     let tools = toolbar(state.width, state.scale, state.show_home);
-    let w = dip(220.0);
-    let h = dip(88.0);
+    let w = dip(280.0);
+    let h = dip(132.0);
     Rect {
         x: (tools.profile.x - dip(80.0)).min(state.width - w - dip(8.0)).max(dip(8.0)),
         y: tools.profile.bottom() + dip(6.0),
@@ -899,8 +899,10 @@ fn paint_profile_card(pixels: &mut [u32], width: u32, height: u32, state: &State
     fill_round(pixels, width, height, x, y, w, rect.h, dip(12.0), TOOLBAR);
     let mark = dip(32.0).max(1.0);
     crate::brand::blit(pixels, width, height, x + dip(12.0), y + dip(16.0), mark, mark, crate::brand::mark());
-    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(34.0), 15.0, INK, "Mithu");
-    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(56.0), 12.0, MUTED, "Not signed in");
+    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(28.0), 15.0, INK, "Mithu");
+    draw_text(pixels, width, height, state.fonts, x + dip(56.0), y + dip(48.0), 12.0, MUTED, "Not signed in");
+    draw_text(pixels, width, height, state.fonts, x + dip(16.0), y + dip(84.0), 13.0, INK, "Customize profile");
+    draw_text(pixels, width, height, state.fonts, x + dip(16.0), y + dip(110.0), 13.0, INK, "Settings");
 }
 
 fn paint_menu(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, popup: Popup) {

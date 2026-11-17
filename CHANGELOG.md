@@ -2,6 +2,10 @@
 
 Mithu follows the first line of `VERSION.md`. Dates are the day the release is tagged.
 
+## 0.1.5
+
+New window and New private window open another process. A private window keeps its own profile. Print asks the page to print. Translate and developer tools open Mithu pages; Lite also opens the system inspector. Settings shows one section at a time, in the desktop order, and history, downloads, and bookmarks use that same page chrome.
+
 ## 0.1.4
 
 The app menu, its submenus, the zoom row, and the page, tab, and address-bar menus follow the desktop browser order. Shortcuts stay on the row. There is no camera search and no other browser's name. New window, private window, print, translate, and developer tools stay closed until those features exist.
