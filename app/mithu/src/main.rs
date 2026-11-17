@@ -423,7 +423,17 @@ impl ApplicationHandler for App {
                                 let _ = window.drag_window();
                             }
                         }
-                        None => self.browser.pointer_down(self.cursor.0, self.cursor.1),
+                        None => {
+                            self.browser.pointer_down(self.cursor.0, self.cursor.1);
+                            if self.browser.consume_quit() {
+                                event_loop.exit();
+                            }
+                            if self.browser.consume_fullscreen() {
+                                if let Some(window) = &self.window {
+                                    window.set_maximized(!window.is_maximized());
+                                }
+                            }
+                        }
                     }
                     self.sync_title();
                     self.request_redraw();
