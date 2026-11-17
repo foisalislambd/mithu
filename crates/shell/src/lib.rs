@@ -75,6 +75,7 @@ struct Tab {
     url: String,
     status: LoadStatus,
     zoom: f32,
+    group: u8,
 }
 
 struct Bookmark {
@@ -164,6 +165,7 @@ impl Browser {
         let mut preferences = servo::Preferences::default();
         preferences.network_http_proxy_uri = String::new();
         preferences.network_https_proxy_uri = String::new();
+        preferences.user_agent = strip_servo_token(&preferences.user_agent);
         let servo = ServoBuilder::default().preferences(preferences).build();
         servo.setup_logging();
         let mut browser = Self {
@@ -973,6 +975,7 @@ impl Browser {
             url: "about:blank".into(),
             status: LoadStatus::Started,
             zoom: 1.0,
+            group: 0,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -989,6 +992,7 @@ impl Browser {
                 url: String::new(),
                 status: LoadStatus::Started,
                 zoom: 1.0,
+                group: 0,
             });
             self.active = self.tabs.len() - 1;
             self.bump();
@@ -1089,6 +1093,7 @@ impl Browser {
     }
 
     fn present_document(&mut self, spec: &str) {
+        self.publish_tasks();
         let Some(document) = mithu_ui::pages::open(spec, &self.prefs, env!("MITHU_VERSION")) else {
             return;
         };
@@ -1295,11 +1300,49 @@ impl Browser {
             MenuId::Exit => self.quit = true,
             MenuId::Fullscreen => self.fullscreen_toggle = true,
             MenuId::CopyLink | MenuId::CopyLinkAddress | MenuId::CopyImage | MenuId::Copy => {}
-            MenuId::SavePage | MenuId::SaveLink | MenuId::SaveImage | MenuId::SendDevice
-            | MenuId::CreateShortcut | MenuId::NameWindow | MenuId::TaskManager
-            | MenuId::NewTabGroup | MenuId::PasteAndGo | MenuId::Cut | MenuId::Paste | MenuId::SelectAll
+            MenuId::SavePage | MenuId::SaveLink | MenuId::SaveImage => self.save_active_page(),
+            MenuId::TaskManager => self.navigate("mithu://tasks"),
+            MenuId::NewTabGroup => self.cycle_group(),
+            MenuId::SendDevice | MenuId::CreateShortcut | MenuId::NameWindow
+            | MenuId::PasteAndGo | MenuId::Cut | MenuId::Paste | MenuId::SelectAll
             | MenuId::Zoom | MenuId::TabGroups | MenuId::SaveShare | MenuId::MoreTools | MenuId::Separator => {}
         }
+    }
+
+    fn publish_tasks(&self) {
+        let rows = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.title.clone(), tab.url.clone(), tab.group))
+            .collect();
+        mithu_ui::pages::set_tasks(rows);
+    }
+
+    fn save_active_page(&mut self) {
+        let url = self.location();
+        let dir = if self.prefs.download_dir.is_empty() {
+            mithu_ui::pages::downloads_folder()
+        } else {
+            std::path::PathBuf::from(&self.prefs.download_dir)
+        };
+        match mithu_ui::pages::save_remote(&url, &dir) {
+            Ok(path) => {
+                let shown = path.display().to_string();
+                self.prefs.note_download(&url, &shown, "done");
+                mithu_ui::pages::save(&mithu_ui::pages::path(), &self.prefs);
+                self.downloads.push(shown.clone());
+                self.status = format!("Saved {shown}");
+            }
+            Err(error) => self.status = error,
+        }
+        self.bump();
+    }
+
+    fn cycle_group(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.group = if tab.group == 0 { 1 } else { tab.group % 8 + 1 };
+        }
+        self.bump();
     }
 
     pub fn print(&mut self) {
@@ -1443,7 +1486,7 @@ impl Browser {
                     y,
                     15.0,
                     MUTED,
-                    "libservo does not expose a download callback, so files are not saved yet.",
+                    "Saved pages are listed below. A site download still needs the page's own save.",
                 );
                 y += 28.0;
                 for item in &self.downloads {
@@ -1483,6 +1526,7 @@ impl Browser {
                     tab.title.clone()
                 },
                 favicon: tab.webview.favicon().map(|image| favicon_rgba(&image)),
+                group: tab.group,
             })
             .collect();
         let secure = if self.omnibox.starts_with("https://") {
@@ -1946,9 +1990,26 @@ fn blend(pixels: &mut [u32], width: u32, height: u32, x: i32, y: i32, color: u32
         | ((sb * a + db * inv) / 255);
 }
 
+fn strip_servo_token(agent: &str) -> String {
+    agent
+        .split_whitespace()
+        .filter(|token| !token.starts_with("Servo/"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_agent_drops_the_engine_token() {
+        let raw = "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Servo/0.0.1 Firefox/153.0";
+        assert_eq!(
+            strip_servo_token(raw),
+            "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Firefox/153.0"
+        );
+    }
 
     #[test]
     fn close_button_is_the_window_corner() {

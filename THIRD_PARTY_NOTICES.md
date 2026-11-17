@@ -2,7 +2,8 @@
 
 ## Chromium
 
-Selected layout metrics, color tokens, and the Roboto webfonts under
+Selected layout metrics, color tokens, filled Material icon paths under
+`crates/ui/icons/`, and the Roboto webfonts under
 `assets/fonts/roboto/` come from the Chromium project
 (`ui/webui/resources/cr_elements/cr_shared_vars.css`,
 `ui/webui/resources/cr_elements/cr_nav_menu_item_style_lit.css`,

@@ -2,6 +2,10 @@
 
 Mithu follows the first line of `VERSION.md`. Dates are the day the release is tagged.
 
+## 0.1.6
+
+Site settings lists the common permissions and content types, each with Ask, Allow, and Block. Empty history and downloads show an illustration. Toolbar icons are filled Material paths. Save page writes the file into the downloads folder. Task manager lists the open tabs. New tab group paints a color bar on the active tab. The Servo edition sends a desktop user agent without an engine token, and Save page stores the file the same way.
+
 ## 0.1.5
 
 New window and New private window open another process. A private window keeps its own profile. Print asks the page to print. Translate and developer tools open Mithu pages; Lite also opens the system inspector. Settings shows one section at a time, in the desktop order, and history, downloads, and bookmarks use that same page chrome.

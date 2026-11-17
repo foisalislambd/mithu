@@ -4,6 +4,7 @@
 //! history, downloads, bookmarks, and new tab. Nothing in the markup names
 //! another browser or uses its marks.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,6 +29,8 @@ pub struct Prefs {
     pub bookmarks: Vec<Bookmark>,
     pub history: Vec<Visit>,
     pub downloads: Vec<Download>,
+    /// Site permission id and choice: ask, allow, or block.
+    pub site: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +88,7 @@ impl Default for Prefs {
             bookmarks: Vec::new(),
             history: Vec::new(),
             downloads: Vec::new(),
+            site: Vec::new(),
         }
     }
 }
@@ -144,6 +148,20 @@ pub fn path() -> PathBuf {
     directory().join("prefs.mithu")
 }
 
+/// Folder used when the user has not chosen one in settings.
+pub fn downloads_folder() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = home.join("Downloads");
+    if std::fs::create_dir_all(&dir).is_ok() {
+        dir
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 pub fn load(path: &Path) -> Prefs {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Prefs::default();
@@ -167,6 +185,52 @@ pub fn search_url(engine: &str, query: &str) -> Url {
         _ => format!("https://duckduckgo.com/?q={q}"),
     };
     Url::parse(&spec).expect("search")
+}
+
+/// Save a remote page into `dir`. The name comes from the URL path.
+pub fn save_remote(url: &str, dir: &Path) -> Result<PathBuf, String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("This page cannot be saved.".into());
+    }
+    let response = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(20))
+        .call()
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(20 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    let path = unique_file(dir, &download_name(url));
+    std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+fn download_name(url: &str) -> String {
+    let leaf = Url::parse(url).ok().and_then(|url| {
+        url.path_segments().and_then(|segments| segments.filter(|part| !part.is_empty()).last().map(str::to_string))
+    });
+    let name = leaf.unwrap_or_else(|| "page.html".into());
+    let cleaned: String = name.chars().map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') { ch } else { '_' }).collect();
+    if cleaned.is_empty() { "page.html".into() } else { cleaned }
+}
+
+fn unique_file(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(name).file_stem().and_then(|stem| stem.to_str()).unwrap_or("page");
+    let ext = Path::new(name).extension().and_then(|ext| ext.to_str()).unwrap_or("html");
+    for index in 1..1000 {
+        let path = dir.join(format!("{stem}-{index}.{ext}"));
+        if !path.exists() {
+            return path;
+        }
+    }
+    dir.join(name)
 }
 
 pub fn is_internal(spec: &str) -> bool {
@@ -301,6 +365,17 @@ fn apply_set(prefs: &mut Prefs, key: &str, value: &str) {
                 prefs.name = value.trim().to_string();
             }
         }
+        "perm" => {
+            let Some((id, choice)) = value.split_once(':') else { return };
+            if !matches!(choice, "ask" | "allow" | "block") || !site_known(id) {
+                return;
+            }
+            if let Some(row) = prefs.site.iter_mut().find(|(key, _)| key == id) {
+                row.1 = choice.to_string();
+            } else {
+                prefs.site.push((id.to_string(), choice.to_string()));
+            }
+        }
         _ => {}
     }
 }
@@ -385,6 +460,7 @@ enum Kind {
     Version,
     Translate,
     Inspect,
+    Tasks,
 }
 
 fn classify(spec: &str) -> Option<Kind> {
@@ -405,6 +481,7 @@ fn classify(spec: &str) -> Option<Kind> {
         ("mithu", "version", _) => Some(Kind::Version),
         ("mithu", "translate", _) => Some(Kind::Translate),
         ("mithu", "inspect", _) => Some(Kind::Inspect),
+        ("mithu", "tasks", _) => Some(Kind::Tasks),
         _ => None,
     }
 }
@@ -420,6 +497,7 @@ fn render(kind: Kind, spec: &str, prefs: &Prefs, version: &str) -> Document {
         Kind::Version => ("mithu://version", "Version", version_body(version)),
         Kind::Translate => ("mithu://translate", "Translate", translate_body()),
         Kind::Inspect => ("mithu://inspect", "Developer tools", inspect_body()),
+        Kind::Tasks => ("mithu://tasks", "Task manager", task_body(prefs)),
     };
     Document {
         url: url.into(),
@@ -563,7 +641,7 @@ td {{ padding:10px 8px; border-top:1px solid var(--line); vertical-align:top; }}
 .app.solo .solo-title {{ display:flex; }}
 .app.solo .searchrow {{ padding-left:20px; }}
 .app.solo main {{ max-width:none; }}
-.empty {{ min-height:60vh; display:grid; place-items:center; color:var(--muted); text-align:center; }}
+.empty {{ min-height:50vh; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--muted); text-align:center; }}
 .tabs {{ display:flex; gap:16px; border-bottom:1px solid var(--line); margin-bottom:16px; }}
 .tabs a {{ color:var(--muted); padding:10px 4px; font-weight:500; font-size:13px; }}
 .tabs a.on {{ color:var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }}
@@ -635,7 +713,7 @@ function go(op, params, back) {{
         title = esc(title),
         icon = crate::brand::favicon_data_uri(),
         mark = crate::brand::mark_data_uri(),
-        layout = if matches!(title, "Downloads" | "New Tab") { "solo" } else { "" },
+        layout = if matches!(title, "Downloads" | "New Tab" | "Tasks") { "solo" } else { "" },
         page_title = page_title(title),
         search_label = search_label(title),
         nav = nav_html(title, body, prefs),
@@ -647,6 +725,7 @@ function go(op, params, back) {{
 fn page_title(title: &str) -> &'static str {
     match title {
         "Downloads" => "Download history",
+        "Tasks" => "Task manager",
         "Extensions" => "Extensions",
         "History" => "History",
         "Bookmarks" => "Bookmarks",
@@ -773,7 +852,11 @@ const SETTINGS_NAV: &[(&str, &str)] = &[
 ];
 
 fn settings_body(spec: &str, prefs: &Prefs) -> String {
-    let raw = spec.split('/').nth(3).unwrap_or("").split('?').next().unwrap_or("");
+    let path = Url::parse(spec).map(|url| url.path().trim_matches('/').to_string()).unwrap_or_default();
+    if path == "site" || path.starts_with("site/") {
+        return site_settings_body(&path, prefs);
+    }
+    let raw = path.split('/').next().unwrap_or("");
     let focus = if raw.is_empty() { "you" } else { raw };
     let heading = SETTINGS_NAV.iter().find(|(id, _)| *id == focus).map(|(_, label)| *label).unwrap_or("Settings");
     let mut out = format!("<h1>{}</h1>", esc(heading));
@@ -903,11 +986,80 @@ fn system_card(prefs: &Prefs) -> String {
     )
 }
 
+const SITE_PERMS: &[(&str, &str, &str)] = &[
+    ("location", "Location", "permissions"),
+    ("camera", "Camera", "permissions"),
+    ("microphone", "Microphone", "permissions"),
+    ("notifications", "Notifications", "permissions"),
+    ("storage", "Third-party cookies and storage", "permissions"),
+    ("background", "Background sync", "permissions"),
+    ("sensors", "Motion sensors", "permissions"),
+    ("downloads", "Automatic downloads", "permissions"),
+    ("usb", "USB devices", "permissions"),
+    ("clipboard", "Clipboard", "permissions"),
+    ("cookies", "Cookies", "content"),
+    ("javascript", "JavaScript", "content"),
+    ("images", "Images", "content"),
+    ("popups", "Pop-ups and redirects", "content"),
+    ("sound", "Sound", "content"),
+    ("pdf", "PDF documents", "content"),
+];
+
+fn site_known(id: &str) -> bool {
+    SITE_PERMS.iter().any(|(key, _, _)| *key == id)
+}
+
+fn site_choice<'a>(prefs: &'a Prefs, id: &str) -> &'a str {
+    prefs.site.iter().find(|(key, _)| key == id).map(|(_, value)| value.as_str()).unwrap_or("ask")
+}
+
+fn site_settings_body(path: &str, prefs: &Prefs) -> String {
+    let mut out = String::from("<section id=\"privacy\" class=\"on\" hidden></section>");
+    if let Some(id) = path.strip_prefix("site/") {
+        let Some((_, label, _)) = SITE_PERMS.iter().find(|(key, _, _)| *key == id) else {
+            return format!("{out}<h1>Site settings</h1><p class=\"lead\">That permission is not in this build.</p>");
+        };
+        let current = site_choice(prefs, id);
+        out.push_str(&format!(
+            "<p class=\"lead\"><a href=\"mithu://settings/site\">Site settings</a></p><h1>{label}</h1><div class=\"card\">"
+        ));
+        for (value, name) in [("ask", "Ask first"), ("allow", "Allow"), ("block", "Block")] {
+            let mark = if current == value { "On" } else { "Choose" };
+            out.push_str(&format!(
+                "<div class=\"row\"><div class=\"grow\">{name}</div><button class=\"btn quiet\" onclick=\"go('set', {{key:'perm', value:'{id}:{value}'}}, 'mithu://settings/site/{id}')\">{mark}</button></div>"
+            ));
+        }
+        out.push_str("</div>");
+        return out;
+    }
+    out.push_str("<h1>Site settings</h1><p class=\"lead\">Permissions</p><div class=\"card\">");
+    for (id, label, _) in SITE_PERMS.iter().filter(|(_, _, group)| *group == "permissions") {
+        out.push_str(&site_row(id, label, site_choice(prefs, id)));
+    }
+    out.push_str("</div><p class=\"lead\">Content</p><div class=\"card\">");
+    for (id, label, _) in SITE_PERMS.iter().filter(|(_, _, group)| *group == "content") {
+        out.push_str(&site_row(id, label, site_choice(prefs, id)));
+    }
+    out.push_str("</div><p class=\"lead\"><a href=\"mithu://settings/privacy\">Privacy and security</a></p>");
+    out
+}
+
+fn site_row(id: &str, label: &str, choice: &str) -> String {
+    format!(
+        "<div class=\"row\"><div class=\"grow\">{label}<small>{}</small></div><a href=\"mithu://settings/site/{id}\">Open</a></div>",
+        match choice {
+            "allow" => "Allowed",
+            "block" => "Blocked",
+            _ => "Ask first",
+        }
+    )
+}
+
 fn privacy_card() -> String {
     "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Delete browsing data<small>History stored by Mithu on this computer.</small></div>
 <button class=\"btn danger\" onclick=\"go('forget-all', {}, 'mithu://settings/privacy')\">Delete data</button></div>
 <div class=\"row\"><div class=\"grow\">Cookies and site data<small>Mithu does not keep a separate cookie list in this build.</small></div></div>
-<div class=\"row\"><div class=\"grow\">Site settings<small>Permissions stay with the page until a site list is added.</small></div></div>
+<div class=\"row\"><div class=\"grow\">Site settings<small>Location, camera, microphone, and the other permissions.</small></div><a href=\"mithu://settings/site\">Open</a></div>
 <div class=\"row\"><div class=\"grow\">Security<small>HTTPS pages show a lock in the address bar.</small></div></div></div>".into()
 }
 
@@ -960,7 +1112,7 @@ fn history_body(spec: &str, prefs: &Prefs) -> String {
         }
     }
     if rows.is_empty() {
-        rows = "<div class=\"empty\">Your browsing history appears here</div>".into();
+        rows = empty_art("history", "Your browsing history appears here");
     }
     let date_on = if grouped { "" } else { " class=\"on\"" };
     let group_on = if grouped { " class=\"on\"" } else { "" };
@@ -1001,7 +1153,7 @@ fn downloads_body(spec: &str, prefs: &Prefs) -> String {
         ));
     }
     if rows.is_empty() {
-        return "<div class=\"empty\">Files you download appear here</div>".into();
+        return empty_art("downloads", "Files you download appear here");
     }
     format!("<div class=\"card\">{rows}</div>")
 }
@@ -1037,6 +1189,42 @@ fn bookmarks_body(spec: &str, prefs: &Prefs) -> String {
 
 fn translate_body() -> String {
     "<h1>Translate</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">Mithu does not translate pages.<small>The page stays on this computer. Nothing is sent to a translation service.</small></div><a class=\"btn quiet\" href=\"mithu://settings/languages\">Languages</a></div></div>".into()
+}
+
+fn empty_art(kind: &str, caption: &str) -> String {
+    let svg = if kind == "downloads" {
+        r##"<svg viewBox="0 0 120 100" width="120" height="100" aria-hidden="true"><path d="M38 28h28l10 10v40H38z" fill="#d3e3fd"/><path d="M66 28v10h10" fill="none" stroke="#0b57d0" stroke-width="3"/><path d="M58 70h22l-8 8v-14" fill="#0b57d0"/><path d="M70 36h16l8 8v28H70z" fill="#e8f0fe" stroke="#0b57d0" stroke-width="2"/><path d="M48 48h14v18H48z" fill="#8ab4f8"/></svg>"##
+    } else {
+        r##"<svg viewBox="48 48 104 104" width="104" height="104" aria-hidden="true"><path d="M89 55c6-5 15-5 21 0 1 .2 2 .5 2.5.8 2.7 2.1 6 3.4 9.5 3.5 7.3.4 13.4 5.5 15 12.6.1.3.2.7.4 1.4 2.7 4.1 5.4 6.3 8 7.5 6.4 4.9 7.8 12.8 4.4 19.3-.3.6-.6 1.1-1 1.7-1.6 3-2.3 6.6-1.8 10 .1.7.2 1.2.3 1.9 1 7.2-3.1 14.1-9.8 17-1.1.4-2 .8-3 1.2-3.2 1.3-6 3.6-7.8 6.5-.2.4-.5.8-.7 1.2-3.9 6.1-11.5 8.8-18.4 6.7-.3-.1-.6-.2-1.3-.4-3.3-1.1-6.9-1.1-10.2 0-.3.1-.6.2-1.3.4-6.9 2.1-14.5-.6-18.4-6.7-.2-.4-.4-.8-.7-1.2-1.8-2.9-4.6-5.2-7.8-6.5-1-.4-1.9-.8-3-1.2-6.7-2.9-10.7-9.8-9.8-17 .1-.7.2-1.2.3-1.9.5-3.4.0-7.1-1.8-10-.1-.2-.3-.5-1-1.7-3.4-6.5-2-14.4 4.4-19.3 2.6-1.2 5.3-3.4 8-7.5.1-.2.2-.5.4-1.4 1.6-7.1 7.7-12.2 15-12.6 3.5-.1 6.8-1.4 9.5-3.5.2-.1.5-.3.8-.5z" fill="#d3e3fd"/><path d="M88 71H79a8 8 0 0 0-8 8v9M113 71h9a8 8 0 0 1 8 8v9M88 130H79a8 8 0 0 1-8-8v-9M113 130h9a8 8 0 0 0 8-8v-9" fill="none" stroke="#0b57d0" stroke-width="6" stroke-linecap="round"/></svg>"##
+    };
+    format!("<div class=\"empty\">{svg}<p>{caption}</p></div>", caption = esc(caption))
+}
+
+thread_local! {
+    static TASK_ROWS: std::cell::RefCell<Vec<(String, String, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tabs shown on the task manager. The shell sets this before the page is built.
+pub fn set_tasks(rows: Vec<(String, String, u8)>) {
+    TASK_ROWS.with(|cell| *cell.borrow_mut() = rows);
+}
+
+fn task_body(_prefs: &Prefs) -> String {
+    let rows = TASK_ROWS.with(|cell| cell.borrow().clone());
+    if rows.is_empty() {
+        return "<h1>Task manager</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">No tabs are open.</div></div></div>".into();
+    }
+    let mut out = String::from("<h1>Task manager</h1><div class=\"card\">");
+    for (title, url, group) in rows {
+        let group = if group == 0 { String::new() } else { format!("<small>Group {group}</small>") };
+        out.push_str(&format!(
+            "<div class=\"row\"><div class=\"grow\">{}{group}<small>{}</small></div></div>",
+            esc(if title.is_empty() { "New tab" } else { &title }),
+            esc(&url),
+        ));
+    }
+    out.push_str("</div>");
+    out
 }
 
 fn inspect_body() -> String {
@@ -1279,6 +1467,9 @@ fn format_prefs(prefs: &Prefs) -> String {
     for item in &prefs.downloads {
         out.push_str(&format!("download\t{}\t{}\t{}\n", item.state, item.url, item.path));
     }
+    for (id, choice) in &prefs.site {
+        out.push_str(&format!("site\t{id}\t{choice}\n"));
+    }
     out
 }
 
@@ -1319,6 +1510,15 @@ fn parse_prefs(text: &str) -> Prefs {
             let url = parts.next().unwrap_or("").to_string();
             let path = parts.next().unwrap_or("").to_string();
             prefs.downloads.push(Download { url, path, state });
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("site\t") {
+            let mut parts = rest.splitn(2, '\t');
+            let id = parts.next().unwrap_or("").to_string();
+            let choice = parts.next().unwrap_or("ask").to_string();
+            if site_known(&id) && matches!(choice.as_str(), "ask" | "allow" | "block") {
+                prefs.site.push((id, choice));
+            }
             continue;
         }
         let Some((key, value)) = line.split_once('=') else { continue };
@@ -1377,7 +1577,17 @@ mod tests {
         let search = search_url("wikipedia", "mithu");
         assert_eq!(search.domain(), Some("en.wikipedia.org"));
         assert!(is_internal("mithu://extensions"));
+        assert!(is_internal("mithu://tasks"));
         assert!(!is_internal("https://example.com"));
+        command("mithu://do?op=set&key=perm&value=camera:block&back=mithu://settings/site/camera", &mut prefs).unwrap();
+        let stored = parse_prefs(&format_prefs(&prefs));
+        assert_eq!(stored.site, vec![("camera".into(), "block".into())]);
+        let site = open("mithu://settings/site/camera", &stored, "0.1.6").unwrap();
+        assert!(site.html.contains("Block"));
+        assert!(!strip_data_uris(&site.html).to_ascii_lowercase().contains("chrome"));
+        set_tasks(vec![("Notes".into(), "https://example.com".into(), 1)]);
+        assert!(open("mithu://tasks", &stored, "0.1.6").unwrap().html.contains("Notes"));
+        assert_eq!(download_name("https://example.com/a/page.html?q=1"), "page.html");
     }
 
     #[test]
@@ -1401,17 +1611,21 @@ mod tests {
             path: "/tmp/file.txt".into(),
             state: "done".into(),
         });
+        set_tasks(vec![("Notes".into(), "https://example.com".into(), 1)]);
         for (theme, suffix) in [("light", "light"), ("dark", "dark")] {
             prefs.theme = theme.into();
             for spec in [
                 "mithu://settings",
                 "mithu://settings/privacy",
+                "mithu://settings/site",
+                "mithu://settings/site/camera",
                 "mithu://history",
                 "mithu://downloads",
                 "mithu://bookmarks",
                 "mithu://extensions",
                 "mithu://newtab",
                 "mithu://version",
+                "mithu://tasks",
             ] {
                 let doc = open(spec, &prefs, "0.1.3").expect(spec);
                 let name = spec.trim_start_matches("mithu://");
@@ -1421,6 +1635,20 @@ mod tests {
                 }
                 std::fs::write(path, doc.html).expect("write page");
             }
+            let history = prefs.history.clone();
+            let downloads = prefs.downloads.clone();
+            prefs.history.clear();
+            prefs.downloads.clear();
+            set_tasks(Vec::new());
+            for spec in ["mithu://history", "mithu://downloads", "mithu://tasks"] {
+                let doc = open(spec, &prefs, "0.1.6").expect(spec);
+                let name = spec.trim_start_matches("mithu://");
+                let path = std::path::Path::new(&dir).join(format!("empty-{name}-{suffix}.html"));
+                std::fs::write(path, doc.html).expect("write empty page");
+            }
+            prefs.history = history;
+            prefs.downloads = downloads;
+            set_tasks(vec![("Notes".into(), "https://example.com".into(), 1)]);
         }
     }
 

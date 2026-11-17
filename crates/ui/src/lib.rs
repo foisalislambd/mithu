@@ -96,6 +96,7 @@ mod tests {
             tabs: vec![chrome::TabPaint {
                 title: "New Tab".into(),
                 favicon: None,
+                group: 0,
             }],
             active: 0,
             omnibox: String::new(),
@@ -147,6 +148,7 @@ mod tests {
             tabs: vec![chrome::TabPaint {
                 title: "New Tab".into(),
                 favicon: None,
+                group: 0,
             }],
             active: 0,
             omnibox: String::new(),
@@ -221,9 +223,9 @@ mod tests {
             width: 1100.0 * scale,
             height: 980.0 * scale,
             tabs: vec![
-                chrome::TabPaint { title: "New Tab".into(), favicon: None },
-                chrome::TabPaint { title: "Mithu notes".into(), favicon: None },
-                chrome::TabPaint { title: "A longer page title".into(), favicon: None },
+                chrome::TabPaint { title: "New Tab".into(), favicon: None, group: 1 },
+                chrome::TabPaint { title: "Mithu notes".into(), favicon: None, group: 0 },
+                chrome::TabPaint { title: "A longer page title".into(), favicon: None, group: 0 },
             ],
             active: 0,
             omnibox: String::new(),
