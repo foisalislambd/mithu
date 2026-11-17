@@ -1,4 +1,5 @@
 //! Mithu Lite window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //!
 //! The frame is [`mithu_ui`], the same painter the Servo build uses. Each tab
 //! is a child [`wry::WebView`] on the OS engine (WebKitGTK on Linux, WebView2
@@ -33,6 +34,7 @@ const APP_MENU: &[&str] = &[
 const CONTEXT_MENU: &[&str] = &["Back", "Reload", "New tab", "Bookmark this page"];
 
 fn main() {
+    mithu_host::init("mithu-lite");
     let config = Config::from_args();
     #[cfg(any(
         target_os = "linux",
@@ -42,9 +44,16 @@ fn main() {
         target_os = "openbsd"
     ))]
     init_gtk();
-    let event_loop = EventLoop::new().expect("create the event loop");
+    let event_loop = match EventLoop::new() {
+        Ok(loop_) => loop_,
+        Err(error) => {
+            mithu_host::report_fatal(&format!("could not create the event loop: {error}"))
+        }
+    };
     let mut app = App::new(config);
-    event_loop.run_app(&mut app).expect("run the window");
+    if let Err(error) = event_loop.run_app(&mut app) {
+        mithu_host::report_fatal(&format!("could not run the window: {error}"));
+    }
 }
 
 #[cfg(any(

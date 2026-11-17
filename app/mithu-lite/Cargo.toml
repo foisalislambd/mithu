@@ -9,6 +9,7 @@ publish.workspace = true
 description = "Mithu Lite: the shared frame around the OS system webview"
 
 [dependencies]
+mithu-host = { path = "../../crates/host" }
 mithu-text = { path = "../../crates/text" }
 mithu-ui = { path = "../../crates/ui" }
 softbuffer = "0.4"

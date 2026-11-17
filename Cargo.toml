@@ -4,13 +4,14 @@ members = [
     "crates/text",
     "crates/ui",
     "crates/shell",
+    "crates/host",
     "app/mithu",
     "app/mithu-lite",
 ]
 exclude = ["third_party/servo"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 publish = false

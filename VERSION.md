@@ -1,4 +1,4 @@
-0.1.1
+0.1.2
 
 # The first non-comment line is the only version to edit (semver:
 # MAJOR.MINOR.PATCH, with an optional -prerelease). Cargo.toml, Cargo.lock,
