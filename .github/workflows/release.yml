@@ -102,7 +102,7 @@ jobs:
             Write-Error "smoke test wrote nothing to the parent console: $output"
             exit 1
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.binary }}
@@ -160,7 +160,7 @@ jobs:
             Write-Error "Lite wrote nothing to the parent console: $output"
             exit 1
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.binary }}
