@@ -1,11 +1,13 @@
-Noto Sans Bengali Regular
+Noto Sans Regular, Noto Sans Bold, and Noto Sans Bengali Regular
 Copyright 2010, 2012-2020 Google Inc. and 2015-2020 Google LLC.
+https://github.com/notofonts/latin-greek-cyrillic
 https://github.com/notofonts/bengali
 SIL Open Font License, Version 1.1
 
-This copy is the unmodified Regular face from Debian fonts-noto-core,
-used so the Bengali conjunct test does not depend on fonts installed
-on the machine.
+These are the unmodified faces from Debian fonts-noto-core. The UI
+embeds them so tab titles and the address bar do not depend on fonts
+installed on the machine. System fonts are only a fallback for scripts
+these faces do not cover.
 
 PREAMBLE
 

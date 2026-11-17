@@ -19,3 +19,21 @@ jobs:
         run: python3 tools/version.py check
       - name: Test
         run: cargo test --workspace
+
+  windows:
+    name: Windows smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build, package, and smoke-test Mithu
+        shell: pwsh
+        run: |
+          cargo build -p mithu --release
+          powershell -NoProfile -File tools/package-windows.ps1
+          $env:MITHU_NO_DIALOG = "1"
+          & target\release\mithu-windows\mithu.exe --smoke-test about:blank
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

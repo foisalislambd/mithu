@@ -86,7 +86,10 @@ mod tests {
         let state = chrome::State {
             width: 1280.0,
             height: 800.0,
-            tabs: vec![chrome::TabPaint { title: "New Tab".into(), favicon: None }],
+            tabs: vec![chrome::TabPaint {
+                title: "New Tab".into(),
+                favicon: None,
+            }],
             active: 0,
             omnibox: String::new(),
             omnibox_focused: false,
@@ -114,9 +117,85 @@ mod tests {
             find_query: String::new(),
             fonts: &fonts,
         };
-        assert_eq!(chrome::content_chrome(&state), TAB_H + TOOLBAR_H + BOOKMARK_BAR_H);
+        assert_eq!(
+            chrome::content_chrome(&state),
+            TAB_H + TOOLBAR_H + BOOKMARK_BAR_H
+        );
         let mut pixels = vec![0u32; 1280 * 800];
         chrome::paint(&mut pixels, 1280, 800, &state);
         assert!(pixels.iter().any(|pixel| *pixel != 0));
+    }
+
+    #[test]
+    fn bundled_fonts_paint_the_new_tab_title() {
+        let fonts = mithu_text::FontBook::bundled();
+        let state = chrome::State {
+            width: 1280.0,
+            height: 800.0,
+            tabs: vec![chrome::TabPaint {
+                title: "New Tab".into(),
+                favicon: None,
+            }],
+            active: 0,
+            omnibox: String::new(),
+            omnibox_focused: false,
+            cursor: 0,
+            secure: chrome::Secure::Internal,
+            bookmarked: false,
+            bookmarks: Vec::new(),
+            bookmarks_open: true,
+            can_back: false,
+            can_forward: false,
+            loading: false,
+            progress: 0.0,
+            link_status: String::new(),
+            pointer: (-1.0, -1.0),
+            pressed: false,
+            ntp: true,
+            menu: None,
+            menu_labels: Vec::new(),
+            tab_search: false,
+            extensions: false,
+            profile: false,
+            suggestions: Vec::new(),
+            suggestion: None,
+            find_open: false,
+            find_query: String::new(),
+            fonts: &fonts,
+        };
+        let mut pixels = vec![0u32; 1280 * 800];
+        chrome::paint(&mut pixels, 1280, 800, &state);
+        // The word "Mithu" is drawn just under the new-tab mark. A missing
+        // font fills that band with solid boxes, which have no light pixels
+        // inside the ink.
+        let mut dark = 0u32;
+        let mut light_beside_dark = 0u32;
+        for y in 320..380 {
+            for x in 520..760 {
+                let pixel = pixels[(y * 1280 + x) as usize];
+                let dark_pixel = (pixel & 0xff) < 80;
+                if dark_pixel {
+                    dark += 1;
+                    let right = pixels[(y * 1280 + x + 1) as usize];
+                    if (right & 0xff) > 200 {
+                        light_beside_dark += 1;
+                    }
+                }
+            }
+        }
+        assert!(dark > 40, "no title ink, dark={dark}");
+        assert!(
+            light_beside_dark > 10,
+            "title ink has no gaps, so the glyphs are boxes; edges={light_beside_dark}"
+        );
+        if let Ok(path) = std::env::var("MITHU_FRAME") {
+            let mut ppm = format!("P6\n1280 800\n255\n").into_bytes();
+            for pixel in &pixels {
+                ppm.push(((pixel >> 16) & 255) as u8);
+                ppm.push(((pixel >> 8) & 255) as u8);
+                ppm.push((pixel & 255) as u8);
+            }
+            std::fs::write(path, ppm).expect("write frame");
+        }
     }
 }
