@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 
-#[cfg(not(any(windows, target_env = "ohos")))]
 use dpi::PhysicalSize;
 use mithu_text::{FontBook, Glyph, glyph_top};
 use servo::{
