@@ -833,8 +833,18 @@ fn day_label(at: u64) -> String {
     if at == 0 {
         return "Earlier".into();
     }
-    let days = at / 86_400;
-    format!("Day {days}")
+    // Howard Hinnant's civil_from_days, UTC. 1_700_000_000 is 2023-11-14.
+    let z = (at / 86_400) as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn now_secs() -> u64 {
@@ -993,6 +1003,8 @@ mod tests {
         assert!(doc.html.contains("Appearance"));
         assert!(open("mithu://version", &loaded, "9.9.9").unwrap().html.contains("9.9.9"));
         assert!(open("about:history", &loaded, "0.1.3").unwrap().html.contains("example.com/a"));
+        assert_eq!(day_label(1_700_000_000), "2023-11-14");
+        assert_eq!(day_label(0), "Earlier");
         command("mithu://do?op=set&key=theme&value=dark&back=mithu://settings", &mut prefs).unwrap();
         assert!(prefs.dark());
         let search = search_url("wikipedia", "mithu");
