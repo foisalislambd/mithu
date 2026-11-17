@@ -73,6 +73,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -103,5 +105,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Compile the unsigned iOS app
         run: sh tools/ios-unsigned.sh

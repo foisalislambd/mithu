@@ -4,6 +4,12 @@ chromium/
 # Rust build output
 target/
 
+# Phone new-tab page. tools/install-mobile-assets.sh writes it at build time.
+mobile/android/app/src/main/assets/newtab.html
+mobile/ios/newtab.html
+mobile/android/.gradle/
+mobile/android/**/build/
+
 # Python cache from the measurement sampler
 __pycache__/
 

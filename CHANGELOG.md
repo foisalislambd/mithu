@@ -2,6 +2,10 @@
 
 Mithu follows the first line of `VERSION.md`. Dates are the day the release is tagged.
 
+## 0.1.8
+
+The phone new-tab page is generated at build time and loads the logo and fonts as files, so those copies are not stored in git.
+
 ## 0.1.7
 
 Cut, copy, paste, and select all work in the address bar and are sent to the page. Paste and go opens the clipboard text. Copy link, create shortcut, name window, and send to devices do something visible. A site link whose address looks like a file download is saved into the downloads folder. Permission exceptions are stored per site, and the Servo edition allows or blocks the request from that choice. Tab groups have a name, a color, a collapse control, and an editor. CI builds a debug Android APK and an unsigned iOS app.

@@ -4,9 +4,26 @@
 //! history, downloads, bookmarks, and new tab. Nothing in the markup names
 //! another browser or uses its marks.
 
+use std::cell::Cell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    /// When set, pages point at `logo.png`, `mark.png`, and `fonts/*.woff2`
+    /// instead of embedding those bytes. The phone shells copy the files
+    /// beside the HTML. Desktop pages stay self-contained.
+    static FILE_ASSETS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Phone builds call this around `open` so the saved HTML stays small.
+pub fn use_file_assets(enabled: bool) {
+    FILE_ASSETS.with(|cell| cell.set(enabled));
+}
+
+fn file_assets() -> bool {
+    FILE_ASSETS.with(|cell| cell.get())
+}
 
 use url::Url;
 
@@ -518,6 +535,12 @@ fn render(kind: Kind, spec: &str, prefs: &Prefs, version: &str) -> Document {
 }
 
 fn roboto_faces() -> String {
+    if file_assets() {
+        return "@font-face{font-family:Roboto;font-style:normal;font-weight:400;font-display:swap;src:url(fonts/roboto-regular.woff2) format('woff2');}\
+@font-face{font-family:Roboto;font-style:normal;font-weight:500;font-display:swap;src:url(fonts/roboto-medium.woff2) format('woff2');}\
+@font-face{font-family:Roboto;font-style:normal;font-weight:700;font-display:swap;src:url(fonts/roboto-bold.woff2) format('woff2');}"
+            .into();
+    }
     fn face(weight: u16, bytes: &[u8]) -> String {
         format!(
             "@font-face{{font-family:Roboto;font-style:normal;font-weight:{weight};font-display:swap;src:url(data:font/woff2;base64,{}) format('woff2');}}",
@@ -559,6 +582,30 @@ fn b64(bytes: &[u8]) -> String {
         out.push('=');
     }
     out
+}
+
+fn mark_src() -> String {
+    if file_assets() {
+        "mark.png".into()
+    } else {
+        crate::brand::mark_data_uri()
+    }
+}
+
+fn logo_src() -> String {
+    if file_assets() {
+        "logo.png".into()
+    } else {
+        crate::brand::logo_data_uri()
+    }
+}
+
+fn icon_src() -> String {
+    if file_assets() {
+        "mark.png".into()
+    } else {
+        crate::brand::favicon_data_uri()
+    }
 }
 
 fn shell(title: &str, prefs: &Prefs, version: &str, body: &str) -> String {
@@ -722,8 +769,8 @@ function go(op, params, back) {{
         theme = theme,
         font = prefs.font_px.clamp(12, 24),
         title = esc(title),
-        icon = crate::brand::favicon_data_uri(),
-        mark = crate::brand::mark_data_uri(),
+        icon = icon_src(),
+        mark = mark_src(),
         layout = if matches!(title, "Downloads" | "New Tab" | "Tasks") { "solo" } else { "" },
         page_title = page_title(title),
         search_label = search_label(title),
@@ -889,7 +936,7 @@ fn settings_body(spec: &str, prefs: &Prefs) -> String {
         "About Mithu",
         &format!(
             "<div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\"><strong>Mithu</strong></div></div><div class=\"row\"><div class=\"grow\">Version<small>Also at mithu://version</small></div><a href=\"mithu://version\">Open</a></div><div class=\"row\"><div class=\"grow\">Open source notices<small>THIRD_PARTY_NOTICES.md</small></div></div></div>",
-            mark = crate::brand::mark_data_uri(),
+            mark = mark_src(),
         ),
         focus == "about",
     ));
@@ -913,7 +960,7 @@ fn you_card(prefs: &Prefs) -> String {
 <div class=\"row\"><div class=\"grow\">Customize profile</div><button class=\"btn quiet\" onclick=\"go('set', {{key:'name', value: prompt('Profile name', '{name}') || '{name}'}}, 'mithu://settings/you')\">Edit</button></div>
 <div class=\"row\"><div class=\"grow\">Import bookmarks</div><a href=\"mithu://bookmarks\">Open</a></div></div>",
         name = esc(&prefs.name),
-        mark = crate::brand::mark_data_uri(),
+        mark = mark_src(),
     )
 }
 
@@ -1347,7 +1394,7 @@ fn newtab_body(prefs: &Prefs) -> String {
     }
     format!(
         "<div class=\"center\"><div><img class=\"logo\" src=\"{logo}\" alt=\"Mithu Browser\"><p class=\"lead\">Search from the address bar, or open a bookmark.</p><div class=\"tiles\">{tiles}</div></div></div>",
-        logo = crate::brand::logo_data_uri(),
+        logo = logo_src(),
     )
 }
 
@@ -1356,7 +1403,7 @@ fn version_body(version: &str) -> String {
         "<div id=\"about\" class=\"on\"><h1>About Mithu</h1><div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\"><strong>Mithu</strong><small>Version {version}</small></div></div>
 <div class=\"row\"><div class=\"grow\">Open source notices<small>THIRD_PARTY_NOTICES.md</small></div></div></div></div>",
         version = esc(version),
-        mark = crate::brand::mark_data_uri(),
+        mark = mark_src(),
     )
 }
 
