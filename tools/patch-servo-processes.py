@@ -217,6 +217,27 @@ NEW_MEDIA = """        // In-process event loops share this process with the bro
         // MITHU_PROCESS_CAP
         media_platform::init();"""
 
+OLD_SCRIPT_RECV = """                2 => oper
+                    .recv(&self.script_receiver)
+                    .expect("Unexpected script channel panic in constellation")
+                    .map(Request::Script),"""
+
+NEW_SCRIPT_RECV = """                2 => match oper.recv(&self.script_receiver) {
+                    Ok(message) => message.map(Request::Script),
+                    Err(error) => {
+                        // Windows ipc-channel reports the channel disconnected when
+                        // an in-process script thread drops its sender on the way
+                        // out, even though this thread still holds one. Finish
+                        // shutdown instead of panicking. MITHU_PROCESS_CAP
+                        if !self.shutting_down {
+                            warn!("script channel disconnected ({error:?}); shutting down");
+                            self.shutting_down = true;
+                        }
+                        self.pipelines.clear();
+                        return;
+                    },
+                },"""
+
 
 def main() -> None:
     if not CONSTELLATION.is_file() or not EVENT_LOOP.is_file():
@@ -228,6 +249,7 @@ def main() -> None:
         replace_once(EVENT_LOOP, OLD_SIG, NEW_SIG, "spawn signature")
         replace_once(EVENT_LOOP, OLD_SPAWN, NEW_SPAWN, "spawn branch")
     replace_once(CONSTELLATION, OLD_MONITOR, NEW_MONITOR, "hang monitor")
+    replace_once(CONSTELLATION, OLD_SCRIPT_RECV, NEW_SCRIPT_RECV, "script channel shutdown")
     replace_once(SERVO, OLD_JS, NEW_JS, "js engine")
     replace_once(SERVO, OLD_MEDIA, NEW_MEDIA, "media platform")
 
