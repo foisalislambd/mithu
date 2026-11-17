@@ -13,6 +13,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+fn app_icon() -> Option<winit::window::Icon> {
+    let image = image::load_from_memory(include_bytes!("../../../assets/brand/png/mark-128.png")).ok()?;
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    winit::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
 fn main() {
     mithu_host::init("mithu");
     // Windows rejects a winit event loop that is not on the main thread, and
@@ -348,6 +355,7 @@ impl ApplicationHandler for App {
         }
         let attributes = Window::default_attributes()
             .with_title(format!("Mithu {}", env!("MITHU_VERSION")))
+            .with_window_icon(app_icon())
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1200.0, 800.0));
         let window = match event_loop.create_window(attributes) {
@@ -363,6 +371,7 @@ impl ApplicationHandler for App {
             Err(error) => report_fatal(&format!("could not create a surface: {error}")),
         };
         let size = window.inner_size();
+        self.browser.set_scale(window.scale_factor() as f32);
         self.browser
             .resize(size.width.max(1) as f32, size.height.max(1) as f32);
         self.context = Some(context);
@@ -375,6 +384,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                if let Some(window) = &self.window {
+                    self.browser.set_scale(window.scale_factor() as f32);
+                }
                 self.browser
                     .resize(size.width.max(1) as f32, size.height.max(1) as f32);
                 self.request_redraw();

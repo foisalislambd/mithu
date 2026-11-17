@@ -6,8 +6,10 @@
 
 use url::Url;
 
+pub mod brand;
 pub mod chrome;
 pub mod icons;
+pub mod pages;
 
 pub const TAB_H: f32 = 41.0;
 pub const TOOLBAR_H: f32 = 48.0;
@@ -52,20 +54,24 @@ pub fn parse_location(input: &str) -> Url {
         return Url::parse(&format!("https://{text}"))
             .unwrap_or_else(|_| Url::parse("about:blank").expect("blank"));
     }
-    Url::parse(&format!("https://duckduckgo.com/?q={}", percent(text))).expect("search")
+    pages::search_url(&search_engine(), text)
 }
 
-fn percent(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
+fn search_engine() -> String {
+    SEARCH_ENGINE.with(|engine| engine.borrow().clone())
+}
+
+thread_local! {
+    static SEARCH_ENGINE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Address-bar search used by both editions. Empty or unknown keeps DuckDuckGo.
+pub fn set_search_engine(name: &str) {
+    let name = match name {
+        "bing" | "wikipedia" | "duckduckgo" => name.to_string(),
+        _ => "duckduckgo".into(),
+    };
+    SEARCH_ENGINE.with(|engine| *engine.borrow_mut() = name);
 }
 
 #[cfg(test)]
@@ -116,6 +122,9 @@ mod tests {
             find_open: false,
             find_query: String::new(),
             fonts: &fonts,
+            scale: 1.0,
+            dark: false,
+            show_home: true,
         };
         assert_eq!(
             chrome::content_chrome(&state),
@@ -162,6 +171,9 @@ mod tests {
             find_open: false,
             find_query: String::new(),
             fonts: &fonts,
+            scale: 1.0,
+            dark: false,
+            show_home: true,
         };
         let mut pixels = vec![0u32; 1280 * 800];
         chrome::paint(&mut pixels, 1280, 800, &state);
@@ -197,5 +209,85 @@ mod tests {
             }
             std::fs::write(path, ppm).expect("write frame");
         }
+    }
+
+    fn sample(fonts: &mithu_text::FontBook, scale: f32, dark: bool) -> chrome::State<'_> {
+        chrome::State {
+            width: 1100.0 * scale,
+            height: 720.0 * scale,
+            tabs: vec![
+                chrome::TabPaint { title: "New Tab".into(), favicon: None },
+                chrome::TabPaint { title: "Mithu notes".into(), favicon: None },
+                chrome::TabPaint { title: "A longer page title".into(), favicon: None },
+            ],
+            active: 0,
+            omnibox: String::new(),
+            omnibox_focused: false,
+            cursor: 0,
+            secure: chrome::Secure::Https,
+            bookmarked: true,
+            bookmarks: vec![
+                ("Notes".into(), "https://example.com/notes".into()),
+                ("Maps".into(), "https://example.com/maps".into()),
+            ],
+            bookmarks_open: true,
+            can_back: true,
+            can_forward: false,
+            loading: true,
+            progress: 0.4,
+            link_status: "https://example.com/notes".into(),
+            pointer: (180.0 * scale, 70.0 * scale),
+            pressed: false,
+            ntp: true,
+            menu: Some(chrome::Popup::App),
+            menu_labels: vec!["New tab".into(), "History".into(), "Downloads".into(), "Settings".into()],
+            tab_search: false,
+            extensions: false,
+            profile: false,
+            suggestions: Vec::new(),
+            suggestion: None,
+            find_open: false,
+            find_query: String::new(),
+            fonts,
+            scale,
+            dark,
+            show_home: true,
+        }
+    }
+
+    #[test]
+    fn write_ui_contact_sheets() {
+        let Ok(dir) = std::env::var("MITHU_UI_DIR") else {
+            return;
+        };
+        let fonts = mithu_text::FontBook::bundled();
+        for (name, scale, dark) in [
+            ("100", 1.0, false),
+            ("125", 1.25, false),
+            ("150", 1.5, false),
+            ("200", 2.0, false),
+            ("100-dark", 1.0, true),
+        ] {
+            let state = sample(&fonts, scale, dark);
+            let w = state.width.round() as u32;
+            let h = state.height.round() as u32;
+            let mut pixels = vec![0u32; (w * h) as usize];
+            chrome::paint(&mut pixels, w, h, &state);
+            let path = std::path::Path::new(&dir).join(format!("frame-{name}.ppm"));
+            write_ppm(&path, &pixels, w, h);
+        }
+    }
+
+    fn write_ppm(path: &std::path::Path, pixels: &[u32], w: u32, h: u32) {
+        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for pixel in pixels {
+            ppm.push(((pixel >> 16) & 255) as u8);
+            ppm.push(((pixel >> 8) & 255) as u8);
+            ppm.push((pixel & 255) as u8);
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(path, ppm).expect("write ppm");
     }
 }

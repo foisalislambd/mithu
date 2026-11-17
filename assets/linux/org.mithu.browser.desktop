@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mithu
+Comment=Mithu browser
+Exec=mithu
+Icon=org.mithu.browser
+Terminal=false
+Categories=Network;WebBrowser;
+StartupWMClass=mithu

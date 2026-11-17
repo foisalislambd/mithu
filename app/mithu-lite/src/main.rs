@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use mithu_text::FontBook;
 use mithu_ui::chrome::{self, Hit, Popup, Secure, TabPaint};
-use mithu_ui::{parse_location, BOOKMARK_BAR_H, TAB_H, TOOLBAR_H};
+use mithu_ui::parse_location;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -32,6 +32,11 @@ const APP_MENU: &[&str] = &[
     "Bookmark this page",
 ];
 const CONTEXT_MENU: &[&str] = &["Back", "Reload", "New tab", "Bookmark this page"];
+
+fn app_icon() -> Option<winit::window::Icon> {
+    let image = mithu_ui::brand::window_icon(true);
+    winit::window::Icon::from_rgba(image.rgba, image.width, image.height).ok()
+}
 
 fn main() {
     mithu_host::init("mithu-lite");
@@ -172,10 +177,15 @@ struct Model {
     load_ms: Option<u128>,
     settled: bool,
     navigate: Option<String>,
+    prefs: mithu_ui::pages::Prefs,
 }
 
 impl Model {
     fn new() -> Self {
+        let prefs = mithu_ui::pages::load(&mithu_ui::pages::path());
+        mithu_ui::set_search_engine(&prefs.search);
+        let bookmarks = prefs.bookmarks.iter().map(|mark| (mark.title.clone(), mark.url.clone())).collect();
+        let bookmarks_open = prefs.show_bookmarks;
         Self {
             tabs: Vec::new(),
             active: 0,
@@ -183,8 +193,8 @@ impl Model {
             omnibox_focused: false,
             cursor: 0,
             select_all: false,
-            bookmarks: Vec::new(),
-            bookmarks_open: true,
+            bookmarks,
+            bookmarks_open,
             visits: Vec::new(),
             downloads: Vec::new(),
             pointer: (-1.0, -1.0),
@@ -205,6 +215,7 @@ impl Model {
             load_ms: None,
             settled: false,
             navigate: None,
+            prefs,
         }
     }
 
@@ -267,6 +278,7 @@ struct App {
     reported_at: Option<Instant>,
     captured: bool,
     rss_mark: Instant,
+    scale: f32,
 }
 
 impl App {
@@ -291,6 +303,7 @@ impl App {
             reported_at: None,
             captured: false,
             rss_mark: Instant::now(),
+            scale: 1.0,
         }
     }
 
@@ -331,10 +344,10 @@ impl App {
         };
         self.tabs.push(Tab { id, webview });
         self.apply_bounds();
-        if !show_ntp && !url.is_empty() {
+        if show_ntp {
+            self.load_in_active("mithu://newtab");
+        } else if !url.is_empty() {
             self.load_in_active(url);
-        } else if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
-            let _ = tab.webview.set_visible(false);
         }
         self.request_redraw();
     }
@@ -370,6 +383,10 @@ impl App {
                 let shared = shared.clone();
                 move |url| {
                     let mut model = lock(&shared);
+                    if url.starts_with("mithu:") || (url.starts_with("about:") && url != "about:blank") {
+                        model.navigate = Some(url);
+                        return false;
+                    }
                     if let Some(tab) = model.tab_mut(id) {
                         if url.starts_with("http://") || url.starts_with("https://") {
                             tab.url = url;
@@ -388,7 +405,14 @@ impl App {
             })
             .with_download_started_handler(|url, path| {
                 let name = suggested_name(&url, path);
-                *path = unique_download(&name);
+                let prefs = mithu_ui::pages::load(&mithu_ui::pages::path());
+                if prefs.download_dir.is_empty() {
+                    *path = unique_download(&name);
+                } else {
+                    let dir = PathBuf::from(&prefs.download_dir);
+                    let _ = std::fs::create_dir_all(&dir);
+                    *path = dir.join(name);
+                }
                 true
             })
             .with_download_completed_handler({
@@ -396,7 +420,11 @@ impl App {
                 move |_url, path, success| {
                     if success {
                         if let Some(path) = path {
-                            lock(&shared).downloads.push(path.display().to_string());
+                            let shown = path.display().to_string();
+                            let mut model = lock(&shared);
+                            model.downloads.push(shown.clone());
+                            model.prefs.note_download(&_url, &shown, "done");
+                            mithu_ui::pages::save(&mithu_ui::pages::path(), &model.prefs);
                         }
                     }
                 }
@@ -406,7 +434,7 @@ impl App {
 
     fn content_rect(&self) -> Rect {
         let model = self.model();
-        let top = chrome_top(model.bookmarks_open);
+        let top = chrome_top(model.bookmarks_open, self.scale);
         Rect {
             position: WryPos::new(0, top as i32).into(),
             size: WrySize::new(
@@ -421,7 +449,7 @@ impl App {
         let (active, ntp, top, width, height) = {
             let model = self.model();
             let active = model.active().map(|tab| tab.id);
-            (active, model.ntp, chrome_top(model.bookmarks_open), self.config.width, self.config.height)
+            (active, model.ntp, chrome_top(model.bookmarks_open, self.scale), self.config.width, self.config.height)
         };
         let bounds = Rect {
             position: WryPos::new(0, top as i32).into(),
@@ -442,32 +470,35 @@ impl App {
     }
 
     fn load_in_active(&mut self, input: &str) {
+        let trimmed = input.trim();
+        if trimmed.starts_with("mithu://do") {
+            self.run_page_command(trimmed);
+            return;
+        }
+        let prefs = self.model().prefs.clone();
+        if let Some(document) = mithu_ui::pages::open(trimmed, &prefs, env!("MITHU_VERSION")) {
+            {
+                let mut model = self.model();
+                model.ntp = false;
+                model.omnibox = document.url.clone();
+                model.omnibox_focused = false;
+                model.settled = true;
+                model.load_ms = Some(0);
+                if let Some(tab) = model.active_mut() {
+                    tab.url = document.url.clone();
+                    tab.title = document.title.clone();
+                    tab.loading = false;
+                }
+            }
+            self.apply_bounds();
+            if let Some(webview) = self.active_webview() {
+                let _ = webview.load_html(&document.html);
+            }
+            self.request_redraw();
+            return;
+        }
         let url = parse_location(input);
         let spec = url.to_string();
-        let internal = match (url.scheme(), url.path()) {
-            ("about", "history") => Some(history_html(&self.model().visits)),
-            ("about", "downloads") => Some(downloads_html(&self.model().downloads)),
-            ("about", "settings") => Some(settings_html()),
-            ("about", "newtab" | "blank" | "mithu" | "home") if spec != "about:blank" => {
-                {
-                    let mut model = self.model();
-                    model.ntp = true;
-                    model.omnibox = "about:newtab".into();
-                    model.omnibox_focused = false;
-                    if let Some(tab) = model.active_mut() {
-                        tab.url = "about:newtab".into();
-                        tab.title = "New Tab".into();
-                        tab.loading = false;
-                    }
-                    model.settled = true;
-                    model.load_ms = Some(0);
-                }
-                self.apply_bounds();
-                self.request_redraw();
-                return;
-            }
-            _ => None,
-        };
         {
             let mut model = self.model();
             model.ntp = false;
@@ -479,30 +510,42 @@ impl App {
             model.link_status.clear();
             if let Some(tab) = model.active_mut() {
                 tab.url = spec.clone();
-                tab.loading = internal.is_none();
-                if internal.is_some() {
-                    tab.title = match url.path() {
-                        "history" => "History".into(),
-                        "downloads" => "Downloads".into(),
-                        "settings" => "Settings".into(),
-                        _ => tab.title.clone(),
-                    };
-                }
+                tab.loading = true;
             }
         }
         self.apply_bounds();
         if let Some(webview) = self.active_webview() {
-            let loaded = if let Some(html) = internal {
-                webview.load_html(&html)
-            } else {
-                webview.load_url(&spec)
-            };
-            if let Err(error) = loaded {
+            if let Err(error) = webview.load_url(&spec) {
                 eprintln!("mithu-lite: navigation failed: {error}");
             }
             let _ = webview.focus();
         }
         self.request_redraw();
+    }
+
+    fn run_page_command(&mut self, spec: &str) {
+        let mut prefs = self.model().prefs.clone();
+        let Some(command) = mithu_ui::pages::command(spec, &mut prefs) else {
+            return;
+        };
+        mithu_ui::pages::save(&mithu_ui::pages::path(), &prefs);
+        mithu_ui::set_search_engine(&prefs.search);
+        {
+            let mut model = self.model();
+            model.prefs = prefs.clone();
+            model.bookmarks_open = prefs.show_bookmarks;
+            model.bookmarks = prefs.bookmarks.iter().map(|mark| (mark.title.clone(), mark.url.clone())).collect();
+        }
+        if let Some(path) = command.open_path.as_deref() {
+            reveal_path(path, false);
+        }
+        if let Some(path) = command.reveal_path.as_deref() {
+            reveal_path(path, true);
+        }
+        if let Some(webview) = self.active_webview() {
+            let _ = webview.zoom(prefs.zoom as f64);
+        }
+        self.load_in_active(&command.redirect);
     }
 
     fn sync_history_flags(&self) {
@@ -901,6 +944,9 @@ impl App {
             find_open: model.find_open,
             find_query: model.find_query.clone(),
             fonts: &self.fonts,
+            scale: self.scale,
+            dark: model.prefs.dark(),
+            show_home: model.prefs.show_home,
         }
     }
 
@@ -917,6 +963,7 @@ impl App {
         let height = size.height.max(1);
         self.config.width = width as f32;
         self.config.height = height as f32;
+        self.scale = window.scale_factor() as f32;
         let Some(width) = std::num::NonZeroU32::new(width) else {
             return;
         };
@@ -1043,6 +1090,7 @@ impl ApplicationHandler for App {
         }
         let attributes = Window::default_attributes()
             .with_title(format!("Mithu Lite {}", env!("MITHU_VERSION")))
+            .with_window_icon(app_icon())
             .with_decorations(false)
             .with_inner_size(winit::dpi::LogicalSize::new(self.config.width, self.config.height))
             .with_position(PhysicalPosition::new(0, 0));
@@ -1080,10 +1128,22 @@ impl ApplicationHandler for App {
         if let Some(url) = self.config.url.clone() {
             self.open_tab(&url, false);
         } else {
-            self.open_tab("about:newtab", true);
-            let mut model = self.model();
-            model.settled = true;
-            model.load_ms = Some(0);
+            let startup = {
+                let prefs = self.model().prefs.clone();
+                match prefs.startup.as_str() {
+                    "continue" => prefs.history.last().map(|visit| visit.url.clone()),
+                    "pages" => prefs.startup_pages.first().cloned(),
+                    _ => None,
+                }
+            };
+            if let Some(url) = startup {
+                self.open_tab(&url, false);
+            } else {
+                self.open_tab("about:newtab", true);
+                let mut model = self.model();
+                model.settled = true;
+                model.load_ms = Some(0);
+            }
         }
         self.request_redraw();
     }
@@ -1241,6 +1301,9 @@ fn on_load(shared: &Mutex<Model>, id: u64, event: PageLoadEvent, url: &str) {
     if matches!(event, PageLoadEvent::Finished) {
         if url.starts_with("http") && !model.visits.iter().any(|visit| visit == url) {
             model.visits.push(url.to_string());
+            let title = model.tab_mut(id).map(|tab| tab.title.clone()).unwrap_or_default();
+            model.prefs.remember(url, &title);
+            mithu_ui::pages::save(&mithu_ui::pages::path(), &model.prefs);
         }
         if is_active && model.load_ms.is_none() {
             let started = model.load_started.unwrap_or_else(Instant::now);
@@ -1283,12 +1346,28 @@ fn menu_labels(menu: Option<Popup>) -> Vec<String> {
     }
 }
 
-fn chrome_top(bookmarks: bool) -> f32 {
-    let mut top = TAB_H + TOOLBAR_H;
-    if bookmarks {
-        top += BOOKMARK_BAR_H;
+fn reveal_path(path: &str, folder: bool) {
+    let target = if folder {
+        std::path::Path::new(path).parent().map(|dir| dir.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(path))
+    } else {
+        std::path::PathBuf::from(path)
+    };
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("cmd").args(["/C", "start", "", &target.display().to_string()]).spawn();
     }
-    top
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&target).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&target).spawn();
+    }
+}
+
+fn chrome_top(bookmarks: bool, scale: f32) -> f32 {
+    chrome::chrome_height(bookmarks, scale)
 }
 
 fn byte_at(text: &str, cursor: usize) -> usize {
@@ -1414,45 +1493,6 @@ fn capture_root(path: &Path) -> bool {
         .args(["-window", "root", &path.display().to_string()])
         .status()
         .is_ok_and(|status| status.success())
-}
-
-fn history_html(visits: &[String]) -> String {
-    let mut rows = String::new();
-    if visits.is_empty() {
-        rows.push_str("<p>No pages yet.</p>");
-    }
-    for url in visits.iter().rev().take(40) {
-        rows.push_str(&format!("<li><a href=\"{}\">{}</a></li>", escape(url), escape(url)));
-    }
-    page("History", &format!("<h1>History</h1><ul>{rows}</ul>"))
-}
-
-fn downloads_html(downloads: &[String]) -> String {
-    let mut rows = String::new();
-    if downloads.is_empty() {
-        rows.push_str("<p>Files saved from the page land in the Downloads folder.</p>");
-    }
-    for path in downloads.iter().rev() {
-        rows.push_str(&format!("<li>{}</li>", escape(path)));
-    }
-    page("Downloads", &format!("<h1>Downloads</h1><ul>{rows}</ul>"))
-}
-
-fn settings_html() -> String {
-    page(
-        "Settings",
-        "<h1>Settings</h1><p>Mithu Lite shows pages in the operating system's web engine. The full Mithu build uses Servo. This window is the same frame as that build.</p>",
-    )
-}
-
-fn page(title: &str, body: &str) -> String {
-    format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{title} — Mithu</title><style>body{{font:16px sans-serif;background:#fff;color:#1f1f1f;margin:48px}}a{{color:#0b57d0}}</style></head><body>{body}</body></html>"
-    )
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 const INIT_SCRIPT: &str = r#"(function () {
