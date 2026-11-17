@@ -127,6 +127,9 @@ pub struct Browser {
     profile_open: bool,
     pending_url: Option<String>,
     dark: bool,
+    scale: f32,
+    prefs: mithu_ui::pages::Prefs,
+    handled_internal: String,
     fonts: FontBook,
     revision: u64,
     frame: Rc<AtomicBool>,
@@ -186,14 +189,17 @@ impl Browser {
             profile_open: false,
             pending_url: None,
             dark: false,
+            scale: 1.0,
+            prefs: mithu_ui::pages::load(&mithu_ui::pages::path()),
+            handled_internal: String::new(),
             fonts: FontBook::load(),
             revision: 1,
             frame,
             status: String::new(),
         };
         browser.open_tab(start_url())?;
-        browser.overlay = Some(Overlay::NewTab);
-        browser.omnibox = "about:newtab".into();
+        browser.apply_prefs();
+        browser.open_startup();
         browser.spin();
         Ok(browser)
     }
@@ -255,7 +261,22 @@ impl Browser {
         self.resize_active();
     }
 
+    pub fn set_scale(&mut self, scale: f32) {
+        let scale = if scale.is_finite() && scale >= 1.0 { scale } else { 1.0 };
+        if (self.scale - scale).abs() > 0.01 {
+            self.scale = scale;
+            self.resize_active();
+        }
+    }
+
     pub fn navigate(&mut self, input: &str) {
+        let trimmed = input.trim();
+        if trimmed.starts_with("mithu:") || (trimmed.starts_with("about:") && trimmed != "about:blank") {
+            self.menu = None;
+            self.omnibox_focused = false;
+            self.open_shared_page(trimmed);
+            return;
+        }
         let url = parse_location(input);
         self.menu = None;
         self.omnibox_focused = false;
@@ -334,8 +355,7 @@ impl Browser {
             self.status = error;
             return;
         }
-        self.overlay = Some(Overlay::NewTab);
-        self.omnibox = "about:newtab".into();
+        self.open_shared_page("mithu://newtab");
         self.omnibox_focused = false;
         self.tab_search = false;
         self.spin();
@@ -923,7 +943,14 @@ impl Browser {
         tab.status = status;
         if tab.url != url && url.starts_with("http") && !self.visits.contains(&url) {
             self.visits.push(url.clone());
+            self.prefs.remember(&url, &title);
+            mithu_ui::pages::save(&mithu_ui::pages::path(), &self.prefs);
         }
+        let follow = if url.starts_with("mithu://") && url != self.handled_internal {
+            Some(url.clone())
+        } else {
+            None
+        };
         tab.url = url;
         tab.title = title;
         self.link_status = link;
@@ -953,6 +980,83 @@ impl Browser {
         if self.load_settled() {
             self.pending_url = None;
         }
+        if let Some(spec) = follow {
+            self.handled_internal = spec.clone();
+            self.open_shared_page(&spec);
+        }
+    }
+
+    fn open_shared_page(&mut self, spec: &str) {
+        if let Some(command) = mithu_ui::pages::command(spec, &mut self.prefs) {
+            mithu_ui::pages::save(&mithu_ui::pages::path(), &self.prefs);
+            self.apply_prefs();
+            if let Some(path) = &command.open_path {
+                reveal_path(path, false);
+            }
+            if let Some(path) = &command.reveal_path {
+                reveal_path(path, true);
+            }
+            self.present_document(&command.redirect);
+            return;
+        }
+        if mithu_ui::pages::is_internal(spec) {
+            self.present_document(spec);
+        }
+    }
+
+    fn present_document(&mut self, spec: &str) {
+        let Some(document) = mithu_ui::pages::open(spec, &self.prefs, env!("MITHU_VERSION")) else {
+            return;
+        };
+        self.overlay = None;
+        self.omnibox = document.url.clone();
+        self.omnibox_focused = false;
+        let url = write_page(&document);
+        self.pending_url = Some(url.to_string());
+        if let Some(tab) = self.tabs.get(self.active) {
+            tab.webview.load(url);
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.url = document.url;
+            tab.title = document.title;
+        }
+        self.bump();
+    }
+
+    fn open_startup(&mut self) {
+        match self.prefs.startup.as_str() {
+            "continue" => {
+                if let Some(url) = self.prefs.history.last().map(|visit| visit.url.clone()) {
+                    self.navigate(&url);
+                    return;
+                }
+            }
+            "pages" => {
+                if let Some(url) = self.prefs.startup_pages.first().cloned() {
+                    self.navigate(&url);
+                    return;
+                }
+            }
+            _ => {}
+        }
+        self.open_shared_page("mithu://newtab");
+    }
+
+    fn apply_prefs(&mut self) {
+        self.dark = self.prefs.dark();
+        self.bookmarks_open = self.prefs.show_bookmarks;
+        mithu_ui::set_search_engine(&self.prefs.search);
+        self.bookmarks = self
+            .prefs
+            .bookmarks
+            .iter()
+            .map(|mark| Bookmark { title: mark.title.clone(), url: mark.url.clone() })
+            .collect();
+        self.apply_theme();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.zoom = self.prefs.zoom;
+            tab.webview.set_page_zoom(self.prefs.zoom);
+        }
     }
 
     fn resize_active(&mut self) {
@@ -968,11 +1072,7 @@ impl Browser {
     }
 
     fn content_top(&self) -> f32 {
-        let mut top = TAB_H + TOOLBAR_H;
-        if self.bookmarks_open {
-            top += BOOKMARK_BAR_H;
-        }
-        top
+        chrome::chrome_height(self.bookmarks_open, self.scale)
     }
 
     fn content_point(&self, x: f32, y: f32) -> Option<(f32, f32)> {
@@ -1305,6 +1405,9 @@ impl Browser {
             find_open: self.find_open,
             find_query: self.find_query.clone(),
             fonts: &self.fonts,
+            scale: self.scale,
+            dark: self.prefs.dark(),
+            show_home: self.prefs.show_home,
         }
     }
 
@@ -1517,6 +1620,35 @@ fn software_context(size: PhysicalSize<u32>) -> Result<SoftwareRenderingContext,
                  The software surface fallback failed too ({second:?})"
             )),
         },
+    }
+}
+
+fn write_page(document: &mithu_ui::pages::Document) -> Url {
+    let dir = mithu_ui::pages::directory().join("pages");
+    let _ = std::fs::create_dir_all(&dir);
+    let name = document.url.trim_start_matches("mithu://").replace('/', "-");
+    let path = dir.join(format!("{name}.html"));
+    let _ = std::fs::write(&path, &document.html);
+    Url::from_file_path(&path).unwrap_or_else(|_| Url::parse("about:blank").expect("blank"))
+}
+
+fn reveal_path(path: &str, folder: bool) {
+    let target = if folder {
+        std::path::Path::new(path).parent().map(|dir| dir.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(path))
+    } else {
+        std::path::PathBuf::from(path)
+    };
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("cmd").args(["/C", "start", "", &target.display().to_string()]).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&target).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&target).spawn();
     }
 }
 

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mithu Lite
+Comment=Mithu Lite browser
+Exec=mithu-lite
+Icon=org.mithu.lite
+Terminal=false
+Categories=Network;WebBrowser;
+StartupWMClass=mithu-lite
