@@ -1,4 +1,4 @@
-0.1.0
+0.1.1
 
 # The first non-comment line is the project version (semver: MAJOR.MINOR.PATCH,
 # with an optional -prerelease). [workspace.package] version in Cargo.toml must
