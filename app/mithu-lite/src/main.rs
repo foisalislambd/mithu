@@ -149,6 +149,7 @@ struct TabInfo {
     loading: bool,
     can_back: bool,
     can_forward: bool,
+    group: u8,
 }
 
 struct Model {
@@ -332,6 +333,7 @@ impl App {
                 loading: !show_ntp && !url.is_empty(),
                 can_back: false,
                 can_forward: false,
+                group: 0,
             });
             model.active = model.tabs.len() - 1;
             model.ntp = show_ntp;
@@ -486,6 +488,15 @@ impl App {
             return;
         }
         let prefs = self.model().prefs.clone();
+        {
+            let model = self.model();
+            let rows = model
+                .tabs
+                .iter()
+                .map(|tab| (tab.title.clone(), tab.url.clone(), tab.group))
+                .collect();
+            mithu_ui::pages::set_tasks(rows);
+        }
         if let Some(document) = mithu_ui::pages::open(trimmed, &prefs, env!("MITHU_VERSION")) {
             {
                 let mut model = self.model();
@@ -819,8 +830,40 @@ impl App {
                 let index = self.model().active;
                 self.close_index(index);
             }
+            MenuId::SavePage | MenuId::SaveLink | MenuId::SaveImage => self.save_active_page(),
+            MenuId::TaskManager => self.load_in_active("mithu://tasks"),
+            MenuId::NewTabGroup => {
+                let mut model = self.model();
+                if let Some(tab) = model.active_mut() {
+                    tab.group = if tab.group == 0 { 1 } else { tab.group % 8 + 1 };
+                }
+            }
             _ => {}
         }
+    }
+
+    fn save_active_page(&mut self) {
+        let (url, dir) = {
+            let model = self.model();
+            let url = model.active().map(|tab| tab.url.clone()).unwrap_or_default();
+            let dir = if model.prefs.download_dir.is_empty() {
+                mithu_ui::pages::downloads_folder()
+            } else {
+                std::path::PathBuf::from(&model.prefs.download_dir)
+            };
+            (url, dir)
+        };
+        match mithu_ui::pages::save_remote(&url, &dir) {
+            Ok(path) => {
+                let shown = path.display().to_string();
+                let mut model = self.model();
+                model.prefs.note_download(&url, &shown, "done");
+                model.downloads.push(shown);
+                mithu_ui::pages::save(&mithu_ui::pages::path(), &model.prefs);
+            }
+            Err(error) => eprintln!("mithu-lite: save failed: {error}"),
+        }
+        self.request_redraw();
     }
 
     fn focus_omnibox(&mut self) {
@@ -1008,6 +1051,7 @@ impl App {
             .map(|tab| TabPaint {
                 title: if tab.title.is_empty() { "New Tab".into() } else { tab.title.clone() },
                 favicon: None,
+                group: tab.group,
             })
             .collect();
         let location = model.active().map(|tab| tab.url.as_str()).unwrap_or("");

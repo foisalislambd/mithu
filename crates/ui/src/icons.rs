@@ -1,6 +1,6 @@
-//! Lucide icons rasterized with resvg.
+//! Toolbar icons rasterized with resvg.
 //!
-//! The SVGs live in `crates/shell/icons/` (lucide-static 0.544.0, ISC).
+//! The SVGs in `icons/` are filled Material paths. See THIRD_PARTY_NOTICES.md.
 //! Each glyph is drawn at twice the destination size and box-filtered back
 //! down so the 2px stroke stays crisp on a 1x framebuffer.
 

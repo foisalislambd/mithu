@@ -1,5 +1,5 @@
-//! Desktop frame painted in the style of the current Chrome window, without
-//! any Google or Chrome mark. Icons are Lucide; the wordmark is "Mithu".
+//! Desktop frame painted in the style of the current window chrome, without
+//! another browser's name or mark. Icons are filled Material paths; the wordmark is "Mithu".
 
 use mithu_text::{glyph_top, FontBook, Glyph};
 
@@ -79,7 +79,20 @@ pub enum Popup {
 pub struct TabPaint {
     pub title: String,
     pub favicon: Option<(u32, u32, Vec<u8>)>,
+    /// 0 is ungrouped. 1–8 are the tab-group colors.
+    pub group: u8,
 }
+
+const GROUP_COLOR: [u32; 8] = [
+    rgb(26, 115, 232),
+    rgb(217, 48, 37),
+    rgb(249, 171, 0),
+    rgb(24, 128, 56),
+    rgb(208, 24, 132),
+    rgb(161, 66, 244),
+    rgb(0, 123, 131),
+    rgb(227, 116, 0),
+];
 
 pub struct State<'a> {
     pub width: f32,
@@ -219,6 +232,19 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
                 icon,
                 icon,
                 crate::brand::mark(),
+            );
+        }
+        if let Some(group) = state.tabs.get(index).map(|tab| tab.group).filter(|group| *group > 0) {
+            let color = GROUP_COLOR[(group as usize - 1) % GROUP_COLOR.len()];
+            fill_rect(
+                pixels,
+                width,
+                height,
+                geom.rect.x + dip(10.0),
+                geom.rect.bottom() - dip(5.0),
+                (geom.rect.w - dip(20.0)).max(dip(8.0)),
+                dip(3.0),
+                color,
             );
         }
         if geom.title_right - geom.title_left > dip(8.0) {
