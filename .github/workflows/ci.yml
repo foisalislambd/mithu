@@ -38,6 +38,7 @@ jobs:
           pwsh -NoProfile -File tools/package-windows.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:MITHU_NO_DIALOG = "1"
+          $env:ANGLE_DEFAULT_PLATFORM = "warp"
           $exe = Join-Path (Get-Location) "target\release\mithu-windows\mithu.exe"
           & $exe --smoke-test about:blank
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

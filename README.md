@@ -3,7 +3,7 @@
 A small Rust browser with a familiar desktop frame, in two editions: one embeds [Servo](https://github.com/servo/servo), the other uses the operating system's web view.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-2ea44f)](VERSION.md)
+[![Version 0.1.1](https://img.shields.io/badge/version-0.1.1-2ea44f)](VERSION.md)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/foisalislambd/mithu/releases)
 
 <p align="center">
@@ -103,7 +103,7 @@ Each release has these files, plus `SHA256SUMS`:
 | macOS | `mithu-macos` | `mithu-lite-macos` |
 | Windows x64 | `mithu-windows-x64.zip` | `mithu-lite-windows-x64.exe` |
 
-`mithu-windows-x64.zip` holds `mithu.exe`, the Visual C++ runtime DLLs it links (`VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `MSVCP140.dll`), and a short readme. Unzip the folder and run `mithu.exe` from that folder. Servo's resources are compiled into the executable. Check a download with `sha256sum -c SHA256SUMS` from the release directory (on Windows, `Get-FileHash`).
+`mithu-windows-x64.zip` holds `mithu.exe`, the Visual C++ runtime DLLs it links (`VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `MSVCP140.dll`), ANGLE (`libEGL.dll` and `libGLESv2.dll`), and a short readme. The page is drawn through ANGLE, because raw WGL needs `WGL_NV_DX_interop`. Set `ANGLE_DEFAULT_PLATFORM=warp` for software rendering. Unzip the folder and run `mithu.exe` from that folder. Servo's resources are compiled into the executable. Check a download with `sha256sum -c SHA256SUMS` from the release directory (on Windows, `Get-FileHash`).
 
 The binaries are not code-signed. Windows SmartScreen and Defender warn on an unsigned program downloaded from the internet because the file is new and carries a Mark-of-the-Web, not because a scanner found a payload. Signing later needs an Authenticode certificate for Windows and an Apple Developer ID plus notarization for macOS, stored as GitHub Actions secrets. Those secrets are not in this repository, so the release stays unsigned.
 
@@ -221,7 +221,7 @@ Package names use a `mithu-` prefix. `[workspace.package] version` in `Cargo.tom
 
 ## Releases
 
-The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.1.0`. The badge at the top of this file should be updated in the same change.
+The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.1.1`. The badge at the top of this file should be updated in the same change.
 
 1. Set the same new semver in `VERSION.md` and in `[workspace.package] version` in `Cargo.toml`.
 2. Run `python3 tools/version.py check`. It fails if they differ. CI runs that check too.

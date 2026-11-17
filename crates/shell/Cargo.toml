@@ -17,5 +17,10 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", 
 servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit"] }
 url = "2"
 
+# Servo's Windows WGL backend needs WGL_NV_DX_interop, which is absent on
+# the GitHub runner and on many GPUs. Servoshell uses ANGLE instead.
+[target.'cfg(target_os = "windows")'.dependencies]
+servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit", "no-wgl"] }
+
 [lints]
 workspace = true
