@@ -8,6 +8,7 @@ use url::Url;
 
 pub mod brand;
 pub mod chrome;
+pub mod clipboard;
 pub mod icons;
 pub mod menus;
 pub mod pages;
@@ -97,6 +98,8 @@ mod tests {
                 title: "New Tab".into(),
                 favicon: None,
                 group: 0,
+                group_name: String::new(),
+                collapsed: false,
             }],
             active: 0,
             omnibox: String::new(),
@@ -129,6 +132,8 @@ mod tests {
             scale: 1.0,
             dark: false,
             show_home: true,
+            group_editor: false,
+            permission_prompt: "",
         };
         assert_eq!(
             chrome::content_chrome(&state),
@@ -149,6 +154,8 @@ mod tests {
                 title: "New Tab".into(),
                 favicon: None,
                 group: 0,
+                group_name: String::new(),
+                collapsed: false,
             }],
             active: 0,
             omnibox: String::new(),
@@ -181,6 +188,8 @@ mod tests {
             scale: 1.0,
             dark: false,
             show_home: true,
+            group_editor: false,
+            permission_prompt: "",
         };
         let mut pixels = vec![0u32; 1280 * 800];
         chrome::paint(&mut pixels, 1280, 800, &state);
@@ -223,9 +232,9 @@ mod tests {
             width: 1100.0 * scale,
             height: 980.0 * scale,
             tabs: vec![
-                chrome::TabPaint { title: "New Tab".into(), favicon: None, group: 1 },
-                chrome::TabPaint { title: "Mithu notes".into(), favicon: None, group: 0 },
-                chrome::TabPaint { title: "A longer page title".into(), favicon: None, group: 0 },
+                chrome::TabPaint { title: "New Tab".into(), favicon: None, group: 1, group_name: "Work".into(), collapsed: false },
+                chrome::TabPaint { title: "Mithu notes".into(), favicon: None, group: 1, group_name: "Work".into(), collapsed: true },
+                chrome::TabPaint { title: "A longer page title".into(), favicon: None, group: 0, group_name: String::new(), collapsed: false },
             ],
             active: 0,
             omnibox: String::new(),
@@ -261,6 +270,8 @@ mod tests {
             scale,
             dark,
             show_home: true,
+            group_editor: false,
+            permission_prompt: "",
         }
     }
 
@@ -285,6 +296,15 @@ mod tests {
             let path = std::path::Path::new(&dir).join(format!("frame-{name}.ppm"));
             write_ppm(&path, &pixels, w, h);
         }
+        let mut grouped = sample(&fonts, 1.0, false);
+        grouped.menu = None;
+        grouped.group_editor = true;
+        grouped.permission_prompt = "example.com wants camera";
+        let w = grouped.width.round() as u32;
+        let h = grouped.height.round() as u32;
+        let mut pixels = vec![0u32; (w * h) as usize];
+        chrome::paint(&mut pixels, w, h, &grouped);
+        write_ppm(&std::path::Path::new(&dir).join("group-permission.ppm"), &pixels, w, h);
     }
 
     fn write_ppm(path: &std::path::Path, pixels: &[u32], w: u32, h: u32) {

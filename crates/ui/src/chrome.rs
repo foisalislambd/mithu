@@ -81,6 +81,9 @@ pub struct TabPaint {
     pub favicon: Option<(u32, u32, Vec<u8>)>,
     /// 0 is ungrouped. 1–8 are the tab-group colors.
     pub group: u8,
+    pub group_name: String,
+    /// Hidden member of a collapsed group. The first tab of the group stays visible.
+    pub collapsed: bool,
 }
 
 const GROUP_COLOR: [u32; 8] = [
@@ -130,6 +133,8 @@ pub struct State<'a> {
     pub scale: f32,
     pub dark: bool,
     pub show_home: bool,
+    pub group_editor: bool,
+    pub permission_prompt: &'a str,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -158,6 +163,13 @@ pub enum Hit {
     Suggestion(usize),
     Panel,
     Content,
+    GroupBar(usize),
+    GroupCollapse,
+    Ungroup,
+    CloseGroup,
+    GroupColor(u8),
+    AllowPermission,
+    BlockPermission,
     None,
 }
 
@@ -206,7 +218,7 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
         crate::brand::mark(),
     );
 
-    let (tabs, plus, search) = tab_layout(w, state.tabs.len().max(1), state.scale);
+    let (tabs, plus, search) = tab_layout(w, &state.tabs, state.scale);
     for (index, geom) in tabs.iter().enumerate() {
         let active = index == state.active;
         let hovered = geom.rect.contains(state.pointer.0, state.pointer.1);
@@ -218,7 +230,17 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
             let sep_x = geom.rect.right() + 1.0;
             fill_rect(pixels, width, height, sep_x, dip(14.0), 1.0, dip(16.0), rgb(160, 180, 210));
         }
+        if geom.rect.w < 1.0 {
+            continue;
+        }
         let title = state.tabs.get(index).map(|tab| tab.title.as_str()).unwrap_or("New Tab");
+        let group_label = state.tabs.get(index).and_then(|tab| {
+            if tab.group > 0 && !tab.group_name.is_empty() && group_head(&state.tabs, index) {
+                Some(tab.group_name.as_str())
+            } else {
+                None
+            }
+        });
         let icon = dip(16.0).max(1.0);
         if let Some((fw, fh, bytes)) = state.tabs.get(index).and_then(|tab| tab.favicon.as_ref()) {
             blit_favicon(pixels, width, height, geom.rect.x + dip(12.0), geom.rect.y + (geom.rect.h - icon) / 2.0, icon, *fw, *fh, bytes);
@@ -248,17 +270,36 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
             );
         }
         if geom.title_right - geom.title_left > dip(8.0) {
+            let mut title_left = geom.title_left;
+            if let Some(name) = group_label {
+                let color = state.tabs.get(index).map(|tab| GROUP_COLOR[(tab.group as usize - 1) % GROUP_COLOR.len()]).unwrap_or(INK);
+                draw_text_fade(
+                    pixels,
+                    width,
+                    height,
+                    state.fonts,
+                    geom.title_left,
+                    geom.rect.y + dip(22.0),
+                    12.0,
+                    color,
+                    name,
+                    geom.title_left,
+                    geom.title_right,
+                    dip(16.0),
+                );
+                title_left = (geom.title_left + text_width(state.fonts, name, 12.0) + dip(8.0)).min(geom.title_right);
+            }
             draw_text_fade(
                 pixels,
                 width,
                 height,
                 state.fonts,
-                geom.title_left,
+                title_left,
                 geom.rect.y + dip(22.0),
                 12.0,
                 INK,
                 title,
-                geom.title_left,
+                title_left,
                 geom.title_right,
                 dip(16.0),
             );
@@ -442,10 +483,51 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
         paint_menu(pixels, width, height, state, popup);
     }
     paint_status(pixels, width, height, state);
+    if state.group_editor {
+        paint_group_editor(pixels, width, height, state);
+    }
+    if !state.permission_prompt.is_empty() {
+        paint_permission(pixels, width, height, state);
+    }
 }
 
 pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
     begin_paint(state);
+    if !state.permission_prompt.is_empty() {
+        let bar = permission_bar(state);
+        if bar.contains(x, y) {
+            let allow = permission_button(bar, true);
+            let block = permission_button(bar, false);
+            if allow.contains(x, y) {
+                return Hit::AllowPermission;
+            }
+            if block.contains(x, y) {
+                return Hit::BlockPermission;
+            }
+            return Hit::Panel;
+        }
+    }
+    if state.group_editor {
+        let card = group_card(state);
+        if card.contains(x, y) {
+            if group_button(card, 0).contains(x, y) {
+                return Hit::GroupCollapse;
+            }
+            if group_button(card, 1).contains(x, y) {
+                return Hit::Ungroup;
+            }
+            if group_button(card, 2).contains(x, y) {
+                return Hit::CloseGroup;
+            }
+            let dots = group_dots(card);
+            for (index, dot) in dots.iter().enumerate() {
+                if dot.contains(x, y) {
+                    return Hit::GroupColor((index as u8) + 1);
+                }
+            }
+            return Hit::Panel;
+        }
+    }
     let tools = toolbar(state.width, state.scale, state.show_home);
     if state.menu.is_some() {
         if let Some(hit) = menu_hit(state, x, y) {
@@ -453,7 +535,7 @@ pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
         }
     }
     if state.tab_search {
-        let (_, _, search) = tab_layout(state.width, state.tabs.len().max(1), state.scale);
+        let (_, _, search) = tab_layout(state.width, &state.tabs, state.scale);
         let rect = tab_search_rect(state, search);
         if rect.contains(x, y) {
             let index = ((y - rect.y - dip(6.0)) / dip(32.0)).floor() as isize;
@@ -497,7 +579,7 @@ pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
         if let Some(caption) = caption_at(state.width, x, state.scale) {
             return caption;
         }
-        let (tabs, plus, search) = tab_layout(state.width, state.tabs.len().max(1), state.scale);
+        let (tabs, plus, search) = tab_layout(state.width, &state.tabs, state.scale);
         if plus.contains(x, y) {
             return Hit::NewTab;
         }
@@ -505,8 +587,17 @@ pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
             return Hit::TabSearch;
         }
         for (index, geom) in tabs.iter().enumerate() {
+            if geom.rect.w < 1.0 {
+                continue;
+            }
             if geom.close.contains(x, y) && geom.rect.w >= dip(36.0) {
                 return Hit::CloseTab(index);
+            }
+            if state.tabs.get(index).is_some_and(|tab| tab.group > 0)
+                && y >= geom.rect.bottom() - dip(8.0)
+                && geom.rect.contains(x, y)
+            {
+                return Hit::GroupBar(index);
             }
             if geom.rect.contains(x, y) {
                 return Hit::Tab(index);
@@ -588,19 +679,44 @@ fn box_px(x: f32, y: f32, w: f32, h: f32, scale: f32) -> Rect {
     Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
-fn tab_layout(width_px: f32, count: usize, scale: f32) -> (Vec<TabGeom>, Rect, Rect) {
+fn group_head(tabs: &[TabPaint], index: usize) -> bool {
+    let Some(tab) = tabs.get(index) else {
+        return false;
+    };
+    if tab.group == 0 {
+        return false;
+    }
+    tabs.iter().take(index).all(|other| other.group != tab.group || other.collapsed)
+}
+
+fn tab_layout(width_px: f32, tabs_in: &[TabPaint], scale: f32) -> (Vec<TabGeom>, Rect, Rect) {
     let scale = unit(scale);
     let width = width_px / scale;
-    let count = count.max(1);
+    let count = tabs_in.len().max(1);
+    let shown = tabs_in.iter().filter(|tab| !tab.collapsed).count().max(1);
     let left = 40.0;
     let reserved = 8.0 + 28.0 + 4.0 + 28.0 + 12.0 + CAPTION_W * 3.0;
     let available = (width - left - reserved).max(16.0);
-    let ideal = available / count as f32;
+    let ideal = available / shown as f32;
     let tab_w = if ideal >= 48.0 { ideal.min(240.0) } else { ideal.max(20.0) };
     let mut tabs = Vec::with_capacity(count);
     let mut x = left;
     let strip_bottom = TAB_H;
-    for _ in 0..count {
+    let source: Vec<bool> = if tabs_in.is_empty() {
+        vec![false]
+    } else {
+        tabs_in.iter().map(|tab| tab.collapsed).collect()
+    };
+    for collapsed in source {
+        if collapsed {
+            tabs.push(TabGeom {
+                title_left: 0.0,
+                title_right: 0.0,
+                rect: Rect { x, y: 0.0, w: 0.0, h: 0.0 },
+                close: Rect { x, y: 0.0, w: 0.0, h: 0.0 },
+            });
+            continue;
+        }
         let rect = box_px(x, 6.0, (tab_w - 4.0).max(16.0), strip_bottom - 6.0, scale);
         let close = box_px(
             (x + (tab_w - 4.0).max(16.0)) - 8.0 - 16.0,
@@ -1444,6 +1560,126 @@ fn blend(pixels: &mut [u32], width: u32, height: u32, x: i32, y: i32, color: u32
         | ((sb * a + db * inv) / 255);
 }
 
+fn group_card(state: &State<'_>) -> Rect {
+    let below_prompt = if state.permission_prompt.is_empty() { 0.0 } else { dip(48.0) };
+    Rect {
+        x: dip(16.0),
+        y: content_chrome(state) + dip(8.0) + below_prompt,
+        w: dip(280.0),
+        h: dip(132.0),
+    }
+}
+
+fn group_button(card: Rect, index: u8) -> Rect {
+    let w = dip(84.0);
+    Rect {
+        x: card.x + dip(8.0) + index as f32 * (w + dip(6.0)),
+        y: card.y + card.h - dip(36.0),
+        w,
+        h: dip(28.0),
+    }
+}
+
+fn group_dots(card: Rect) -> Vec<Rect> {
+    (0..8)
+        .map(|index| Rect {
+            x: card.x + dip(12.0) + index as f32 * dip(32.0),
+            y: card.y + dip(36.0),
+            w: dip(22.0),
+            h: dip(22.0),
+        })
+        .collect()
+}
+
+fn paint_group_editor(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
+    let card = group_card(state);
+    fill_round(pixels, width, height, card.x, card.y, card.w, card.h, dip(12.0), tone(rgb(255, 255, 255), rgb(32, 33, 36)));
+    draw_text(pixels, width, height, state.fonts, card.x + dip(12.0), card.y + dip(22.0), 13.0, INK, "Tab group");
+    for (index, dot) in group_dots(card).iter().enumerate() {
+        fill_circle(pixels, width, height, dot.x + dot.w / 2.0, dot.y + dot.h / 2.0, dip(8.0), GROUP_COLOR[index]);
+    }
+    for (index, label) in ["Collapse", "Ungroup", "Close"].iter().enumerate() {
+        let button = group_button(card, index as u8);
+        fill_round(pixels, width, height, button.x, button.y, button.w, button.h, dip(8.0), tone(rgb(232, 234, 237), rgb(60, 64, 67)));
+        draw_text(pixels, width, height, state.fonts, button.x + dip(8.0), button.y + dip(18.0), 12.0, INK, label);
+    }
+}
+
+fn permission_bar(state: &State<'_>) -> Rect {
+    Rect {
+        x: dip(16.0),
+        y: content_chrome(state) + dip(8.0),
+        w: (state.width - dip(32.0)).max(dip(200.0)),
+        h: dip(40.0),
+    }
+}
+
+fn permission_button(bar: Rect, allow: bool) -> Rect {
+    let w = dip(72.0);
+    Rect {
+        x: if allow { bar.right() - dip(8.0) - w } else { bar.right() - dip(16.0) - w * 2.0 },
+        y: bar.y + dip(6.0),
+        w,
+        h: dip(28.0),
+    }
+}
+
+fn paint_permission(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
+    let bar = permission_bar(state);
+    fill_round(pixels, width, height, bar.x, bar.y, bar.w, bar.h, dip(20.0), tone(rgb(255, 255, 255), rgb(32, 33, 36)));
+    draw_text_fade(
+        pixels,
+        width,
+        height,
+        state.fonts,
+        bar.x + dip(16.0),
+        bar.y + dip(25.0),
+        13.0,
+        INK,
+        state.permission_prompt,
+        bar.x + dip(16.0),
+        permission_button(bar, false).x - dip(8.0),
+        dip(16.0),
+    );
+    for (allow, label) in [(false, "Block"), (true, "Allow")] {
+        let button = permission_button(bar, allow);
+        fill_round(
+            pixels,
+            width,
+            height,
+            button.x,
+            button.y,
+            button.w,
+            button.h,
+            dip(14.0),
+            if allow { rgb(11, 87, 208) } else { tone(rgb(232, 234, 237), rgb(60, 64, 67)) },
+        );
+        draw_text(
+            pixels,
+            width,
+            height,
+            state.fonts,
+            button.x + dip(16.0),
+            button.y + dip(18.0),
+            12.0,
+            if allow { rgb(255, 255, 255) } else { INK },
+            label,
+        );
+    }
+}
+
+fn plain_tabs(count: usize) -> Vec<TabPaint> {
+    (0..count)
+        .map(|_| TabPaint {
+            title: "Tab".into(),
+            favicon: None,
+            group: 0,
+            group_name: String::new(),
+            collapsed: false,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1461,13 +1697,13 @@ mod tests {
 
     #[test]
     fn tab_title_is_clipped_inside_the_tab_and_captions_stay_clear() {
-        let (tabs, _plus, search) = tab_layout(1280.0, 1, 1.0);
+        let (tabs, _plus, search) = tab_layout(1280.0, &plain_tabs(1), 1.0);
         let tab = &tabs[0];
         assert!(tab.title_right < tab.close.x);
         assert!(tab.close.right() <= tab.rect.right());
         assert!(tab.rect.w <= 240.0);
         assert!(search.right() < 1280.0 - CAPTION_W * 3.0);
-        let (many, plus, _) = tab_layout(1280.0, 30, 1.0);
+        let (many, plus, _) = tab_layout(1280.0, &plain_tabs(30), 1.0);
         assert!(many.last().unwrap().rect.right() <= plus.x + 1.0);
         assert!(plus.right() < 1280.0 - CAPTION_W * 3.0);
     }
@@ -1477,7 +1713,7 @@ mod tests {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let height = chrome_height(true, scale);
             assert_eq!(height, height.round());
-            let (tabs, plus, search) = tab_layout(1100.0 * scale, 3, scale);
+            let (tabs, plus, search) = tab_layout(1100.0 * scale, &plain_tabs(3), scale);
             for tab in &tabs {
                 assert_eq!(tab.rect.x, tab.rect.x.round());
                 assert_eq!(tab.rect.y, tab.rect.y.round());
@@ -1530,6 +1766,8 @@ mod tests {
                 scale,
                 dark: false,
                 show_home: true,
+                group_editor: false,
+                permission_prompt: "",
             };
             let menu = menu_rect(&state, Popup::App);
             assert_eq!(menu.w, (336.0 * scale).round());

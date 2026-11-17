@@ -11,7 +11,7 @@
   <a href="https://github.com/foisalislambd/mithu/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/foisalislambd/mithu/ci.yml?branch=main&amp;label=CI"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="https://github.com/foisalislambd/mithu/releases"><img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey"></a>
-  <a href="VERSION.md"><img alt="Version 0.1.6" src="https://img.shields.io/badge/version-0.1.6-2ea44f"></a>
+  <a href="VERSION.md"><img alt="Version 0.1.7" src="https://img.shields.io/badge/version-0.1.7-2ea44f"></a>
 </p>
 
 ## Contents
@@ -120,11 +120,15 @@ The internal pages use the same layout in light and dark.
   <img src="docs/screenshots/page-bookmarks.png" alt="Mithu bookmarks manager" width="420">
 </p>
 
-<p align="center"><em>App menu, settings, site settings, history, downloads, and bookmarks.</em></p>
+<p align="center">
+  <img src="docs/screenshots/group-permission.png" alt="A named tab group, its color editor, and a camera permission prompt with Block and Allow" width="720">
+</p>
+
+<p align="center"><em>App menu, settings, site settings, history, downloads, and bookmarks. The last picture is a tab group named Work, its editor, and a camera prompt.</em></p>
 
 ## Download
 
-Published desktop builds are on [GitHub Releases](https://github.com/foisalislambd/mithu/releases). The newest published tag is [v0.1.5](https://github.com/foisalislambd/mithu/releases/tag/v0.1.5). This tree is 0.1.6, so the next release is published after that version reaches `main`. Each release includes `SHA256SUMS`. The sums below belong to v0.1.5 only.
+Published desktop builds are on [GitHub Releases](https://github.com/foisalislambd/mithu/releases). The newest published tag is [v0.1.5](https://github.com/foisalislambd/mithu/releases/tag/v0.1.5). This tree is 0.1.7, so the next release is published after that version reaches `main`. v0.1.6 is the tag cut from the previous main. Each release includes `SHA256SUMS`. The sums below belong to v0.1.5 only.
 
 | Platform | Mithu | Mithu Lite |
 | --- | --- | --- |
@@ -199,7 +203,7 @@ The phone projects are in the tree. They are not published as release artifacts,
 | App id | `org.mithu.lite` and `org.mithu.servo` | `org.mithu.lite` |
 | Engine today | Android WebView | WKWebView |
 
-Android uses compile SDK 35 and min SDK 26. `versionName` and `versionCode` follow `VERSION.md` (0.1.6 is code 1006). A debug APK needs the Android SDK (`./gradlew assembleDebug` in `mobile/android`). The iOS project file only stores the version keys, so it is not yet an archive you can open in Xcode and ship. Icons for both platforms are in `assets/android`, `assets/android-lite`, and `assets/ios`.
+Android uses compile SDK 35 and min SDK 26. `versionName` and `versionCode` follow `VERSION.md` (0.1.7 is code 1007). CI builds a debug APK, which the Android Gradle Plugin signs with the debug keystore (`gradle assembleDebug` in `mobile/android`). `tools/ios-unsigned.sh` compiles `MithuLite.swift` into an unsigned `MithuLite.app` with the iOS SDK. That is not an App Store archive. Icons for both platforms are in `assets/android`, `assets/android-lite`, and `assets/ios`.
 
 Desktop Linux, macOS, and Windows are what the GitHub releases ship.
 
@@ -223,9 +227,9 @@ Page text uses the Roboto files in `assets/fonts/roboto`. Toolbar icons are fill
 
 ## Releases
 
-The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.1.6`. That file is the only place to change it.
+The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.1.7`. That file is the only place to change it.
 
-`python3 tools/version.py sync` copies the line into `[workspace.package] version`, the workspace packages in `Cargo.lock`, the version badge at the top of this file, and, when those projects are in the tree, Android `versionName` / `versionCode` and iOS `CFBundleShortVersionString`, `CFBundleVersion`, `MARKETING_VERSION`, and `CURRENT_PROJECT_VERSION`. The numeric code is `major * 1000000 + minor * 1000 + patch` (0.1.6 is 1006). `python3 tools/version.py check` prints any files that still differ and exits 0. `python3 tools/version.py set 0.1.6` writes `VERSION.md` and syncs.
+`python3 tools/version.py sync` copies the line into `[workspace.package] version`, the workspace packages in `Cargo.lock`, the version badge at the top of this file, and, when those projects are in the tree, Android `versionName` / `versionCode` and iOS `CFBundleShortVersionString`, `CFBundleVersion`, `MARKETING_VERSION`, and `CURRENT_PROJECT_VERSION`. The numeric code is `major * 1000000 + minor * 1000 + patch` (0.1.7 is 1007). `python3 tools/version.py check` prints any files that still differ and exits 0. `python3 tools/version.py set 0.1.7` writes `VERSION.md` and syncs.
 
 Pushing `main` publishes a GitHub Release only when that version is strictly greater than the newest `v*` tag. Each build runs `sync` before compiling.
 

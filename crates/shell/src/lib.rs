@@ -34,11 +34,19 @@ pub enum FrameHit {
     Drag,
 }
 
+struct PendingPermission {
+    origin: String,
+    feature: String,
+    request: servo::PermissionRequest,
+}
+
 #[derive(Clone)]
 struct Delegate {
     frame: Rc<AtomicBool>,
     opened: Rc<RefCell<Vec<PendingTab>>>,
     shot: Rc<RefCell<Option<servo::RgbaImage>>>,
+    saves: Rc<RefCell<Vec<String>>>,
+    permissions: Rc<RefCell<Vec<PendingPermission>>>,
 }
 
 struct PendingTab {
@@ -66,6 +74,39 @@ impl WebViewDelegate for Delegate {
             .borrow_mut()
             .push(PendingTab { webview, context });
     }
+
+    fn request_navigation(&self, _webview: WebView, request: servo::NavigationRequest) {
+        let url = request.url.to_string();
+        if mithu_ui::pages::is_download_url(&url) {
+            self.saves.borrow_mut().push(url);
+            request.deny();
+        }
+    }
+
+    fn request_permission(&self, webview: WebView, request: servo::PermissionRequest) {
+        let origin = webview
+            .url()
+            .and_then(|url| url.host_str().map(|host| host.to_string()))
+            .unwrap_or_default();
+        let feature = match request.feature() {
+            servo::PermissionFeature::Geolocation => "location",
+            servo::PermissionFeature::Notifications => "notifications",
+            servo::PermissionFeature::Camera => "camera",
+            servo::PermissionFeature::Microphone => "microphone",
+            servo::PermissionFeature::BackgroundSync => "background",
+            servo::PermissionFeature::PersistentStorage => "storage",
+            _ => {
+                request.deny();
+                return;
+            }
+        };
+        self.permissions.borrow_mut().push(PendingPermission {
+            origin,
+            feature: feature.to_string(),
+            request,
+        });
+        self.frame.store(true, Ordering::SeqCst);
+    }
 }
 
 struct Tab {
@@ -75,7 +116,22 @@ struct Tab {
     url: String,
     status: LoadStatus,
     zoom: f32,
-    group: u8,
+    group_id: u8,
+}
+
+#[derive(Clone)]
+struct TabGroup {
+    id: u8,
+    name: String,
+    color: u8,
+    collapsed: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    None,
+    WindowName,
+    GroupName,
 }
 
 struct Bookmark {
@@ -143,6 +199,11 @@ pub struct Browser {
     revision: u64,
     frame: Rc<AtomicBool>,
     status: String,
+    groups: Vec<TabGroup>,
+    group_editor: bool,
+    window_name: String,
+    field: Field,
+    permission_prompt: String,
 }
 
 impl Browser {
@@ -161,6 +222,8 @@ impl Browser {
             frame: frame.clone(),
             opened,
             shot: Rc::new(RefCell::new(None)),
+            saves: Rc::new(RefCell::new(Vec::new())),
+            permissions: Rc::new(RefCell::new(Vec::new())),
         };
         let mut preferences = servo::Preferences::default();
         preferences.network_http_proxy_uri = String::new();
@@ -210,6 +273,11 @@ impl Browser {
             revision: 1,
             frame,
             status: String::new(),
+            groups: Vec::new(),
+            group_editor: false,
+            window_name: String::new(),
+            field: Field::None,
+            permission_prompt: String::new(),
         };
         browser.open_tab(start_url())?;
         browser.apply_prefs();
@@ -241,10 +309,18 @@ impl Browser {
     }
 
     pub fn title(&self) -> String {
-        self.tabs
+        let page = self
+            .tabs
             .get(self.active)
             .map(|tab| tab.title.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.window_name.is_empty() {
+            page
+        } else if page.is_empty() {
+            self.window_name.clone()
+        } else {
+            format!("{} — {page}", self.window_name)
+        }
     }
 
     pub fn load_settled(&self) -> bool {
@@ -587,14 +663,52 @@ impl Browser {
     }
 
     pub fn field_focused(&self) -> bool {
-        false
+        self.field != Field::None
     }
 
-    pub fn submit_field(&mut self) {}
+    pub fn submit_field(&mut self) {
+        self.field = Field::None;
+        self.status = if self.window_name.is_empty() {
+            "Window name cleared.".into()
+        } else {
+            format!("Window named {}.", self.window_name)
+        };
+        self.bump();
+    }
 
-    pub fn field_backspace(&mut self) {}
+    pub fn field_backspace(&mut self) {
+        match self.field {
+            Field::WindowName => {
+                self.window_name.pop();
+            }
+            Field::GroupName => {
+                if let Some(group) = self.active_group_mut() {
+                    group.name.pop();
+                }
+            }
+            Field::None => {}
+        }
+        self.bump();
+    }
 
-    pub fn field_insert(&mut self, _ch: char) {}
+    pub fn field_insert(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        match self.field {
+            Field::WindowName => self.window_name.push(ch),
+            Field::GroupName => {
+                if let Some(group) = self.active_group_mut() {
+                    if group.name == "Group" {
+                        group.name.clear();
+                    }
+                    group.name.push(ch);
+                }
+            }
+            Field::None => {}
+        }
+        self.bump();
+    }
 
     pub fn menu_open(&self) -> bool {
         self.menu.is_some()
@@ -688,6 +802,20 @@ impl Browser {
                 self.active = index;
                 self.close_tab();
             }
+            Click::GroupEditor => {
+                self.group_editor = self.active_group_id() != 0;
+                if self.group_editor {
+                    self.field = Field::GroupName;
+                    self.omnibox_focused = false;
+                }
+                self.bump();
+            }
+            Click::GroupCollapse => self.toggle_collapse(),
+            Click::Ungroup => self.ungroup_active(),
+            Click::CloseGroup => self.close_group(),
+            Click::GroupColor(color) => self.set_group_color(color),
+            Click::AllowPermission => self.answer_permission(true),
+            Click::BlockPermission => self.answer_permission(false),
             Click::NewTab => self.new_tab(),
             Click::TabSearch => {
                 self.tab_search = !self.tab_search;
@@ -975,7 +1103,7 @@ impl Browser {
             url: "about:blank".into(),
             status: LoadStatus::Started,
             zoom: 1.0,
-            group: 0,
+            group_id: 0,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -992,7 +1120,7 @@ impl Browser {
                 url: String::new(),
                 status: LoadStatus::Started,
                 zoom: 1.0,
-                group: 0,
+                group_id: 0,
             });
             self.active = self.tabs.len() - 1;
             self.bump();
@@ -1005,6 +1133,8 @@ impl Browser {
         }
         self.servo.spin_event_loop();
         self.adopt_pending();
+        self.drain_downloads();
+        self.drain_permissions();
         self.sync_active();
         if self.frame.swap(false, Ordering::SeqCst) {
             self.bump();
@@ -1299,13 +1429,25 @@ impl Browser {
             }
             MenuId::Exit => self.quit = true,
             MenuId::Fullscreen => self.fullscreen_toggle = true,
-            MenuId::CopyLink | MenuId::CopyLinkAddress | MenuId::CopyImage | MenuId::Copy => {}
+            MenuId::CopyLink | MenuId::CopyLinkAddress | MenuId::CopyImage => self.copy_location(item),
+            MenuId::Copy => self.edit_command("copy"),
+            MenuId::Cut => self.edit_command("cut"),
+            MenuId::Paste => self.edit_command("paste"),
+            MenuId::SelectAll => self.edit_command("selectAll"),
+            MenuId::PasteAndGo => self.paste_and_go(),
             MenuId::SavePage | MenuId::SaveLink | MenuId::SaveImage => self.save_active_page(),
+            MenuId::CreateShortcut => self.create_shortcut(),
+            MenuId::NameWindow => self.begin_window_name(),
+            MenuId::SendDevice => {
+                mithu_ui::clipboard::set_text(&self.location());
+                self.status = "Link copied. No other Mithu devices are paired.".into();
+                self.bump();
+            }
             MenuId::TaskManager => self.navigate("mithu://tasks"),
-            MenuId::NewTabGroup => self.cycle_group(),
-            MenuId::SendDevice | MenuId::CreateShortcut | MenuId::NameWindow
-            | MenuId::PasteAndGo | MenuId::Cut | MenuId::Paste | MenuId::SelectAll
-            | MenuId::Zoom | MenuId::TabGroups | MenuId::SaveShare | MenuId::MoreTools | MenuId::Separator => {}
+            MenuId::NewTabGroup => self.new_group(),
+            MenuId::CollapseGroup => self.toggle_collapse(),
+            MenuId::CloseGroup => self.close_group(),
+            MenuId::Zoom | MenuId::TabGroups | MenuId::SaveShare | MenuId::MoreTools | MenuId::Separator => {}
         }
     }
 
@@ -1313,7 +1455,7 @@ impl Browser {
         let rows = self
             .tabs
             .iter()
-            .map(|tab| (tab.title.clone(), tab.url.clone(), tab.group))
+            .map(|tab| (tab.title.clone(), tab.url.clone(), tab.group_id))
             .collect();
         mithu_ui::pages::set_tasks(rows);
     }
@@ -1338,10 +1480,238 @@ impl Browser {
         self.bump();
     }
 
-    fn cycle_group(&mut self) {
+    fn new_group(&mut self) {
+        let id = self.groups.iter().map(|group| group.id).max().unwrap_or(0).saturating_add(1);
+        let color = ((id - 1) % 8) + 1;
+        self.groups.push(TabGroup {
+            id,
+            name: "Group".into(),
+            color,
+            collapsed: false,
+        });
         if let Some(tab) = self.tabs.get_mut(self.active) {
-            tab.group = if tab.group == 0 { 1 } else { tab.group % 8 + 1 };
+            tab.group_id = id;
         }
+        self.group_editor = true;
+        self.field = Field::GroupName;
+        self.omnibox_focused = false;
+        self.bump();
+    }
+
+    fn toggle_collapse(&mut self) {
+        if let Some(group) = self.active_group_mut() {
+            group.collapsed = !group.collapsed;
+        }
+        self.bump();
+    }
+
+    fn close_group(&mut self) {
+        let id = self.active_group_id();
+        if id == 0 {
+            return;
+        }
+        self.tabs.retain(|tab| tab.group_id != id);
+        self.groups.retain(|group| group.id != id);
+        if self.tabs.is_empty() {
+            let _ = self.open_tab(start_url());
+        }
+        self.active = self.active.min(self.tabs.len() - 1);
+        self.group_editor = false;
+        self.field = Field::None;
+        self.resize_active();
+        self.sync_active();
+        self.bump();
+    }
+
+    fn ungroup_active(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.group_id = 0;
+        }
+        self.groups.retain(|group| self.tabs.iter().any(|tab| tab.group_id == group.id));
+        self.group_editor = false;
+        self.field = Field::None;
+        self.bump();
+    }
+
+    fn active_group_id(&self) -> u8 {
+        self.tabs.get(self.active).map(|tab| tab.group_id).unwrap_or(0)
+    }
+
+    fn active_group_mut(&mut self) -> Option<&mut TabGroup> {
+        let id = self.active_group_id();
+        if id == 0 {
+            return None;
+        }
+        self.groups.iter_mut().find(|group| group.id == id)
+    }
+
+    fn set_group_color(&mut self, color: u8) {
+        if let Some(group) = self.active_group_mut() {
+            group.color = color.clamp(1, 8);
+        }
+        self.bump();
+    }
+
+    fn answer_permission(&mut self, allow: bool) {
+        let pending = self.delegate.permissions.borrow_mut().pop();
+        if let Some(pending) = pending {
+            let value = format!(
+                "{}:{}:{}",
+                pending.origin,
+                pending.feature,
+                if allow { "allow" } else { "block" }
+            );
+            // Reuse the prefs setter through a command so the file format stays one path.
+            let _ = mithu_ui::pages::command(
+                &format!(
+                    "mithu://do?op=set&key=exception&value={value}&back=mithu://settings/site/{}",
+                    pending.feature
+                ),
+                &mut self.prefs,
+            );
+            mithu_ui::pages::save(&mithu_ui::pages::path(), &self.prefs);
+            if allow {
+                pending.request.allow();
+            } else {
+                pending.request.deny();
+            }
+        }
+        self.permission_prompt.clear();
+        self.bump();
+    }
+
+    fn drain_downloads(&mut self) {
+        let urls: Vec<String> = self.delegate.saves.borrow_mut().drain(..).collect();
+        for url in urls {
+            self.save_url(&url);
+        }
+    }
+
+    fn drain_permissions(&mut self) {
+        if !self.permission_prompt.is_empty() {
+            return;
+        }
+        let pending = self.delegate.permissions.borrow_mut().pop();
+        let Some(pending) = pending else {
+            return;
+        };
+        let choice = mithu_ui::pages::permission_for(&self.prefs, &pending.origin, &pending.feature);
+        match choice.as_str() {
+            "allow" => pending.request.allow(),
+            "block" => pending.request.deny(),
+            _ => {
+                self.permission_prompt = format!(
+                    "{} wants {}",
+                    if pending.origin.is_empty() { "This page" } else { pending.origin.as_str() },
+                    pending.feature
+                );
+                self.delegate.permissions.borrow_mut().push(pending);
+            }
+        }
+        self.bump();
+    }
+
+    fn save_url(&mut self, url: &str) {
+        let dir = if self.prefs.download_dir.is_empty() {
+            mithu_ui::pages::downloads_folder()
+        } else {
+            std::path::PathBuf::from(&self.prefs.download_dir)
+        };
+        match mithu_ui::pages::save_remote(url, &dir) {
+            Ok(path) => {
+                let shown = path.display().to_string();
+                self.prefs.note_download(url, &shown, "done");
+                mithu_ui::pages::save(&mithu_ui::pages::path(), &self.prefs);
+                self.downloads.push(shown.clone());
+                self.status = format!("Saved {shown}");
+            }
+            Err(error) => self.status = error,
+        }
+        self.bump();
+    }
+
+    fn edit_command(&mut self, command: &str) {
+        if self.omnibox_focused {
+            match command {
+                "copy" => mithu_ui::clipboard::set_text(if self.select_all { &self.omnibox } else { "" }),
+                "cut" => {
+                    mithu_ui::clipboard::set_text(if self.select_all { &self.omnibox } else { "" });
+                    if self.select_all {
+                        self.omnibox.clear();
+                        self.cursor = 0;
+                        self.select_all = false;
+                    }
+                }
+                "paste" => {
+                    let text = mithu_ui::clipboard::get_text();
+                    if self.select_all {
+                        self.omnibox.clear();
+                        self.cursor = 0;
+                        self.select_all = false;
+                    }
+                    for ch in text.chars().take(2000) {
+                        self.insert_char(ch);
+                    }
+                }
+                "selectAll" => self.select_all = true,
+                _ => {}
+            }
+            self.bump();
+            return;
+        }
+        if let Some(tab) = self.tabs.get(self.active) {
+            let script = format!("document.execCommand('{command}')");
+            tab.webview.evaluate_javascript(script, |_| {});
+        }
+        self.status = format!("{command} sent to the page.");
+        self.bump();
+    }
+
+    fn paste_and_go(&mut self) {
+        let text = mithu_ui::clipboard::get_text();
+        if !text.trim().is_empty() {
+            self.navigate(text.trim());
+        }
+    }
+
+    fn copy_location(&mut self, item: mithu_ui::menus::MenuId) {
+        let text = if item == mithu_ui::menus::MenuId::CopyLinkAddress && self.link_status.starts_with("http") {
+            self.link_status.clone()
+        } else {
+            self.location()
+        };
+        mithu_ui::clipboard::set_text(&text);
+        self.status = "Copied.".into();
+        self.bump();
+    }
+
+    fn create_shortcut(&mut self) {
+        let url = self.location();
+        let title = self.tabs.get(self.active).map(|tab| tab.title.clone()).unwrap_or_else(|| "Mithu".into());
+        let dir = mithu_ui::pages::downloads_folder();
+        let name = title.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' }).take(40).collect::<String>();
+        let name = if name.is_empty() { "mithu".into() } else { name };
+        let path = dir.join(format!("{name}.url"));
+        let body = format!("[InternetShortcut]\r\nURL={url}\r\n");
+        match std::fs::write(&path, body) {
+            Ok(()) => {
+                self.prefs.note_download(&url, &path.display().to_string(), "done");
+                mithu_ui::pages::save(&mithu_ui::pages::path(), &self.prefs);
+                self.status = format!("Shortcut saved to {}", path.display());
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+        self.bump();
+    }
+
+    fn begin_window_name(&mut self) {
+        if self.window_name.is_empty() {
+            self.window_name = self.tabs.get(self.active).map(|tab| tab.title.clone()).unwrap_or_default();
+        }
+        self.field = Field::WindowName;
+        self.omnibox_focused = false;
+        self.group_editor = false;
+        self.status = "Type a window name, then press Enter.".into();
         self.bump();
     }
 
@@ -1516,17 +1886,21 @@ impl Browser {
     }
 
     fn chrome_state(&self) -> chrome::State<'_> {
+        let ids: Vec<u8> = self.tabs.iter().map(|tab| tab.group_id).collect();
         let tabs = self
             .tabs
             .iter()
-            .map(|tab| chrome::TabPaint {
-                title: if tab.title.is_empty() {
-                    "New Tab".into()
-                } else {
-                    tab.title.clone()
-                },
-                favicon: tab.webview.favicon().map(|image| favicon_rgba(&image)),
-                group: tab.group,
+            .enumerate()
+            .map(|(index, tab)| {
+                let group = self.groups.iter().find(|group| group.id == tab.group_id);
+                let head = tab.group_id != 0 && ids.iter().position(|id| *id == tab.group_id) == Some(index);
+                chrome::TabPaint {
+                    title: if tab.title.is_empty() { "New Tab".into() } else { tab.title.clone() },
+                    favicon: tab.webview.favicon().map(|image| favicon_rgba(&image)),
+                    group: group.map(|group| group.color).unwrap_or(0),
+                    group_name: group.map(|group| group.name.clone()).unwrap_or_default(),
+                    collapsed: group.is_some_and(|group| group.collapsed) && !head,
+                }
             })
             .collect();
         let secure = if self.omnibox.starts_with("https://") {
@@ -1607,6 +1981,8 @@ impl Browser {
             scale: self.scale,
             dark: self.prefs.dark(),
             show_home: self.prefs.show_home,
+            group_editor: self.group_editor,
+            permission_prompt: &self.permission_prompt,
         }
     }
 
@@ -1642,6 +2018,13 @@ impl Browser {
             chrome::Hit::Close => Click::Frame(FrameHit::Close),
             chrome::Hit::Tab(index) => Click::Tab(index),
             chrome::Hit::CloseTab(index) => Click::CloseTab(index),
+            chrome::Hit::GroupBar(_) => Click::GroupEditor,
+            chrome::Hit::GroupCollapse => Click::GroupCollapse,
+            chrome::Hit::Ungroup => Click::Ungroup,
+            chrome::Hit::CloseGroup => Click::CloseGroup,
+            chrome::Hit::GroupColor(color) => Click::GroupColor(color),
+            chrome::Hit::AllowPermission => Click::AllowPermission,
+            chrome::Hit::BlockPermission => Click::BlockPermission,
             chrome::Hit::NewTab => Click::NewTab,
             chrome::Hit::TabSearch => Click::TabSearch,
             chrome::Hit::Back => Click::Back,
@@ -1681,6 +2064,13 @@ enum Click {
     Frame(FrameHit),
     Tab(usize),
     CloseTab(usize),
+    GroupEditor,
+    GroupCollapse,
+    Ungroup,
+    CloseGroup,
+    GroupColor(u8),
+    AllowPermission,
+    BlockPermission,
     NewTab,
     Back,
     Forward,
