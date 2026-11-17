@@ -1067,7 +1067,7 @@ fn menu_icon(label: &str) -> Kind {
 }
 
 fn menu_rect(state: &State<'_>, popup: Popup) -> Rect {
-    let w = dip(400.0);
+    let w = dip(336.0);
     let h = menu_block_height(&state.menu_labels);
     match popup {
         Popup::App => {
@@ -1506,7 +1506,7 @@ mod tests {
                 show_home: true,
             };
             let menu = menu_rect(&state, Popup::App);
-            assert_eq!(menu.w, (400.0 * scale).round());
+            assert_eq!(menu.w, (336.0 * scale).round());
             assert!(menu.right() <= state.width + 0.5);
             assert!(menu.x >= 0.0);
             let label = text_width(&fonts, "Downloads", 13.0);
