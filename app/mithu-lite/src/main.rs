@@ -95,6 +95,10 @@ impl Config {
         let mut url = None;
         let mut sized = false;
         while let Some(arg) = args.next() {
+            if arg == "--version" || arg == "-V" {
+                println!("mithu-lite {}", env!("MITHU_VERSION"));
+                std::process::exit(0);
+            }
             if arg == "--screenshot" {
                 screenshot = Some(PathBuf::from(args.next().unwrap_or_else(|| "mithu-lite.png".into())));
                 sized = true;
@@ -935,9 +939,9 @@ impl App {
         if let Some(window) = &self.window {
             let title = self.model().active().map(|tab| tab.title.clone()).unwrap_or_default();
             if title.is_empty() || title == "New Tab" {
-                window.set_title("Mithu Lite");
+                window.set_title(&format!("Mithu Lite {}", env!("MITHU_VERSION")));
             } else {
-                window.set_title(&format!("{title} — Mithu Lite"));
+                window.set_title(&format!("{title} — Mithu Lite {}", env!("MITHU_VERSION")));
             }
         }
     }
@@ -1029,7 +1033,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("Mithu Lite")
+            .with_title(format!("Mithu Lite {}", env!("MITHU_VERSION")))
             .with_decorations(false)
             .with_inner_size(winit::dpi::LogicalSize::new(self.config.width, self.config.height))
             .with_position(PhysicalPosition::new(0, 0));
@@ -1483,6 +1487,18 @@ mod tests {
     fn download_name_prefers_the_url_leaf() {
         assert_eq!(suggested_name("https://example.com/files/a b.txt?x=1", Path::new("")), "a b.txt");
         assert_eq!(suggested_name("https://example.com/", Path::new("report.pdf")), "report.pdf");
+    }
+
+    #[test]
+    fn embedded_version_is_version_md() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../VERSION.md");
+        let text = std::fs::read_to_string(path).expect("VERSION.md");
+        let want = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .expect("version line");
+        assert_eq!(env!("MITHU_VERSION"), want);
     }
 
     #[test]

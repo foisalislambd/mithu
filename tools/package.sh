@@ -5,7 +5,7 @@
 # linked into one binary.
 set -eu
 cd "$(dirname "$0")/.."
-python3 tools/version.py check
+python3 tools/version.py sync
 kind="${1:-lite}"
 
 build_lite() {

@@ -36,6 +36,10 @@ fn main() {
 fn run() {
     let mut args = std::env::args().skip(1);
     if let Some(first) = args.next() {
+        if first == "--version" || first == "-V" {
+            println!("mithu {}", env!("MITHU_VERSION"));
+            return;
+        }
         if first == "--hold" {
             let seconds = args
                 .next()
@@ -295,9 +299,9 @@ impl App {
     fn sync_title(&self) {
         if let Some(window) = &self.window {
             let title = if self.browser.title().is_empty() {
-                "Mithu".to_string()
+                format!("Mithu {}", env!("MITHU_VERSION"))
             } else {
-                format!("{} — Mithu", self.browser.title())
+                format!("{} — Mithu {}", self.browser.title(), env!("MITHU_VERSION"))
             };
             window.set_title(&title);
         }
@@ -341,7 +345,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("Mithu")
+            .with_title(format!("Mithu {}", env!("MITHU_VERSION")))
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1200.0, 800.0));
         let window = match event_loop.create_window(attributes) {
@@ -698,4 +702,19 @@ fn powershell_string(message: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod version_source {
+    #[test]
+    fn embedded_version_is_version_md() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../VERSION.md");
+        let text = std::fs::read_to_string(path).expect("VERSION.md");
+        let want = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .expect("version line");
+        assert_eq!(env!("MITHU_VERSION"), want);
+    }
 }
