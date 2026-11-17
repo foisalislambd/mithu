@@ -3859,6 +3859,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mithu-mobile"
+version = "0.1.5"
+dependencies = [
+ "mithu-ui",
+]
+
+[[package]]
 name = "mithu-shell"
 version = "0.1.5"
 dependencies = [
