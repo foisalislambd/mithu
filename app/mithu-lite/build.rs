@@ -21,12 +21,16 @@ fn embed_icon(relative: &str) {
         if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
             return;
         }
+        let Some(rc) = rc_compiler() else {
+            println!("cargo:warning=rc.exe was not found; {relative} stays next to the tree");
+            return;
+        };
         let out_dir = std::env::var("OUT_DIR").unwrap_or_default();
         let rc_path = std::path::Path::new(&out_dir).join("mithu-icon.rc");
         let res_path = std::path::Path::new(&out_dir).join("mithu-icon.res");
         let icon_rc = icon.display().to_string().replace('\\', "\\\\");
         let _ = std::fs::write(&rc_path, format!("1 ICON \"{icon_rc}\"\n"));
-        let compiled = std::process::Command::new("rc.exe")
+        let compiled = std::process::Command::new(rc)
             .arg("/nologo")
             .arg(format!("/fo{}", res_path.display()))
             .arg(&rc_path)
@@ -34,7 +38,7 @@ fn embed_icon(relative: &str) {
             .ok()
             .is_some_and(|status| status.success());
         if compiled {
-            println!("cargo:rustc-link-arg={}", res_path.display());
+            println!("cargo:rustc-link-arg-bins={}", res_path.display());
         } else {
             println!("cargo:warning=rc.exe did not embed {relative}");
         }
@@ -43,4 +47,31 @@ fn embed_icon(relative: &str) {
     {
         let _ = icon;
     }
+}
+
+#[cfg(windows)]
+fn rc_compiler() -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("RC") {
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if std::process::Command::new("rc.exe")
+        .arg("/?")
+        .output()
+        .is_ok()
+    {
+        return Some(std::path::PathBuf::from("rc.exe"));
+    }
+    let kits = std::path::Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin");
+    let mut versions: Vec<_> = std::fs::read_dir(kits).ok()?.flatten().collect();
+    versions.sort_by_key(|entry| entry.file_name());
+    for entry in versions.into_iter().rev() {
+        let candidate = entry.path().join("x64").join("rc.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
