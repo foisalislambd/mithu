@@ -683,7 +683,7 @@ impl Browser {
                     self.navigate(&url);
                 }
             }
-            Click::MenuItem(item) | Click::ContextItem(item) => {
+            Click::MenuItem(item) => {
                 self.menu = None;
                 self.run_item(item);
             }
@@ -1148,15 +1148,26 @@ impl Browser {
             .unwrap_or_default()
     }
 
-    fn run_item(&mut self, item: Item) {
+    fn run_item(&mut self, item: mithu_ui::menus::MenuId) {
+        use mithu_ui::menus::MenuId;
         match item {
-            Item::Back => self.back(),
-            Item::Reload => self.reload(),
-            Item::NewTab => self.new_tab(),
-            Item::Bookmark => self.toggle_bookmark(),
-            Item::History => self.navigate("about:history"),
-            Item::Downloads => self.navigate("about:downloads"),
-            Item::Settings => self.navigate("about:settings"),
+            MenuId::Back => self.back(),
+            MenuId::Forward => self.forward(),
+            MenuId::Reload => self.reload(),
+            MenuId::NewTab | MenuId::NewWindow => self.new_tab(),
+            MenuId::Bookmark => self.toggle_bookmark(),
+            MenuId::History => self.navigate("mithu://history"),
+            MenuId::Bookmarks => self.navigate("mithu://bookmarks"),
+            MenuId::Downloads => self.navigate("mithu://downloads"),
+            MenuId::Settings | MenuId::Help => self.navigate("mithu://settings"),
+            MenuId::Passwords => self.navigate("mithu://settings/autofill"),
+            MenuId::Extensions => self.navigate("mithu://extensions"),
+            MenuId::DeleteData => self.navigate("mithu://settings/privacy"),
+            MenuId::ZoomIn => self.zoom_in(),
+            MenuId::ZoomOut => self.zoom_out(),
+            MenuId::Find => self.open_find(),
+            MenuId::Print | MenuId::Translate | MenuId::PrivateWindow | MenuId::TabGroups
+            | MenuId::SaveShare | MenuId::MoreTools | MenuId::Fullscreen | MenuId::Exit | MenuId::Separator => {}
         }
     }
 
@@ -1389,10 +1400,7 @@ impl Browser {
             pressed: self.pressed,
             ntp: self.overlay == Some(Overlay::NewTab),
             menu,
-            menu_labels: menu_items(self.menu)
-                .into_iter()
-                .map(|item| item.label().to_string())
-                .collect(),
+            menu_labels: menu_rows(self.menu).iter().map(mithu_ui::menus::paint_label).collect(),
             tab_search: self.tab_search,
             extensions: self.extensions_open,
             profile: self.profile_open,
@@ -1455,21 +1463,10 @@ impl Browser {
             chrome::Hit::Profile => Click::Profile,
             chrome::Hit::Menu => Click::MenuButton,
             chrome::Hit::Bookmark(index) => Click::Bookmark(index),
-            chrome::Hit::MenuItem(index) => {
-                let items = menu_items(self.menu);
-                match self.menu {
-                    Some(MenuKind::Context) => items
-                        .get(index)
-                        .copied()
-                        .map(Click::ContextItem)
-                        .unwrap_or(Click::None),
-                    _ => items
-                        .get(index)
-                        .copied()
-                        .map(Click::MenuItem)
-                        .unwrap_or(Click::None),
-                }
-            }
+            chrome::Hit::MenuItem(index) => menu_rows(self.menu)
+                .get(index)
+                .map(|row| Click::MenuItem(row.id))
+                .unwrap_or(Click::None),
             chrome::Hit::Suggestion(index) => Click::Suggestion(index),
             chrome::Hit::Panel => Click::Panel,
             chrome::Hit::Content => {
@@ -1505,48 +1502,16 @@ enum Click {
     Panel,
     MenuButton,
     Bookmark(usize),
-    MenuItem(Item),
-    ContextItem(Item),
+    MenuItem(mithu_ui::menus::MenuId),
     Theme,
     Content,
     None,
 }
 
-#[derive(Clone, Copy)]
-enum Item {
-    Back,
-    Reload,
-    NewTab,
-    Bookmark,
-    History,
-    Downloads,
-    Settings,
-}
-
-impl Item {
-    fn label(self) -> &'static str {
-        match self {
-            Item::Back => "Back",
-            Item::Reload => "Reload",
-            Item::NewTab => "New tab",
-            Item::Bookmark => "Bookmark this page",
-            Item::History => "History",
-            Item::Downloads => "Downloads",
-            Item::Settings => "Settings",
-        }
-    }
-}
-
-fn menu_items(kind: Option<MenuKind>) -> Vec<Item> {
+fn menu_rows(kind: Option<MenuKind>) -> Vec<mithu_ui::menus::Row> {
     match kind {
-        Some(MenuKind::Context) => vec![Item::Back, Item::Reload, Item::NewTab, Item::Bookmark],
-        Some(MenuKind::App) => vec![
-            Item::NewTab,
-            Item::History,
-            Item::Downloads,
-            Item::Settings,
-            Item::Bookmark,
-        ],
+        Some(MenuKind::Context) => mithu_ui::menus::page_menu(),
+        Some(MenuKind::App) => mithu_ui::menus::app_menu(),
         None => Vec::new(),
     }
 }

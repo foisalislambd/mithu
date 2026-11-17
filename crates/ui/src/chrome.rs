@@ -420,9 +420,8 @@ pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
     if let Some(popup) = state.menu {
         let rect = menu_rect(state, popup);
         if rect.contains(x, y) {
-            let index = ((y - rect.y - dip(8.0)) / dip(32.0)).floor() as isize;
-            if index >= 0 && (index as usize) < state.menu_labels.len() {
-                return Hit::MenuItem(index as usize);
+            if let Some(index) = menu_index_at(&state.menu_labels, y - rect.y) {
+                return Hit::MenuItem(index);
             }
             return Hit::Panel;
         }
@@ -908,17 +907,51 @@ fn paint_menu(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, po
     let rect = menu_rect(state, popup);
     shadow(pixels, width, height, rect.x, rect.y, rect.w, rect.h);
     fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, dip(12.0), TOOLBAR);
-    let row_h = dip(32.0);
-    for (index, label) in state.menu_labels.iter().enumerate() {
-        let row = Rect { x: rect.x + dip(4.0), y: rect.y + dip(8.0) + index as f32 * row_h, w: rect.w - dip(8.0), h: row_h };
-        if row.contains(state.pointer.0, state.pointer.1) {
-            fill_round(pixels, width, height, row.x, row.y, row.w, row.h, dip(8.0), CHIP);
+    let mut y = rect.y + dip(8.0);
+    for label in &state.menu_labels {
+        let row_h = if label.is_empty() { dip(9.0) } else { dip(32.0) };
+        let row = Rect { x: rect.x + dip(4.0), y, w: rect.w - dip(8.0), h: row_h };
+        if label.is_empty() {
+            fill_rect(pixels, width, height, rect.x + dip(12.0), y + dip(4.0), rect.w - dip(24.0), 1.0, LINE);
+        } else {
+            if row.contains(state.pointer.0, state.pointer.1) {
+                fill_round(pixels, width, height, row.x, row.y, row.w, row.h, dip(8.0), CHIP);
+            }
+            let (title, shortcut) = label.split_once('\t').unwrap_or((label.as_str(), ""));
+            let kind = menu_icon(title.trim_end_matches('\u{203a}'));
+            let icon = dip(16.0).max(1.0);
+            icons::blit(pixels, width, height, row.x + dip(8.0), row.y + (row.h - icon) / 2.0, icon, kind, ICON);
+            draw_text(pixels, width, height, state.fonts, row.x + dip(32.0), row.y + dip(21.0), 13.0, INK, title);
+            if !shortcut.is_empty() {
+                let sw = text_width(state.fonts, shortcut, 12.0);
+                draw_text(pixels, width, height, state.fonts, row.right() - dip(12.0) - sw, row.y + dip(21.0), 12.0, MUTED, shortcut);
+            }
         }
-        let kind = menu_icon(label);
-        let icon = dip(16.0).max(1.0);
-        icons::blit(pixels, width, height, row.x + dip(8.0), row.y + (row.h - icon) / 2.0, icon, kind, ICON);
-        draw_text(pixels, width, height, state.fonts, row.x + dip(32.0), row.y + dip(21.0), 13.0, INK, label);
+        y += row_h;
     }
+}
+
+fn menu_block_height(labels: &[String]) -> f32 {
+    let mut h = dip(16.0);
+    if labels.is_empty() {
+        return h + dip(32.0);
+    }
+    for label in labels {
+        h += if label.is_empty() { dip(9.0) } else { dip(32.0) };
+    }
+    h
+}
+
+fn menu_index_at(labels: &[String], dy: f32) -> Option<usize> {
+    let mut y = dip(8.0);
+    for (index, label) in labels.iter().enumerate() {
+        let row_h = if label.is_empty() { dip(9.0) } else { dip(32.0) };
+        if dy >= y && dy < y + row_h && !label.is_empty() {
+            return Some(index);
+        }
+        y += row_h;
+    }
+    None
 }
 
 fn menu_icon(label: &str) -> Kind {
@@ -935,8 +968,8 @@ fn menu_icon(label: &str) -> Kind {
 }
 
 fn menu_rect(state: &State<'_>, popup: Popup) -> Rect {
-    let w = dip(240.0);
-    let h = dip(16.0) + state.menu_labels.len().max(1) as f32 * dip(32.0);
+    let w = dip(336.0);
+    let h = menu_block_height(&state.menu_labels);
     match popup {
         Popup::App => {
             let tools = toolbar(state.width, state.scale, state.show_home);
@@ -1372,7 +1405,7 @@ mod tests {
                 show_home: true,
             };
             let menu = menu_rect(&state, Popup::App);
-            assert_eq!(menu.w, (240.0 * scale).round());
+            assert_eq!(menu.w, (336.0 * scale).round());
             assert!(menu.right() <= state.width + 0.5);
             assert!(menu.x >= 0.0);
             let label = text_width(&fonts, "Downloads", 13.0);

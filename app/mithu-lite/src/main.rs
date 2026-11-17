@@ -24,14 +24,6 @@ use winit::window::{Window, WindowId};
 use wry::dpi::{PhysicalPosition as WryPos, PhysicalSize as WrySize};
 use wry::{PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 
-const APP_MENU: &[&str] = &[
-    "New tab",
-    "History",
-    "Downloads",
-    "Settings",
-    "Bookmark this page",
-];
-const CONTEXT_MENU: &[&str] = &["Back", "Reload", "New tab", "Bookmark this page"];
 
 fn app_icon() -> Option<winit::window::Icon> {
     let image = mithu_ui::brand::window_icon(true);
@@ -725,24 +717,32 @@ impl App {
     }
 
     fn run_menu(&mut self, index: usize) {
-        let label = {
+        use mithu_ui::menus::MenuId;
+        let id = {
             let mut model = self.model();
-            let labels: Vec<&str> = if model.menu == Some(Popup::Context) {
-                CONTEXT_MENU.to_vec()
+            let rows = if model.menu == Some(Popup::Context) {
+                mithu_ui::menus::page_menu()
             } else {
-                APP_MENU.to_vec()
+                mithu_ui::menus::app_menu()
             };
             model.menu = None;
-            labels.get(index).copied().unwrap_or("").to_string()
+            rows.get(index).map(|row| row.id)
         };
-        match label.as_str() {
-            "New tab" => self.open_tab("about:newtab", true),
-            "History" => self.load_in_active("about:history"),
-            "Downloads" => self.load_in_active("about:downloads"),
-            "Settings" => self.load_in_active("about:settings"),
-            "Bookmark this page" => self.toggle_bookmark(),
-            "Back" => self.go_back(),
-            "Reload" => self.reload_or_stop(),
+        match id {
+            Some(MenuId::NewTab | MenuId::NewWindow) => self.open_tab("mithu://newtab", false),
+            Some(MenuId::History) => self.load_in_active("mithu://history"),
+            Some(MenuId::Downloads) => self.load_in_active("mithu://downloads"),
+            Some(MenuId::Bookmarks) => self.load_in_active("mithu://bookmarks"),
+            Some(MenuId::Settings | MenuId::Help) => self.load_in_active("mithu://settings"),
+            Some(MenuId::Passwords) => self.load_in_active("mithu://settings/autofill"),
+            Some(MenuId::Extensions) => self.load_in_active("mithu://extensions"),
+            Some(MenuId::DeleteData) => self.load_in_active("mithu://settings/privacy"),
+            Some(MenuId::Bookmark) => self.toggle_bookmark(),
+            Some(MenuId::Back) => self.go_back(),
+            Some(MenuId::Reload) => self.reload_or_stop(),
+            Some(MenuId::Find) => {
+                self.model().find_open = true;
+            }
             _ => {}
         }
     }
@@ -1339,11 +1339,12 @@ fn lock(shared: &Mutex<Model>) -> std::sync::MutexGuard<'_, Model> {
 }
 
 fn menu_labels(menu: Option<Popup>) -> Vec<String> {
-    match menu {
-        Some(Popup::App) => APP_MENU.iter().map(|label| (*label).to_string()).collect(),
-        Some(Popup::Context) => CONTEXT_MENU.iter().map(|label| (*label).to_string()).collect(),
-        None => Vec::new(),
-    }
+    let rows = match menu {
+        Some(Popup::App) => mithu_ui::menus::app_menu(),
+        Some(Popup::Context) => mithu_ui::menus::page_menu(),
+        None => return Vec::new(),
+    };
+    rows.iter().map(mithu_ui::menus::paint_label).collect()
 }
 
 fn reveal_path(path: &str, folder: bool) {

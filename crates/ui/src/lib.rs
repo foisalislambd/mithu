@@ -9,6 +9,7 @@ use url::Url;
 pub mod brand;
 pub mod chrome;
 pub mod icons;
+pub mod menus;
 pub mod pages;
 
 pub const TAB_H: f32 = 41.0;
@@ -214,7 +215,7 @@ mod tests {
     fn sample(fonts: &mithu_text::FontBook, scale: f32, dark: bool) -> chrome::State<'_> {
         chrome::State {
             width: 1100.0 * scale,
-            height: 720.0 * scale,
+            height: 980.0 * scale,
             tabs: vec![
                 chrome::TabPaint { title: "New Tab".into(), favicon: None },
                 chrome::TabPaint { title: "Mithu notes".into(), favicon: None },
@@ -240,7 +241,7 @@ mod tests {
             pressed: false,
             ntp: true,
             menu: Some(chrome::Popup::App),
-            menu_labels: vec!["New tab".into(), "History".into(), "Downloads".into(), "Settings".into()],
+            menu_labels: menus::app_menu().iter().map(menus::paint_label).collect(),
             tab_search: false,
             extensions: false,
             profile: false,
