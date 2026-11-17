@@ -1,5 +1,7 @@
 //! Native window for the Mithu browser.
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,7 +14,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 fn main() {
-    install_crash_hook();
+    mithu_host::init("mithu");
     // Windows rejects a winit event loop that is not on the main thread, and
     // the process then exits as soon as the console appears. The other
     // platforms keep a 32MB worker because their default main stack is small
@@ -85,7 +87,7 @@ fn run() {
 }
 
 fn smoke(url: &str) -> Result<(), String> {
-    NO_DIALOG.store(true, std::sync::atomic::Ordering::Relaxed);
+    mithu_host::suppress_dialog();
     let mut browser = mithu_shell::Browser::try_new()?;
     browser.resize(800.0, 600.0);
     if url != "about:blank" {
@@ -601,107 +603,8 @@ impl ApplicationHandler for App {
     }
 }
 
-fn install_crash_hook() {
-    std::panic::set_hook(Box::new(|info| {
-        let payload = info
-            .payload()
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("unknown panic");
-        let loc = info
-            .location()
-            .map(|location| format!(" ({location})"))
-            .unwrap_or_default();
-        record(&format!("panic: {payload}{loc}"));
-    }));
-}
-
 fn report_fatal(message: &str) -> ! {
-    record(message);
-    std::process::exit(1);
-}
-
-fn record(message: &str) {
-    let line = format!("{message}\n");
-    eprintln!("mithu: {message}");
-    if let Some(path) = log_path() {
-        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut file| {
-                use std::io::Write;
-                file.write_all(line.as_bytes())
-            });
-    }
-    show_dialog(message);
-}
-
-fn log_path() -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    {
-        let base = std::env::var_os("LOCALAPPDATA")?;
-        Some(
-            std::path::PathBuf::from(base)
-                .join("Mithu")
-                .join("mithu.log"),
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var_os("HOME")?;
-        Some(
-            std::path::PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("Mithu")
-                .join("mithu.log"),
-        )
-    }
-}
-
-static NO_DIALOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn show_dialog(message: &str) {
-    if NO_DIALOG.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var_os("MITHU_NO_DIALOG").is_some()
-        || std::env::var_os("CI").is_some()
-    {
-        return;
-    }
-    #[cfg(windows)]
-    {
-        // Timeout so a fatal error cannot sit forever on a hidden desktop.
-        let script = format!(
-            "$w = New-Object -ComObject WScript.Shell; [void]$w.Popup({}, 20, 'Mithu', 16)",
-            powershell_string(message)
-        );
-        let _ = std::process::Command::new("powershell")
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(script)
-            .spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = message;
-    }
-}
-
-#[cfg(windows)]
-fn powershell_string(message: &str) -> String {
-    let mut out = String::from("\"");
-    for ch in message.chars() {
-        match ch {
-            '"' => out.push_str("\"\""),
-            '\r' | '\n' => out.push(' '),
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
+    mithu_host::report_fatal(message);
 }
 
 #[cfg(test)]

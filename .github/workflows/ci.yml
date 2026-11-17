@@ -45,5 +45,23 @@ jobs:
           $env:MITHU_NO_DIALOG = "1"
           $env:ANGLE_DEFAULT_PLATFORM = "warp"
           $exe = Join-Path (Get-Location) "target\release\mithu-windows\mithu.exe"
-          & $exe --smoke-test about:blank
+          $output = & $exe --smoke-test about:blank 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { Write-Error $output; exit $LASTEXITCODE }
+          if ($output -notmatch "smoke ok") {
+            Write-Error "smoke test wrote nothing to the parent console: $output"
+            exit 1
+          }
+      - name: Build Mithu Lite and check the parent console
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build -p mithu-lite --release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:MITHU_NO_DIALOG = "1"
+          $exe = Join-Path (Get-Location) "target\release\mithu-lite.exe"
+          $output = & $exe --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { Write-Error $output; exit $LASTEXITCODE }
+          if ($output -notmatch "mithu-lite \d+\.\d+\.\d+") {
+            Write-Error "Lite wrote nothing to the parent console: $output"
+            exit 1
+          }
