@@ -1,6 +1,6 @@
 # Changelog
 
-Mithu follows the version in the workspace `Cargo.toml`. Dates are the day the release is tagged.
+Mithu follows the first line of `VERSION.md`. Dates are the day the release is tagged.
 
 ## Unreleased
 

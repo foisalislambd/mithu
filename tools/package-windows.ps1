@@ -24,11 +24,21 @@ foreach ($dll in $dlls) {
     }
     Copy-Item $src (Join-Path $out $dll)
 }
+$build = Join-Path $repo "target\release\build"
+foreach ($dll in @("libEGL.dll", "libGLESv2.dll")) {
+    $found = Get-ChildItem -Path $build -Filter $dll -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $found) {
+        throw "missing $dll under $build. The Windows build uses ANGLE (servo feature no-wgl)."
+    }
+    Copy-Item $found.FullName (Join-Path $out $dll)
+}
 $note = @(
     "Mithu for Windows."
     ""
-    "mithu.exe contains the Servo resources it needs. The three DLL files are the"
-    "Visual C++ runtime the binary is linked against. Keep them in this folder."
+    "mithu.exe contains the Servo resources it needs. Keep every DLL in this folder:"
+    "the Visual C++ runtime, plus libEGL.dll and libGLESv2.dll (ANGLE)."
+    "ANGLE draws the page. If the GPU cannot, set ANGLE_DEFAULT_PLATFORM=warp."
     ""
     "If the window closes immediately, the error is in"
     "%LOCALAPPDATA%\Mithu\mithu.log"

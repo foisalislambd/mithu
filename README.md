@@ -3,7 +3,7 @@
 A small Rust browser with a familiar desktop frame, in two editions: one embeds [Servo](https://github.com/servo/servo), the other uses the operating system's web view.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-2ea44f)](VERSION.md)
+[![Version 0.1.1](https://img.shields.io/badge/version-0.1.1-2ea44f)](VERSION.md)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/foisalislambd/mithu/releases)
 
 <p align="center">
@@ -103,7 +103,7 @@ Each release has these files, plus `SHA256SUMS`:
 | macOS | `mithu-macos` | `mithu-lite-macos` |
 | Windows x64 | `mithu-windows-x64.zip` | `mithu-lite-windows-x64.exe` |
 
-`mithu-windows-x64.zip` holds `mithu.exe`, the Visual C++ runtime DLLs it links (`VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `MSVCP140.dll`), and a short readme. Unzip the folder and run `mithu.exe` from that folder. Servo's resources are compiled into the executable. Check a download with `sha256sum -c SHA256SUMS` from the release directory (on Windows, `Get-FileHash`).
+`mithu-windows-x64.zip` holds `mithu.exe`, the Visual C++ runtime DLLs it links (`VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `MSVCP140.dll`), ANGLE (`libEGL.dll` and `libGLESv2.dll`), and a short readme. The page is drawn through ANGLE, because raw WGL needs `WGL_NV_DX_interop`. Set `ANGLE_DEFAULT_PLATFORM=warp` for software rendering. Unzip the folder and run `mithu.exe` from that folder. Servo's resources are compiled into the executable. Check a download with `sha256sum -c SHA256SUMS` from the release directory (on Windows, `Get-FileHash`).
 
 The binaries are not code-signed. Windows SmartScreen and Defender warn on an unsigned program downloaded from the internet because the file is new and carries a Mark-of-the-Web, not because a scanner found a payload. Signing later needs an Authenticode certificate for Windows and an Apple Developer ID plus notarization for macOS, stored as GitHub Actions secrets. Those secrets are not in this repository, so the release stays unsigned.
 
@@ -159,7 +159,7 @@ cargo run -p mithu
 cargo run -p mithu -- https://example.com/
 cargo run -p mithu -- --screenshot frame.png https://example.com/
 
-# Release binaries, after tools/version.py check.
+# Release binaries. tools/package.sh copies VERSION.md into Cargo.toml first.
 tools/package.sh lite
 tools/package.sh full
 tools/package.sh both
@@ -201,12 +201,12 @@ flowchart TB
 | `app/mithu-lite` | `mithu-lite` | Lite window. One `wry` web view per tab. |
 | `third_party/servo` | `servo` | Servo submodule. Not compiled into Lite. Required on disk so the workspace resolves. |
 | `tools/package.sh` | | Builds `lite`, `full`, or `both`. |
-| `tools/version.py` | | Reads `VERSION.md` and checks it against `Cargo.toml`. |
-| `VERSION.md` | | The project version. The first line is semver. |
+| `tools/version.py` | | Copies `VERSION.md` into Cargo, the lockfile, and mobile manifests (`sync`). |
+| `VERSION.md` | | The only version to edit. The first line is semver. |
 | `.github/workflows/release.yml` | | Builds both editions and publishes a release when the version increased. |
 | `docs/` | | Architecture notes, the older roadmap, and screenshots. |
 
-Package names use a `mithu-` prefix. `[workspace.package] version` in `Cargo.toml` is the same string as `VERSION.md`.
+Package names use a `mithu-` prefix. `[workspace.package] version` is copied from `VERSION.md` by `tools/version.py sync`.
 
 <p align="center">
   <img src="docs/screenshots/mithu-wikipedia.png" alt="Full Mithu, Servo, on English Wikipedia" width="420">
@@ -221,15 +221,16 @@ Package names use a `mithu-` prefix. `[workspace.package] version` in `Cargo.tom
 
 ## Releases
 
-The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.1.0`. The badge at the top of this file should be updated in the same change.
+The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.1.1`. That file is the only place to change it.
 
-1. Set the same new semver in `VERSION.md` and in `[workspace.package] version` in `Cargo.toml`.
-2. Run `python3 tools/version.py check`. It fails if they differ. CI runs that check too.
-3. Push to `main`.
+`python3 tools/version.py sync` copies the line into `[workspace.package] version`, the workspace packages in `Cargo.lock`, the badge at the top of this file, and, when those projects are in the tree, Android `versionName` / `versionCode` and iOS `CFBundleShortVersionString`, `CFBundleVersion`, `MARKETING_VERSION`, and `CURRENT_PROJECT_VERSION`. The numeric code is `major * 1000000 + minor * 1000 + patch` (0.1.1 is 1001). Prerelease text stays in the version name and is left out of the code. `python3 tools/version.py check` prints any files that still differ and exits 0, so a stale `Cargo.toml` does not block a release.
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) reads `VERSION.md` and compares it with the newest `v*` tag. It builds `mithu` and `mithu-lite` for Linux, macOS, and Windows only when the version is strictly greater and `v<version>` does not already exist. It then creates that tag and a GitHub Release with the artifacts, `SHA256SUMS`, and generated notes. The Windows Servo artifact is a zip of `mithu.exe` plus the VC++ runtime DLLs, and that job runs `mithu.exe --smoke-test about:blank` before upload. CI runs the same smoke test on `windows-latest`. An equal or lower version skips with success, so a normal push does not publish again. The Actions "Run workflow" button uses the same gate. The Lite job checks out the Servo submodule so Cargo can resolve `mithu-shell`, then compiles only `mithu-lite`. If any build fails, that job cancels the rest of the run. The publish job runs only when the full build and the Lite build both succeed.
+1. Change the first line of `VERSION.md`.
+2. Push to `main`.
 
-`python3 tools/version.py test` checks greater, equal, lower, and "no previous tag" on the comparer itself.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) reads `VERSION.md` and compares it with the newest `v*` tag. It does not compare `Cargo.toml`. Each build job runs `tools/version.py sync` before compiling, so the binaries, the Android version, and the iOS version follow `VERSION.md` even when the committed manifests are older. It builds `mithu` and `mithu-lite` for Linux, macOS, and Windows only when the version is strictly greater and `v<version>` does not already exist. It then creates that tag and a GitHub Release with the artifacts, `SHA256SUMS`, and generated notes. The Windows Servo artifact is a zip of `mithu.exe`, the VC++ runtime DLLs, and ANGLE (`libEGL.dll`, `libGLESv2.dll`). That job runs `mithu.exe --smoke-test about:blank` with `ANGLE_DEFAULT_PLATFORM=warp` before upload. CI runs the same smoke test on `windows-latest`. An equal or lower version skips with success, so a normal push does not publish again. The Actions "Run workflow" button uses the same gate. The Lite job checks out the Servo submodule so Cargo can resolve `mithu-shell`, then compiles only `mithu-lite`. If any build fails, that job cancels the rest of the run. The publish job runs only when the full build and the Lite build both succeed. `mithu --version` and `mithu-lite --version` print the line from `VERSION.md`, which each app's `build.rs` reads at compile time.
+
+`python3 tools/version.py test` checks greater, equal, lower, and "no previous tag" on the comparer, and checks that `sync` updates Cargo, the lockfile, Android, and iOS.
 
 ## Contributing
 

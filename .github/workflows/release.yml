@@ -1,7 +1,8 @@
 name: Release
 
 # Push to main reads VERSION.md. A GitHub Release is created only when that
-# semver is strictly greater than the newest v* tag. Equal, lower, or an
+# semver is strictly greater than the newest v* tag. Cargo.toml is not part of
+# the gate: each build runs tools/version.py sync first. Equal, lower, or an
 # existing tag skips with success. workflow_dispatch uses the same gate.
 # Builds the Servo browser and Mithu Lite for Linux, macOS, and Windows.
 
@@ -31,7 +32,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          python3 tools/version.py check
           version="$(python3 tools/version.py read)"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           tags="$(git ls-remote --tags origin 'refs/tags/v*' | awk '{print $2}')"
@@ -73,6 +73,9 @@ jobs:
           submodules: true
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
+      - name: Sync version from VERSION.md
+        shell: bash
+        run: python3 tools/version.py sync
       - name: Linux libraries for Servo
         if: runner.os == 'Linux'
         run: |
@@ -91,6 +94,7 @@ jobs:
           pwsh -NoProfile -File tools/package-windows.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:MITHU_NO_DIALOG = "1"
+          $env:ANGLE_DEFAULT_PLATFORM = "warp"
           $exe = Join-Path (Get-Location) "target\release\mithu-windows\mithu.exe"
           & $exe --smoke-test about:blank
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -131,6 +135,9 @@ jobs:
           submodules: true
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
+      - name: Sync version from VERSION.md
+        shell: bash
+        run: python3 tools/version.py sync
       - name: Linux WebKitGTK
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
