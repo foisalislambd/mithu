@@ -2,6 +2,10 @@
 
 Mithu follows the first line of `VERSION.md`. Dates are the day the release is tagged.
 
+## 0.1.4
+
+The app menu, its submenus, the zoom row, and the page, tab, and address-bar menus follow the desktop browser order. Shortcuts stay on the row. There is no camera search and no other browser's name. New window, private window, print, translate, and developer tools stay closed until those features exist.
+
 ## 0.1.3
 
 Shared `mithu://` pages for settings, history, downloads, bookmarks, extensions, the new tab, and the version. The frame snaps to whole pixels at 100%, 125%, 150%, and 200%. The window icon, new-tab splash, and About page use the Mithu mark: a myna over a blue globe with an orange orbit ring. The README tells his story.

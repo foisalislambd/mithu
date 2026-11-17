@@ -24,14 +24,6 @@ use winit::window::{Window, WindowId};
 use wry::dpi::{PhysicalPosition as WryPos, PhysicalSize as WrySize};
 use wry::{PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 
-const APP_MENU: &[&str] = &[
-    "New tab",
-    "History",
-    "Downloads",
-    "Settings",
-    "Bookmark this page",
-];
-const CONTEXT_MENU: &[&str] = &["Back", "Reload", "New tab", "Bookmark this page"];
 
 fn app_icon() -> Option<winit::window::Icon> {
     let image = mithu_ui::brand::window_icon(true);
@@ -163,6 +155,9 @@ struct Model {
     pressed: bool,
     link_status: String,
     menu: Option<Popup>,
+    menu_name: String,
+    submenu: Option<mithu_ui::menus::MenuId>,
+    quit: bool,
     tab_search: bool,
     extensions: bool,
     profile: bool,
@@ -201,6 +196,9 @@ impl Model {
             pressed: false,
             link_status: String::new(),
             menu: None,
+            menu_name: "app".into(),
+            submenu: None,
+            quit: false,
             tab_search: false,
             extensions: false,
             profile: false,
@@ -649,6 +647,8 @@ impl App {
             }
             Hit::Menu => {
                 let mut model = self.model();
+                model.submenu = None;
+                model.menu_name = "app".into();
                 model.menu = if model.menu == Some(Popup::App) { None } else { Some(Popup::App) };
                 model.tab_search = false;
                 model.extensions = false;
@@ -660,7 +660,27 @@ impl App {
                     self.load_in_active(&url);
                 }
             }
-            Hit::MenuItem(index) => self.run_menu(index),
+            Hit::MenuItem(index) => self.run_menu(index, false),
+            Hit::SubmenuItem(index) => self.run_menu(index, true),
+            Hit::Zoom(kind) => {
+                self.model().menu = None;
+                self.model().submenu = None;
+                let next = match kind {
+                    -1 => (self.model().prefs.zoom / 1.1).clamp(0.5, 3.0),
+                    1 => (self.model().prefs.zoom * 1.1).clamp(0.5, 3.0),
+                    2 => {
+                        if let Some(window) = &self.window {
+                            window.set_maximized(!window.is_maximized());
+                        }
+                        self.model().prefs.zoom
+                    }
+                    _ => 1.0,
+                };
+                self.model().prefs.zoom = next;
+                if let Some(webview) = self.active_webview() {
+                    let _ = webview.zoom(next as f64);
+                }
+            }
             Hit::Suggestion(index) => {
                 let url = self.model().suggestions().get(index).cloned();
                 if let Some(url) = url {
@@ -724,25 +744,60 @@ impl App {
         self.apply_bounds();
     }
 
-    fn run_menu(&mut self, index: usize) {
-        let label = {
-            let mut model = self.model();
-            let labels: Vec<&str> = if model.menu == Some(Popup::Context) {
-                CONTEXT_MENU.to_vec()
+    fn run_menu(&mut self, index: usize, from_submenu: bool) {
+        use mithu_ui::menus::MenuId;
+        let id = {
+            let model = self.model();
+            let rows = if from_submenu {
+                model.submenu.map(mithu_ui::menus::children).unwrap_or_default()
             } else {
-                APP_MENU.to_vec()
+                mithu_ui::menus::rows_named(&model.menu_name)
             };
-            model.menu = None;
-            labels.get(index).copied().unwrap_or("").to_string()
+            rows.get(index).map(|row| row.id)
         };
-        match label.as_str() {
-            "New tab" => self.open_tab("about:newtab", true),
-            "History" => self.load_in_active("about:history"),
-            "Downloads" => self.load_in_active("about:downloads"),
-            "Settings" => self.load_in_active("about:settings"),
-            "Bookmark this page" => self.toggle_bookmark(),
-            "Back" => self.go_back(),
-            "Reload" => self.reload_or_stop(),
+        let Some(id) = id else {
+            return;
+        };
+        if !from_submenu && !mithu_ui::menus::children(id).is_empty() {
+            self.model().submenu = Some(id);
+            return;
+        }
+        {
+            let mut model = self.model();
+            model.menu = None;
+            model.submenu = None;
+        }
+        match id {
+            MenuId::NewTab | MenuId::NewWindow | MenuId::OpenLinkTab | MenuId::OpenLinkWindow | MenuId::OpenImageTab => {
+                self.open_tab("mithu://newtab", false);
+            }
+            MenuId::History => self.load_in_active("mithu://history"),
+            MenuId::Downloads => self.load_in_active("mithu://downloads"),
+            MenuId::Bookmarks | MenuId::BookmarkManager => self.load_in_active("mithu://bookmarks"),
+            MenuId::Settings | MenuId::Help => self.load_in_active("mithu://settings"),
+            MenuId::About => self.load_in_active("mithu://version"),
+            MenuId::Passwords | MenuId::PasswordManager | MenuId::Payments | MenuId::Addresses => {
+                self.load_in_active("mithu://settings/autofill");
+            }
+            MenuId::Extensions | MenuId::ManageExtensions => self.load_in_active("mithu://extensions"),
+            MenuId::DeleteData => self.load_in_active("mithu://settings/privacy"),
+            MenuId::Performance => self.load_in_active("mithu://settings/performance"),
+            MenuId::Bookmark => self.toggle_bookmark(),
+            MenuId::ShowBookmarksBar => {
+                let open = !self.model().bookmarks_open;
+                self.model().bookmarks_open = open;
+            }
+            MenuId::Back => self.go_back(),
+            MenuId::Forward => self.go_forward(),
+            MenuId::Reload => self.reload_or_stop(),
+            MenuId::Find | MenuId::FindNext => {
+                self.model().find_open = true;
+            }
+            MenuId::Exit => self.model().quit = true,
+            MenuId::CloseTab => {
+                let index = self.model().active;
+                self.close_index(index);
+            }
             _ => {}
         }
     }
@@ -935,7 +990,14 @@ impl App {
             pressed: model.pressed,
             ntp: model.ntp,
             menu: model.menu,
-            menu_labels: menu_labels(model.menu),
+            menu_labels: menu_labels(model),
+            submenu_at: model.submenu.and_then(|id| {
+                mithu_ui::menus::rows_named(&model.menu_name).iter().position(|row| row.id == id)
+            }),
+            submenu_labels: model
+                .submenu
+                .map(|id| mithu_ui::menus::labels(&mithu_ui::menus::children(id), (model.prefs.zoom * 100.0).round() as u32))
+                .unwrap_or_default(),
             tab_search: model.tab_search,
             extensions: model.extensions,
             profile: model.profile,
@@ -1165,9 +1227,27 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let (x, y) = self.model().pointer;
-                if button == MouseButton::Left && state == ElementState::Pressed {
+                if button == MouseButton::Right && state == ElementState::Pressed {
+                    let scale = if self.scale >= 1.0 { self.scale } else { 1.0 };
+                    let tab_h = (41.0 * scale).round();
+                    let tool_h = (48.0 * scale).round();
+                    let name = if y < tab_h {
+                        "tab"
+                    } else if y < tab_h + tool_h {
+                        "omnibox"
+                    } else {
+                        "page"
+                    };
+                    let mut model = self.model();
+                    model.menu_name = name.into();
+                    model.menu = Some(Popup::Context);
+                    model.submenu = None;
+                } else if button == MouseButton::Left && state == ElementState::Pressed {
                     self.model().pressed = true;
                     self.click(x, y);
+                    if self.model().quit {
+                        event_loop.exit();
+                    }
                 } else if button == MouseButton::Left && state == ElementState::Released {
                     self.model().pressed = false;
                     self.request_redraw();
@@ -1338,12 +1418,12 @@ fn lock(shared: &Mutex<Model>) -> std::sync::MutexGuard<'_, Model> {
     shared.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-fn menu_labels(menu: Option<Popup>) -> Vec<String> {
-    match menu {
-        Some(Popup::App) => APP_MENU.iter().map(|label| (*label).to_string()).collect(),
-        Some(Popup::Context) => CONTEXT_MENU.iter().map(|label| (*label).to_string()).collect(),
-        None => Vec::new(),
+fn menu_labels(model: &Model) -> Vec<String> {
+    if model.menu.is_none() {
+        return Vec::new();
     }
+    let zoom = (model.prefs.zoom * 100.0).round() as u32;
+    mithu_ui::menus::labels(&mithu_ui::menus::rows_named(&model.menu_name), zoom)
 }
 
 fn reveal_path(path: &str, folder: bool) {

@@ -103,6 +103,8 @@ pub struct State<'a> {
     pub ntp: bool,
     pub menu: Option<Popup>,
     pub menu_labels: Vec<String>,
+    pub submenu_at: Option<usize>,
+    pub submenu_labels: Vec<String>,
     pub tab_search: bool,
     pub extensions: bool,
     pub profile: bool,
@@ -138,6 +140,8 @@ pub enum Hit {
     Menu,
     Bookmark(usize),
     MenuItem(usize),
+    SubmenuItem(usize),
+    Zoom(i8),
     Suggestion(usize),
     Panel,
     Content,
@@ -417,14 +421,9 @@ pub fn paint(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>) {
 pub fn hit(state: &State<'_>, x: f32, y: f32) -> Hit {
     begin_paint(state);
     let tools = toolbar(state.width, state.scale, state.show_home);
-    if let Some(popup) = state.menu {
-        let rect = menu_rect(state, popup);
-        if rect.contains(x, y) {
-            let index = ((y - rect.y - dip(8.0)) / dip(32.0)).floor() as isize;
-            if index >= 0 && (index as usize) < state.menu_labels.len() {
-                return Hit::MenuItem(index as usize);
-            }
-            return Hit::Panel;
+    if state.menu.is_some() {
+        if let Some(hit) = menu_hit(state, x, y) {
+            return hit;
         }
     }
     if state.tab_search {
@@ -908,17 +907,148 @@ fn paint_menu(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, po
     let rect = menu_rect(state, popup);
     shadow(pixels, width, height, rect.x, rect.y, rect.w, rect.h);
     fill_round(pixels, width, height, rect.x, rect.y, rect.w, rect.h, dip(12.0), TOOLBAR);
-    let row_h = dip(32.0);
+    let mut y = rect.y + dip(8.0);
     for (index, label) in state.menu_labels.iter().enumerate() {
-        let row = Rect { x: rect.x + dip(4.0), y: rect.y + dip(8.0) + index as f32 * row_h, w: rect.w - dip(8.0), h: row_h };
-        if row.contains(state.pointer.0, state.pointer.1) {
-            fill_round(pixels, width, height, row.x, row.y, row.w, row.h, dip(8.0), CHIP);
+        let row_h = if label.is_empty() { dip(9.0) } else { dip(32.0) };
+        let row = Rect { x: rect.x + dip(4.0), y, w: rect.w - dip(8.0), h: row_h };
+        if label.is_empty() {
+            fill_rect(pixels, width, height, rect.x + dip(12.0), y + dip(4.0), rect.w - dip(24.0), 1.0, LINE);
+        } else {
+            let hot = row.contains(state.pointer.0, state.pointer.1) || state.submenu_at == Some(index);
+            if hot {
+                fill_round(pixels, width, height, row.x, row.y, row.w, row.h, dip(8.0), CHIP);
+            }
+            let (title, shortcut) = label.split_once('\t').unwrap_or((label.as_str(), ""));
+            let kind = menu_icon(title.trim_end_matches('\u{203a}'));
+            let icon = dip(16.0).max(1.0);
+            icons::blit(pixels, width, height, row.x + dip(8.0), row.y + (row.h - icon) / 2.0, icon, kind, ICON);
+            draw_text(pixels, width, height, state.fonts, row.x + dip(32.0), row.y + dip(21.0), 13.0, INK, title);
+            if title == "Zoom" {
+                paint_zoom_controls(pixels, width, height, state, row, shortcut);
+            } else if !shortcut.is_empty() {
+                let sw = text_width(state.fonts, shortcut, 12.0);
+                draw_text(pixels, width, height, state.fonts, row.right() - dip(12.0) - sw, row.y + dip(21.0), 12.0, MUTED, shortcut);
+            }
         }
-        let kind = menu_icon(label);
-        let icon = dip(16.0).max(1.0);
-        icons::blit(pixels, width, height, row.x + dip(8.0), row.y + (row.h - icon) / 2.0, icon, kind, ICON);
-        draw_text(pixels, width, height, state.fonts, row.x + dip(32.0), row.y + dip(21.0), 13.0, INK, label);
+        y += row_h;
     }
+    if let Some(anchor) = state.submenu_at {
+        if !state.submenu_labels.is_empty() {
+            paint_submenu(pixels, width, height, state, rect, anchor);
+        }
+    }
+}
+
+fn paint_zoom_controls(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, row: Rect, percent: &str) {
+    let buttons = ["−", percent, "+", "⛶"];
+    let mut x = row.right() - dip(156.0);
+    for label in buttons {
+        let w = if label == percent { dip(52.0) } else { dip(28.0) };
+        let cell = Rect { x, y: row.y + dip(2.0), w, h: row.h - dip(4.0) };
+        if cell.contains(state.pointer.0, state.pointer.1) {
+            fill_round(pixels, width, height, cell.x, cell.y, cell.w, cell.h, dip(6.0), PLUS);
+        }
+        let tw = text_width(state.fonts, label, 12.0);
+        draw_text(pixels, width, height, state.fonts, cell.x + (cell.w - tw) / 2.0, cell.y + dip(18.0), 12.0, INK, label);
+        x += w;
+    }
+}
+
+fn paint_submenu(pixels: &mut [u32], width: u32, height: u32, state: &State<'_>, parent: Rect, anchor: usize) {
+    let sub = submenu_rect(state, parent, anchor);
+    shadow(pixels, width, height, sub.x, sub.y, sub.w, sub.h);
+    fill_round(pixels, width, height, sub.x, sub.y, sub.w, sub.h, dip(12.0), TOOLBAR);
+    let mut y = sub.y + dip(8.0);
+    for label in &state.submenu_labels {
+        let row_h = if label.is_empty() { dip(9.0) } else { dip(32.0) };
+        let row = Rect { x: sub.x + dip(4.0), y, w: sub.w - dip(8.0), h: row_h };
+        if label.is_empty() {
+            fill_rect(pixels, width, height, sub.x + dip(12.0), y + dip(4.0), sub.w - dip(24.0), 1.0, LINE);
+        } else {
+            if row.contains(state.pointer.0, state.pointer.1) {
+                fill_round(pixels, width, height, row.x, row.y, row.w, row.h, dip(8.0), CHIP);
+            }
+            let (title, shortcut) = label.split_once('\t').unwrap_or((label.as_str(), ""));
+            draw_text(pixels, width, height, state.fonts, row.x + dip(12.0), row.y + dip(21.0), 13.0, INK, title);
+            if !shortcut.is_empty() {
+                let sw = text_width(state.fonts, shortcut, 12.0);
+                draw_text(pixels, width, height, state.fonts, row.right() - dip(12.0) - sw, row.y + dip(21.0), 12.0, MUTED, shortcut);
+            }
+        }
+        y += row_h;
+    }
+}
+
+fn submenu_rect(state: &State<'_>, parent: Rect, anchor: usize) -> Rect {
+    let w = dip(280.0);
+    let h = menu_block_height(&state.submenu_labels);
+    let y = parent.y + dip(8.0) + row_offset(&state.menu_labels, anchor);
+    let x = if parent.x > w + dip(8.0) { parent.x - w - dip(4.0) } else { parent.right() + dip(4.0) };
+    Rect { x, y, w, h }
+}
+
+fn menu_block_height(labels: &[String]) -> f32 {
+    let mut h = dip(16.0);
+    if labels.is_empty() {
+        return h + dip(32.0);
+    }
+    for label in labels {
+        h += if label.is_empty() { dip(9.0) } else { dip(32.0) };
+    }
+    h
+}
+
+fn menu_hit(state: &State<'_>, x: f32, y: f32) -> Option<Hit> {
+    let rect = menu_rect(state, state.menu?);
+    if let Some(anchor) = state.submenu_at {
+        if !state.submenu_labels.is_empty() {
+            let sub = submenu_rect(state, rect, anchor);
+            if sub.contains(x, y) {
+                return menu_index_at(&state.submenu_labels, y - sub.y).map(Hit::SubmenuItem).or(Some(Hit::Panel));
+            }
+        }
+    }
+    if !rect.contains(x, y) {
+        return None;
+    }
+    let index = menu_index_at(&state.menu_labels, y - rect.y)?;
+    let label = state.menu_labels.get(index).map(String::as_str).unwrap_or("");
+    let (title, _) = label.split_once('\t').unwrap_or((label, ""));
+    if title == "Zoom" {
+        let row_top = rect.y + dip(8.0) + row_offset(&state.menu_labels, index);
+        let row = Rect { x: rect.x + dip(4.0), y: row_top, w: rect.w - dip(8.0), h: dip(32.0) };
+        let mut cursor = row.right() - dip(156.0);
+        let widths = [dip(28.0), dip(52.0), dip(28.0), dip(28.0)];
+        let kinds = [-1, 0, 1, 2];
+        for (width, kind) in widths.into_iter().zip(kinds) {
+            if x >= cursor && x < cursor + width {
+                return Some(Hit::Zoom(kind));
+            }
+            cursor += width;
+        }
+        return Some(Hit::Panel);
+    }
+    Some(Hit::MenuItem(index))
+}
+
+fn row_offset(labels: &[String], index: usize) -> f32 {
+    let mut y = 0.0;
+    for label in labels.iter().take(index) {
+        y += if label.is_empty() { dip(9.0) } else { dip(32.0) };
+    }
+    y
+}
+
+fn menu_index_at(labels: &[String], dy: f32) -> Option<usize> {
+    let mut y = dip(8.0);
+    for (index, label) in labels.iter().enumerate() {
+        let row_h = if label.is_empty() { dip(9.0) } else { dip(32.0) };
+        if dy >= y && dy < y + row_h && !label.is_empty() {
+            return Some(index);
+        }
+        y += row_h;
+    }
+    None
 }
 
 fn menu_icon(label: &str) -> Kind {
@@ -935,8 +1065,8 @@ fn menu_icon(label: &str) -> Kind {
 }
 
 fn menu_rect(state: &State<'_>, popup: Popup) -> Rect {
-    let w = dip(240.0);
-    let h = dip(16.0) + state.menu_labels.len().max(1) as f32 * dip(32.0);
+    let w = dip(400.0);
+    let h = menu_block_height(&state.menu_labels);
     match popup {
         Popup::App => {
             let tools = toolbar(state.width, state.scale, state.show_home);
@@ -1359,6 +1489,8 @@ mod tests {
                 ntp: false,
                 menu: Some(Popup::App),
                 menu_labels: vec!["New tab".into(), "History".into(), "Downloads".into(), "Settings".into()],
+                submenu_at: None,
+                submenu_labels: Vec::new(),
                 tab_search: false,
                 extensions: false,
                 profile: false,
@@ -1372,7 +1504,7 @@ mod tests {
                 show_home: true,
             };
             let menu = menu_rect(&state, Popup::App);
-            assert_eq!(menu.w, (240.0 * scale).round());
+            assert_eq!(menu.w, (400.0 * scale).round());
             assert!(menu.right() <= state.width + 0.5);
             assert!(menu.x >= 0.0);
             let label = text_width(&fonts, "Downloads", 13.0);

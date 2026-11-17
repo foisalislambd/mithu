@@ -93,7 +93,11 @@ enum Overlay {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MenuKind {
     App,
-    Context,
+    Page,
+    Tab,
+    Omnibox,
+    Link,
+    Image,
 }
 
 pub struct Browser {
@@ -117,6 +121,9 @@ pub struct Browser {
     downloads: Vec<String>,
     overlay: Option<Overlay>,
     menu: Option<MenuKind>,
+    submenu: Option<mithu_ui::menus::MenuId>,
+    quit: bool,
+    fullscreen_toggle: bool,
     suggestion: Option<usize>,
     pointer: (f32, f32),
     pressed: bool,
@@ -179,6 +186,9 @@ impl Browser {
             downloads: Vec::new(),
             overlay: None,
             menu: None,
+            submenu: None,
+            quit: false,
+            fullscreen_toggle: false,
             suggestion: None,
             pointer: (-1.0, -1.0),
             pressed: false,
@@ -588,12 +598,48 @@ impl Browser {
 
     pub fn close_menu(&mut self) {
         self.menu = None;
+        self.submenu = None;
+        self.bump();
+    }
+
+    pub fn consume_quit(&mut self) -> bool {
+        let quit = self.quit;
+        self.quit = false;
+        quit
+    }
+
+    pub fn consume_fullscreen(&mut self) -> bool {
+        let toggle = self.fullscreen_toggle;
+        self.fullscreen_toggle = false;
+        toggle
+    }
+
+    pub fn context_target(&mut self, kind: &str, x: f32, y: f32) {
+        self.pointer = (x, y);
+        self.menu = Some(match kind {
+            "link" => MenuKind::Link,
+            "image" => MenuKind::Image,
+            "tab" => MenuKind::Tab,
+            "omnibox" => MenuKind::Omnibox,
+            _ => MenuKind::Page,
+        });
+        self.submenu = None;
         self.bump();
     }
 
     pub fn context_menu(&mut self, x: f32, y: f32) {
         self.pointer = (x, y);
-        self.menu = Some(MenuKind::Context);
+        let scale = if self.scale.is_finite() && self.scale >= 1.0 { self.scale } else { 1.0 };
+        let tab_h = (41.0 * scale).round();
+        let tool_h = (48.0 * scale).round();
+        self.menu = Some(if y < tab_h {
+            MenuKind::Tab
+        } else if y < tab_h + tool_h {
+            MenuKind::Omnibox
+        } else {
+            MenuKind::Page
+        });
+        self.submenu = None;
         self.bump();
     }
 
@@ -662,6 +708,7 @@ impl Browser {
                 self.bump();
             }
             Click::MenuButton => {
+                self.submenu = None;
                 self.menu = if self.menu == Some(MenuKind::App) {
                     None
                 } else {
@@ -683,9 +730,39 @@ impl Browser {
                     self.navigate(&url);
                 }
             }
-            Click::MenuItem(item) | Click::ContextItem(item) => {
+            Click::MenuItem(item) => {
+                if mithu_ui::menus::children(item).is_empty() {
+                    self.menu = None;
+                    self.submenu = None;
+                    self.run_item(item);
+                } else {
+                    self.submenu = Some(item);
+                    self.bump();
+                }
+            }
+            Click::SubmenuItem(index) => {
+                let parent = self.submenu;
                 self.menu = None;
-                self.run_item(item);
+                self.submenu = None;
+                if let Some(parent) = parent {
+                    if let Some(row) = mithu_ui::menus::children(parent).get(index) {
+                        let id = row.id;
+                        self.run_item(id);
+                    }
+                }
+            }
+            Click::Zoom(kind) => {
+                self.menu = None;
+                self.submenu = None;
+                match kind {
+                    -1 => self.zoom_out(),
+                    1 => self.zoom_in(),
+                    2 => {
+                        self.fullscreen_toggle = true;
+                        self.bump();
+                    }
+                    _ => self.zoom_reset(),
+                }
             }
             Click::Theme => {
                 self.dark = !self.dark;
@@ -1148,15 +1225,63 @@ impl Browser {
             .unwrap_or_default()
     }
 
-    fn run_item(&mut self, item: Item) {
+    fn run_item(&mut self, item: mithu_ui::menus::MenuId) {
+        use mithu_ui::menus::MenuId;
         match item {
-            Item::Back => self.back(),
-            Item::Reload => self.reload(),
-            Item::NewTab => self.new_tab(),
-            Item::Bookmark => self.toggle_bookmark(),
-            Item::History => self.navigate("about:history"),
-            Item::Downloads => self.navigate("about:downloads"),
-            Item::Settings => self.navigate("about:settings"),
+            MenuId::Back => self.back(),
+            MenuId::Forward => self.forward(),
+            MenuId::Reload => self.reload(),
+            MenuId::NewTab | MenuId::NewWindow | MenuId::OpenLinkTab | MenuId::OpenLinkWindow | MenuId::OpenImageTab => self.new_tab(),
+            MenuId::Bookmark | MenuId::BookmarkManager => {
+                if item == MenuId::BookmarkManager {
+                    self.navigate("mithu://bookmarks");
+                } else {
+                    self.toggle_bookmark();
+                }
+            }
+            MenuId::ShowBookmarksBar => self.toggle_bookmark_list(),
+            MenuId::History => self.navigate("mithu://history"),
+            MenuId::Bookmarks => self.navigate("mithu://bookmarks"),
+            MenuId::Downloads => self.navigate("mithu://downloads"),
+            MenuId::Settings | MenuId::Help => self.navigate("mithu://settings"),
+            MenuId::About => self.navigate("mithu://version"),
+            MenuId::Passwords | MenuId::PasswordManager | MenuId::Payments | MenuId::Addresses => {
+                self.navigate("mithu://settings/autofill");
+            }
+            MenuId::Extensions | MenuId::ManageExtensions => self.navigate("mithu://extensions"),
+            MenuId::DeleteData => self.navigate("mithu://settings/privacy"),
+            MenuId::Performance => self.navigate("mithu://settings/performance"),
+            MenuId::ZoomIn => self.zoom_in(),
+            MenuId::ZoomOut => self.zoom_out(),
+            MenuId::ZoomReset => self.zoom_reset(),
+            MenuId::Find | MenuId::FindNext => self.open_find(),
+            MenuId::CloseTab => self.close_tab(),
+            MenuId::ReopenClosed => self.reopen_closed_tab(),
+            MenuId::DuplicateTab => {
+                let url = self.location();
+                self.new_tab();
+                if url.starts_with("http") {
+                    self.navigate(&url);
+                }
+            }
+            MenuId::CloseOther => {
+                let keep = self.location();
+                if self.tabs.iter().any(|tab| tab.url == keep) {
+                    self.tabs.retain(|tab| tab.url == keep);
+                    self.active = 0;
+                    self.resize_active();
+                    self.sync_active();
+                    self.bump();
+                }
+            }
+            MenuId::Exit => self.quit = true,
+            MenuId::Fullscreen => self.fullscreen_toggle = true,
+            MenuId::CopyLink | MenuId::CopyLinkAddress | MenuId::CopyImage | MenuId::Copy => {}
+            MenuId::Print | MenuId::Translate | MenuId::PrivateWindow | MenuId::OpenLinkPrivate
+            | MenuId::SavePage | MenuId::SaveLink | MenuId::SaveImage | MenuId::SendDevice
+            | MenuId::CreateShortcut | MenuId::NameWindow | MenuId::TaskManager | MenuId::DevTools
+            | MenuId::NewTabGroup | MenuId::PasteAndGo | MenuId::Cut | MenuId::Paste | MenuId::SelectAll
+            | MenuId::Zoom | MenuId::TabGroups | MenuId::SaveShare | MenuId::MoreTools | MenuId::Separator => {}
         }
     }
 
@@ -1355,8 +1480,14 @@ impl Browser {
         };
         let menu = match self.menu {
             Some(MenuKind::App) => Some(chrome::Popup::App),
-            Some(MenuKind::Context) => Some(chrome::Popup::Context),
+            Some(MenuKind::Page | MenuKind::Tab | MenuKind::Omnibox | MenuKind::Link | MenuKind::Image) => Some(chrome::Popup::Context),
             None => None,
+        };
+        let rows = menu_rows(self.menu);
+        let zoom = self.tabs.get(self.active).map(|tab| (tab.zoom * 100.0).round() as u32).unwrap_or(100);
+        let (submenu_at, submenu_labels) = match self.submenu {
+            Some(id) => (rows.iter().position(|row| row.id == id), mithu_ui::menus::labels(&mithu_ui::menus::children(id), zoom)),
+            None => (None, Vec::new()),
         };
         chrome::State {
             width: self.viewport_w,
@@ -1389,10 +1520,9 @@ impl Browser {
             pressed: self.pressed,
             ntp: self.overlay == Some(Overlay::NewTab),
             menu,
-            menu_labels: menu_items(self.menu)
-                .into_iter()
-                .map(|item| item.label().to_string())
-                .collect(),
+            menu_labels: mithu_ui::menus::labels(&rows, zoom),
+            submenu_at,
+            submenu_labels,
             tab_search: self.tab_search,
             extensions: self.extensions_open,
             profile: self.profile_open,
@@ -1455,21 +1585,12 @@ impl Browser {
             chrome::Hit::Profile => Click::Profile,
             chrome::Hit::Menu => Click::MenuButton,
             chrome::Hit::Bookmark(index) => Click::Bookmark(index),
-            chrome::Hit::MenuItem(index) => {
-                let items = menu_items(self.menu);
-                match self.menu {
-                    Some(MenuKind::Context) => items
-                        .get(index)
-                        .copied()
-                        .map(Click::ContextItem)
-                        .unwrap_or(Click::None),
-                    _ => items
-                        .get(index)
-                        .copied()
-                        .map(Click::MenuItem)
-                        .unwrap_or(Click::None),
-                }
-            }
+            chrome::Hit::MenuItem(index) => menu_rows(self.menu)
+                .get(index)
+                .map(|row| Click::MenuItem(row.id))
+                .unwrap_or(Click::None),
+            chrome::Hit::SubmenuItem(index) => Click::SubmenuItem(index),
+            chrome::Hit::Zoom(kind) => Click::Zoom(kind),
             chrome::Hit::Suggestion(index) => Click::Suggestion(index),
             chrome::Hit::Panel => Click::Panel,
             chrome::Hit::Content => {
@@ -1505,48 +1626,22 @@ enum Click {
     Panel,
     MenuButton,
     Bookmark(usize),
-    MenuItem(Item),
-    ContextItem(Item),
+    MenuItem(mithu_ui::menus::MenuId),
+    SubmenuItem(usize),
+    Zoom(i8),
     Theme,
     Content,
     None,
 }
 
-#[derive(Clone, Copy)]
-enum Item {
-    Back,
-    Reload,
-    NewTab,
-    Bookmark,
-    History,
-    Downloads,
-    Settings,
-}
-
-impl Item {
-    fn label(self) -> &'static str {
-        match self {
-            Item::Back => "Back",
-            Item::Reload => "Reload",
-            Item::NewTab => "New tab",
-            Item::Bookmark => "Bookmark this page",
-            Item::History => "History",
-            Item::Downloads => "Downloads",
-            Item::Settings => "Settings",
-        }
-    }
-}
-
-fn menu_items(kind: Option<MenuKind>) -> Vec<Item> {
+fn menu_rows(kind: Option<MenuKind>) -> Vec<mithu_ui::menus::Row> {
     match kind {
-        Some(MenuKind::Context) => vec![Item::Back, Item::Reload, Item::NewTab, Item::Bookmark],
-        Some(MenuKind::App) => vec![
-            Item::NewTab,
-            Item::History,
-            Item::Downloads,
-            Item::Settings,
-            Item::Bookmark,
-        ],
+        Some(MenuKind::App) => mithu_ui::menus::app_menu(),
+        Some(MenuKind::Page) => mithu_ui::menus::page_menu(),
+        Some(MenuKind::Tab) => mithu_ui::menus::tab_menu(),
+        Some(MenuKind::Omnibox) => mithu_ui::menus::omnibox_menu(),
+        Some(MenuKind::Link) => mithu_ui::menus::link_menu(),
+        Some(MenuKind::Image) => mithu_ui::menus::image_menu(),
         None => Vec::new(),
     }
 }
