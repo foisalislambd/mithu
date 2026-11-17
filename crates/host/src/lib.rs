@@ -131,6 +131,11 @@ pub(crate) fn powershell_string(message: &str) -> String {
 /// A Windows GUI process has no console. If a terminal launched it, take that
 /// console and point the standard handles at it so `println!` is visible.
 /// Double-clicking has no console parent, so this returns and no terminal appears.
+///
+/// A redirected stdout (the pipe PowerShell uses for `$output = & mithu.exe`)
+/// must be left alone. Replacing it with `CONOUT$` prints on the console and
+/// leaves the pipe empty, which is why CI saw a successful smoke test with
+/// no captured text.
 pub fn attach_parent_console() {
     #[cfg(all(windows, not(debug_assertions)))]
     unsafe {
@@ -146,6 +151,8 @@ pub fn attach_parent_console() {
 
         unsafe extern "system" {
             fn AttachConsole(process_id: u32) -> i32;
+            fn GetStdHandle(std_handle: u32) -> *mut core::ffi::c_void;
+            fn GetFileType(handle: *mut core::ffi::c_void) -> u32;
             fn SetStdHandle(std_handle: u32, handle: *mut core::ffi::c_void) -> i32;
             fn CreateFileA(
                 file_name: *const u8,
@@ -158,6 +165,12 @@ pub fn attach_parent_console() {
             ) -> *mut core::ffi::c_void;
         }
 
+        let existing = GetStdHandle(STD_OUTPUT_HANDLE);
+        let valid = !existing.is_null() && existing != INVALID_HANDLE_VALUE;
+        let kind = if valid { GetFileType(existing) } else { 0 };
+        if !console_needs_attach(valid, kind) {
+            return;
+        }
         if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
             return;
         }
@@ -176,6 +189,18 @@ pub fn attach_parent_console() {
         SetStdHandle(STD_OUTPUT_HANDLE, handle);
         SetStdHandle(STD_ERROR_HANDLE, handle);
     }
+}
+
+/// Keep a pipe or a file. Attach a console only when this GUI process has no
+/// stdout yet (double-click, or a console parent that did not redirect).
+pub(crate) fn console_needs_attach(handle_valid: bool, file_type: u32) -> bool {
+    const FILE_TYPE_DISK: u32 = 1;
+    const FILE_TYPE_CHAR: u32 = 2;
+    const FILE_TYPE_PIPE: u32 = 3;
+    if !handle_valid {
+        return true;
+    }
+    !matches!(file_type, FILE_TYPE_DISK | FILE_TYPE_CHAR | FILE_TYPE_PIPE)
 }
 
 #[cfg(test)]
@@ -199,5 +224,17 @@ mod tests {
     #[test]
     fn attach_is_callable_on_this_host() {
         attach_parent_console();
+    }
+
+    #[test]
+    fn redirected_stdout_is_not_replaced_with_the_console() {
+        const FILE_TYPE_DISK: u32 = 1;
+        const FILE_TYPE_CHAR: u32 = 2;
+        const FILE_TYPE_PIPE: u32 = 3;
+        assert!(console_needs_attach(false, 0));
+        assert!(!console_needs_attach(true, FILE_TYPE_PIPE));
+        assert!(!console_needs_attach(true, FILE_TYPE_DISK));
+        assert!(!console_needs_attach(true, FILE_TYPE_CHAR));
+        assert!(console_needs_attach(true, 0));
     }
 }
