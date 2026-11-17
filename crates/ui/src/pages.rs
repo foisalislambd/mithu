@@ -346,7 +346,7 @@ fn attr(tag: &str, name: &str) -> Option<String> {
 fn strip_data_uris(html: &str) -> String {
     let mut out = String::new();
     let mut rest = html;
-    while let Some(start) = rest.find("data:image") {
+    while let Some(start) = rest.find("data:") {
         out.push_str(&rest[..start]);
         rest = &rest[start..];
         let end = rest.find('"').unwrap_or(rest.len());
@@ -428,6 +428,50 @@ fn render(kind: Kind, spec: &str, prefs: &Prefs, version: &str) -> Document {
     }
 }
 
+fn roboto_faces() -> String {
+    fn face(weight: u16, bytes: &[u8]) -> String {
+        format!(
+            "@font-face{{font-family:Roboto;font-style:normal;font-weight:{weight};font-display:swap;src:url(data:font/woff2;base64,{}) format('woff2');}}",
+            b64(bytes)
+        )
+    }
+    format!(
+        "{}{}{}",
+        face(400, include_bytes!("../../../assets/fonts/roboto/roboto-regular.woff2")),
+        face(500, include_bytes!("../../../assets/fonts/roboto/roboto-medium.woff2")),
+        face(700, include_bytes!("../../../assets/fonts/roboto/roboto-bold.woff2")),
+    )
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let n = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8) | bytes[index + 2] as u32;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        out.push(TABLE[(n & 63) as usize] as char);
+        index += 3;
+    }
+    let left = bytes.len() - index;
+    if left == 1 {
+        let n = (bytes[index] as u32) << 16;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if left == 2 {
+        let n = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8);
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
 fn shell(title: &str, prefs: &Prefs, version: &str, body: &str) -> String {
     let theme = if prefs.dark() { "dark" } else { "light" };
     format!(
@@ -439,34 +483,71 @@ fn shell(title: &str, prefs: &Prefs, version: &str, body: &str) -> String {
 <title>{title} — Mithu</title>
 <link rel="icon" href="{icon}">
 <style>
-:root {{ color-scheme: light; --bg:#f4f1ea; --card:#fff; --ink:#1c1b19; --muted:#5f5a54; --line:#e4ddd2; --field:#f7f4ee; --accent:#0f766e; --accent-ink:#fff; --side:#efeae2; --hover:#e7f3f1; --danger:#9f1239; }}
-html[data-theme="dark"] {{ color-scheme: dark; --bg:#14161a; --card:#1e2128; --ink:#e7e4de; --muted:#b0aaa2; --line:#343841; --field:#171a20; --accent:#5eead4; --accent-ink:#08332f; --side:#191c22; --hover:#243330; --danger:#fda4af; }}
+{fonts}
+:root {{
+  color-scheme: light;
+  --bg: #fff;
+  --card: #fff;
+  --ink: #1f1f1f;
+  --muted: #5f6368;
+  --line: rgba(0, 0, 0, .06);
+  --hairline: rgba(0, 0, 0, .14);
+  --field: #f1f3f4;
+  --accent: #0b57d0;
+  --accent-ink: #fff;
+  --side: #fff;
+  --nav: #202124;
+  --nav-selected: #1967d2;
+  --nav-bg: #e8f0fe;
+  --hover: #e8eaed;
+  --danger: #d93025;
+}}
+html[data-theme="dark"] {{
+  color-scheme: dark;
+  --bg: #1f1f1f;
+  --card: #292a2d;
+  --ink: #e3e3e3;
+  --muted: #9aa0a6;
+  --line: rgba(255, 255, 255, .1);
+  --hairline: rgba(255, 255, 255, .14);
+  --field: #3c3c3c;
+  --accent: #a8c7fa;
+  --accent-ink: #062e6f;
+  --side: #1f1f1f;
+  --nav: #fff;
+  --nav-selected: #202124;
+  --nav-bg: #8ab4f8;
+  --hover: #3c4043;
+  --danger: #f28b82;
+}}
 * {{ box-sizing: border-box; }}
-html, body {{ margin:0; background:var(--bg); color:var(--ink); font: {font}px/1.45 "Noto Sans", sans-serif; }}
+html, body {{ margin:0; background:var(--bg); color:var(--ink); font: {font}px/1.54 Roboto, "Noto Sans", Arial, sans-serif; }}
 a {{ color: var(--accent); text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
 button, input, select, textarea {{ font: inherit; color: inherit; }}
-.top {{ display:flex; align-items:center; gap:16px; height:56px; padding:0 20px; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:0; }}
-.markimg {{ width:28px; height:28px; }}
-img.logo {{ width:min(280px, 72vw); height:auto; display:block; margin:0 auto 8px; }}
-.brand {{ font-weight:650; letter-spacing:-0.02em; }}
-.search {{ margin-left:auto; width:min(360px, 46vw); background:var(--field); border:1px solid var(--line); border-radius:999px; padding:8px 14px; }}
-.layout {{ display:grid; grid-template-columns: 232px 1fr; min-height: calc(100vh - 56px); }}
-nav {{ background:var(--side); padding:12px; border-right:1px solid var(--line); }}
-nav a {{ display:block; padding:8px 12px; border-radius:8px; color:var(--ink); margin:2px 0; }}
-nav a:hover, nav a.on {{ background:var(--hover); text-decoration:none; }}
-main {{ padding:28px 32px 64px; max-width:860px; }}
-h1 {{ font-size:22px; font-weight:500; line-height:1.3; margin:0 0 16px; letter-spacing:0; }}
-h2 {{ font-size:14px; font-weight:650; margin:20px 0 8px; }}
-.lead {{ color:var(--muted); margin:0 0 20px; }}
-.card {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:4px 16px; margin:12px 0 20px; }}
-.row {{ display:flex; align-items:center; gap:16px; min-height:52px; border-top:1px solid var(--line); padding:8px 0; }}
+.top {{ display:flex; align-items:center; gap:16px; height:56px; padding:0 16px 0 20px; background:var(--bg); border-bottom:1px solid var(--hairline); position:sticky; top:0; z-index:2; }}
+.markimg {{ width:24px; height:24px; border-radius:50%; }}
+img.logo {{ width:min(240px, 70vw); height:auto; display:block; margin:0 auto 8px; }}
+.brand {{ font-weight:500; font-size:16px; }}
+.search {{ margin-left:auto; width:min(264px, 46vw); height:36px; background:var(--field); border:0; border-radius:18px; padding:0 16px; }}
+.layout {{ display:flex; min-height: calc(100vh - 56px); }}
+nav {{ width:266px; flex:0 0 266px; background:var(--side); padding:8px 0 24px; }}
+nav a {{ display:flex; align-items:center; min-height:40px; margin:0 2px 0 1px; padding:10px 16px 10px 23px; border-start-end-radius:100px; border-end-end-radius:100px; border-radius:0 100px 100px 0; color:var(--nav); font-size:14px; font-weight:500; line-height:14px; text-decoration:none; }}
+nav a:hover {{ background:var(--hover); }}
+nav a.on {{ background:var(--nav-bg); color:var(--nav-selected); }}
+main {{ flex:1; padding:24px 24px 64px; max-width:720px; }}
+h1 {{ font-size:20px; font-weight:400; line-height:1.3; margin:0 0 16px; }}
+h2 {{ font-size:13px; font-weight:500; margin:16px 0 8px; color:var(--muted); }}
+section.on > h2 {{ display:none; }}
+.lead {{ color:var(--muted); margin:0 0 16px; font-size:13px; }}
+.card {{ background:var(--card); border:1px solid var(--hairline); border-radius:8px; padding:0 16px; margin:0 0 16px; }}
+.row {{ display:flex; align-items:center; gap:16px; min-height:48px; border-top:1px solid var(--line); padding:8px 0; }}
 .card .row:first-child {{ border-top:0; }}
 .row .grow {{ flex:1; }}
-.row small {{ display:block; color:var(--muted); }}
-select, .text {{ background:var(--field); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }}
-.btn {{ border:0; background:var(--accent); color:var(--accent-ink); border-radius:999px; padding:8px 14px; cursor:pointer; }}
-.btn.quiet {{ background:transparent; color:var(--ink); border:1px solid var(--line); }}
+.row small {{ display:block; color:var(--muted); font-size:12px; font-weight:400; }}
+select, .text {{ background:var(--field); border:0; border-radius:4px; padding:8px 10px; min-height:36px; }}
+.btn {{ border:0; background:var(--accent); color:var(--accent-ink); border-radius:18px; min-height:36px; padding:0 16px; cursor:pointer; font-weight:500; }}
+.btn.quiet {{ background:transparent; color:var(--accent); border:1px solid var(--hairline); }}
 .btn.danger {{ background:transparent; color:var(--danger); border:1px solid var(--danger); }}
 .tiles {{ display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:12px; }}
 .tile {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; min-height:88px; }}
@@ -509,6 +590,7 @@ function go(op, params, back) {{
 </script>
 <p style="display:none">Mithu {version}</p>
 </body></html>"#,
+        fonts = roboto_faces(),
         theme = theme,
         font = prefs.font_px.clamp(12, 24),
         title = esc(title),
@@ -579,7 +661,8 @@ const SETTINGS_NAV: &[(&str, &str)] = &[
 fn settings_body(spec: &str, prefs: &Prefs) -> String {
     let raw = spec.split('/').nth(3).unwrap_or("").split('?').next().unwrap_or("");
     let focus = if raw.is_empty() { "you" } else { raw };
-    let mut out = String::from("<h1>Settings</h1><p class=\"lead\">Mithu stores these on this computer and applies them in both editions.</p>");
+    let heading = SETTINGS_NAV.iter().find(|(id, _)| *id == focus).map(|(_, label)| *label).unwrap_or("Settings");
+    let mut out = format!("<h1>{}</h1>", esc(heading));
     out.push_str(&section("you profile name", "You", &you_card(prefs), focus == "you"));
     out.push_str(&section("autofill passwords", "Autofill and passwords", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Passwords and cards stay empty until a lock is added. Nothing is sent off this computer.</div></div></div>", focus == "autofill"));
     out.push_str(&section("privacy security clear", "Privacy and security", &privacy_card(), focus == "privacy"));
