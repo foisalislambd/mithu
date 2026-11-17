@@ -21,6 +21,22 @@ default = []
 bundled = []
 clipboard = []
 js_jit = []
+multiprocess = []
 no-wgl = []
 EOF
 printf '%s\n' '// Resolver stub. Not compiled into the phone apps.' > "$(dirname "$manifest")/src/lib.rs"
+allocator="$root/third_party/servo/components/allocator/Cargo.toml"
+if [ ! -f "$allocator" ]; then
+  mkdir -p "$(dirname "$allocator")"
+  cat > "$allocator" << 'EOF'
+[package]
+name = "servo-allocator"
+version = "0.8.0"
+edition = "2021"
+publish = false
+
+[features]
+use-jemalloc = []
+EOF
+  printf '%s\n' '// Resolver stub. Not compiled into the phone apps.' > "$(dirname "$allocator")/lib.rs"
+fi

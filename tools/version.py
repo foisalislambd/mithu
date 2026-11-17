@@ -18,6 +18,7 @@ check exits 0 even when Cargo.toml still has an older version.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -507,6 +508,10 @@ def run_tests() -> None:
 
 
 def main(argv: list[str]) -> None:
+    # The Servo tree is patched before any cargo command CI runs through here.
+    script = ROOT / "tools" / "patch-servo-processes.py"
+    if script.is_file():
+        subprocess.run([sys.executable, str(script)], check=True)
     if len(argv) < 2:
         fail("usage: tools/version.py read|sync|check|set|compare|latest|test")
     command = argv[1]

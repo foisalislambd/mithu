@@ -13,8 +13,6 @@ use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 
 #[cfg(not(any(windows, target_env = "ohos")))]
-extern crate servo_allocator as _;
-
 use dpi::PhysicalSize;
 use mithu_text::{FontBook, Glyph, glyph_top};
 use servo::{
@@ -48,6 +46,10 @@ struct PendingPermission {
 #[derive(Clone)]
 struct Delegate {
     frame: Rc<AtomicBool>,
+    /// Stays set after the first paint of this navigation. `frame` is cleared
+    /// on every spin, so a page that paints once and then goes quiet would
+    /// never count as settled.
+    painted: Rc<AtomicBool>,
     opened: Rc<RefCell<Vec<PendingTab>>>,
     shot: Rc<RefCell<Option<servo::RgbaImage>>>,
     saves: Rc<RefCell<Vec<String>>>,
@@ -63,6 +65,7 @@ impl WebViewDelegate for Delegate {
     fn notify_new_frame_ready(&self, webview: WebView) {
         webview.paint();
         self.frame.store(true, Ordering::SeqCst);
+        self.painted.store(true, Ordering::SeqCst);
     }
 
     fn request_create_new(&self, _parent: WebView, request: servo::CreateNewWebViewRequest) {
@@ -274,6 +277,7 @@ pub struct Browser {
     fonts: FontBook,
     revision: u64,
     frame: Rc<AtomicBool>,
+    painted: Rc<AtomicBool>,
     status: String,
     groups: Vec<TabGroup>,
     group_editor: bool,
@@ -294,9 +298,11 @@ impl Browser {
     pub fn try_new() -> Result<Self, String> {
         install_crypto();
         let frame = Rc::new(AtomicBool::new(false));
+        let painted = Rc::new(AtomicBool::new(false));
         let opened = Rc::new(RefCell::new(Vec::new()));
         let delegate = Delegate {
             frame: frame.clone(),
+            painted: painted.clone(),
             opened,
             shot: Rc::new(RefCell::new(None)),
             saves: Rc::new(RefCell::new(Vec::new())),
@@ -386,6 +392,7 @@ impl Browser {
             fonts: FontBook::load(),
             revision: 1,
             frame,
+            painted,
             status: String::new(),
             groups: Vec::new(),
             group_editor: false,
@@ -455,9 +462,22 @@ impl Browser {
             .map(|tab| tab.url.as_str())
             .unwrap_or("");
         if want.starts_with("http") {
-            return done && have.starts_with("http") && self.frame.load(Ordering::SeqCst);
+            return done && have.starts_with("http") && self.painted.load(Ordering::SeqCst);
         }
         done && same_url(have, want)
+    }
+
+    pub fn hold_status(&self) -> String {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return "no tab".into();
+        };
+        let state = match tab.status {
+            LoadStatus::Started => "started",
+            LoadStatus::HeadParsed => "head",
+            LoadStatus::Complete => "complete",
+            LoadStatus::Stopped => "stopped",
+        };
+        format!("{state} {}", tab.url)
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -493,6 +513,7 @@ impl Browser {
         }
         self.overlay = None;
         self.frame.store(false, Ordering::SeqCst);
+        self.painted.store(false, Ordering::SeqCst);
         self.pending_url = Some(url.to_string());
         self.wait_for_context();
         self.tabs[self.active].webview.load(url.clone());

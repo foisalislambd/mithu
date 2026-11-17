@@ -4,7 +4,7 @@ Mithu follows the first line of `VERSION.md`. Dates are the day the release is t
 
 ## 0.1.9
 
-The Servo edition keeps the window thread off the engine. Script for each site runs in its own content process. Layout, network, and image work use a pool sized to the machine. Pages are stored in a small disk cache, background tabs are frozen, and the release build is optimized and stripped. See `docs/PROCESS.md`.
+The Servo edition keeps the window thread off the engine. Script for each site runs in a content process, blank and internal pages stay in-process, and site processes stop at four. The chrome font book skips faces larger than 1 MB so a blank window stays under the previous idle RAM. Layout, network, and image work use a pool sized to the machine. Pages are stored in a small disk cache, background tabs are frozen, and the release build is optimized and stripped. See `docs/PROCESS.md`.
 
 ## 0.1.8
 

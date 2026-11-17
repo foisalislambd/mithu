@@ -151,6 +151,7 @@ fn hold(seconds: u64, url: &str, tabs: usize) {
     }
     let _ = browser.render(1280.0, 800.0);
     println!("loaded_ms {}", started.elapsed().as_millis());
+    eprintln!("hold {}", browser.hold_status());
     std::thread::sleep(Duration::from_secs(seconds));
 }
 
