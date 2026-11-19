@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/foisalislambd/mithu/releases"><img alt="Release" src="https://img.shields.io/github/v/release/foisalislambd/mithu?label=release"></a>
   <a href="https://github.com/foisalislambd/mithu/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/foisalislambd/mithu/ci.yml?branch=main&amp;label=CI"></a>
-  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <a href="LICENSE"><img alt="License: BSD-3-Clause" src="https://img.shields.io/badge/license-BSD--3--Clause-blue"></a>
   <a href="https://github.com/foisalislambd/mithu/releases"><img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey"></a>
   <a href="VERSION.md"><img alt="Version 0.1.9" src="https://img.shields.io/badge/version-0.1.9-2ea44f"></a>
 </p>
@@ -251,6 +251,8 @@ The interface stays in English. Workspace crates forbid `unsafe` code, except `c
 
 ## License
 
-[MIT](LICENSE). Copyright 2026 Mithu contributors.
+Mithu's own code is licensed under the [BSD 3-Clause License](LICENSE). Copyright (c) 2026 Foisal Islam.
 
-`third_party/servo` is [Servo](https://github.com/servo/servo), MPL-2.0. Chromium layout metrics, color tokens, filled Material icon paths, and the Roboto webfonts are BSD-licensed; the notice is [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Mithu does not include another browser's logo. The bird photographs and the logo are the maintainer's.
+The "Mithu" name and logo are not licensed under the BSD-3-Clause (or any other software license). You may not use them to endorse or promote a derived product without permission.
+
+`third_party/servo` is [Servo](https://github.com/servo/servo) and remains under MPL-2.0. Other third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). A build that links the Lintel, Reed, Tercel, or Gable engines is subject to those engines' AGPL-3.0 terms unless a commercial license is obtained.
