@@ -17,7 +17,7 @@ Mithu ships two page engines today: Servo (`app/mithu`, through `crates/shell`) 
 
 ### 1. Page host (one per tab)
 
-Servo: `crates/shell/src/lib.rs`, `struct Tab { webview: servo::WebView, context: Rc<SoftwareRenderingContext>, .. }`.
+Servo: `crates/shell/src/lib.rs`, `struct Tab { webview: servo::WebView, context: Rc<dyn RenderingContext>, .. }`. Every tab in a window shares one context: an offscreen framebuffer of the window GL context when compositing, otherwise one OSMesa `SoftwareRenderingContext`.
 Lite: `app/mithu-lite/src/main.rs`, `struct Tab { id, webview: wry::WebView }`.
 
 A replacement engine provides, per tab:
@@ -31,16 +31,16 @@ A replacement engine provides, per tab:
 | Load state, URL, title, favicon | `load_status`, `url`, `page_title`, `favicon` | `on_page_load_handler`, title handler |
 | Input: pointer, wheel, keys, IME | `notify_input_event`, `notify_scroll_event` | handled by the OS webview |
 | "A new frame is ready" | `WebViewDelegate::notify_new_frame_ready` | n/a (the OS composites) |
-| Read the frame | `RenderingContext::read_to_image` | n/a |
+| Present the frame | `OffscreenRenderingContext::render_to_parent_callback` blits into the window; `read_to_image` is the software and screenshot fallback | the OS composites |
 | Drop the page (discard) | drop the `WebView` | drop the `wry::WebView` |
 
 ### 2. Event-loop wake
 
-The engine must wake the UI loop when it has work instead of being polled. Servo does this through `EventLoopWaker` (`ServoWake` in `crates/shell`), which pokes `EngineWake`; the engine thread (`app/mithu/src/engine.rs`) sleeps on it. Lite's WebKitGTK sources are glib sources, and `run_with_glib` blocks in one glib poll that also watches winit's fd. A new engine either exposes an fd/glib source or calls a waker; it should never require a fixed-rate poll.
+The engine must wake the UI loop when it has work instead of being polled. Servo does this through `EventLoopWaker` (`ServoWake` in `crates/shell`), which pokes `EngineWake`. The winit thread runs Servo: the GL context is thread-affine, so the page and the window have to be painted on the same thread. `EngineWake` posts a winit user event when Servo has work. Lite's WebKitGTK sources are glib sources, and `run_with_glib` blocks in one glib poll that also watches winit's fd. A new engine either exposes an fd/glib source or calls a waker; it should never require a fixed-rate poll.
 
 ### 3. Frame hand-off
 
-The engine thread publishes `engine::Frame { pixels: Arc<Vec<u32>>, width, height, title, seq }`. The window thread copies it into the `softbuffer` surface only when `seq` changed. Any engine that can produce a `0RGB` buffer for the content rectangle fits; a GPU engine (for example one built on `wgpu`) would replace this seam with a shared texture.
+Headed Servo presents on the GPU. `crates/shell/src/present.rs` blits the page framebuffer into the content rectangle and draws the browser frame from `crates/composite` (one RGBA texture, uploaded only when the chrome changed). The software fallback and `--screenshot` still go through `Browser::render`, which returns a `0RGB` buffer for the whole window and, on the fallback, copies it into `softbuffer` only when `content_revision` changed. A replacement engine can satisfy the same seam with its own surface: implement the present path, and keep `Browser::render` for the headless tools. The chrome pixels stay engine-agnostic (`crates/ui`).
 
 ### 4. Network, storage, JavaScript
 

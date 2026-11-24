@@ -1,9 +1,15 @@
 //! Servo page inside the shared Mithu frame.
 //!
 //! The page (DOM, style, layout, script, network) is Servo. The tab strip,
-//! toolbar, bookmarks, and address bar are painted by `mithu-ui`, then this
-//! crate copies Servo's software framebuffer into the content rectangle.
+//! toolbar, bookmarks, and address bar are painted by `mithu-ui`. When the
+//! window has a GL context, Servo paints into an offscreen framebuffer and
+//! that frame is composited under the chrome on the GPU. Otherwise this crate
+//! copies Servo's software framebuffer into the content rectangle.
 //! No product logo is drawn.
+
+mod present;
+
+pub use present::Compositor;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -57,11 +63,13 @@ struct Delegate {
     shot: Rc<RefCell<Option<servo::RgbaImage>>>,
     saves: Rc<RefCell<Vec<String>>>,
     permissions: Rc<RefCell<Vec<PendingPermission>>>,
+    /// One rendering context shared by every tab, when the window has one.
+    shared: Rc<RefCell<Option<Rc<dyn RenderingContext>>>>,
 }
 
 struct PendingTab {
     webview: WebView,
-    context: Rc<SoftwareRenderingContext>,
+    context: Rc<dyn RenderingContext>,
 }
 
 impl WebViewDelegate for Delegate {
@@ -76,10 +84,13 @@ impl WebViewDelegate for Delegate {
 
     fn request_create_new(&self, _parent: WebView, request: servo::CreateNewWebViewRequest) {
         let size = PhysicalSize::new(800, 600);
-        let Ok(context) = SoftwareRenderingContext::new(size) else {
+        let Some(context) = self.shared.borrow().clone().or_else(|| {
+            SoftwareRenderingContext::new(size)
+                .ok()
+                .map(|context| Rc::new(context) as Rc<dyn RenderingContext>)
+        }) else {
             return;
         };
-        let context = Rc::new(context);
         let dyn_ctx: Rc<dyn RenderingContext> = context.clone();
         let delegate: Rc<dyn WebViewDelegate> = Rc::new(self.clone());
         let webview = request.builder(dyn_ctx).delegate(delegate).build();
@@ -125,7 +136,7 @@ impl WebViewDelegate for Delegate {
 
 struct Tab {
     webview: WebView,
-    context: Rc<SoftwareRenderingContext>,
+    context: Rc<dyn RenderingContext>,
     title: String,
     url: String,
     status: LoadStatus,
@@ -148,6 +159,8 @@ struct Tab {
 pub struct EngineWake {
     pending: Mutex<bool>,
     cv: Condvar,
+    /// Wakes the winit loop. Set by the window thread; screenshot mode leaves it empty.
+    notifier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl EngineWake {
@@ -155,13 +168,25 @@ impl EngineWake {
         Arc::new(Self {
             pending: Mutex::new(false),
             cv: Condvar::new(),
+            notifier: Mutex::new(None),
         })
+    }
+
+    pub fn set_notifier(&self, notifier: impl Fn() + Send + Sync + 'static) {
+        *self.notifier.lock().expect("engine wake") = Some(Arc::new(notifier));
     }
 
     pub fn poke(&self) {
         let mut pending = self.pending.lock().expect("engine wake");
+        let fresh = !*pending;
         *pending = true;
         self.cv.notify_one();
+        drop(pending);
+        if fresh {
+            if let Some(notifier) = self.notifier.lock().expect("engine wake").clone() {
+                notifier();
+            }
+        }
     }
 
     /// Wait until [`Self::poke`] or `limit` elapses.
@@ -326,6 +351,24 @@ pub struct Browser {
     scroller: mithu_ui::scroll::ScrollAnimator,
     /// System memory pressure (Chromium's 5 s evaluator).
     memory: mithu_ui::memory::Monitor,
+    /// Window GL compositor. Absent in screenshot mode and when no GL context
+    /// could be created; those paths read the software framebuffer back.
+    compositor: Option<Compositor>,
+    /// One software context shared by every tab on the readback path.
+    software: Option<Rc<SoftwareRenderingContext>>,
+    /// Chrome pixels changed since the last GPU present.
+    chrome_dirty: bool,
+    /// Page frames since launch. Added into [`Self::content_revision`] so a
+    /// new page frame still wakes the software window.
+    frame_seq: u64,
+    /// Backs off painting when sampled scanlines stop changing.
+    stable_level: u32,
+    last_hash: Option<u64>,
+    interacted: Instant,
+    chrome_pixels: Vec<u32>,
+    chrome_rgba: Vec<u8>,
+    chrome_upload: bool,
+    composited_once: bool,
 }
 
 impl Browser {
@@ -337,6 +380,26 @@ impl Browser {
     }
 
     pub fn try_new() -> Result<Self, String> {
+        Self::build(None)
+    }
+
+    /// Headed window. `compositor` paints Servo straight into the window GL
+    /// surface. `None` keeps the software readback path (also used when the
+    /// caller passes a compositor that should be ignored).
+    pub fn try_new_composited(compositor: Option<Compositor>) -> Result<Self, String> {
+        let size = compositor.as_ref().map(Compositor::size);
+        let mut browser = Self::build(compositor)?;
+        if let Some((width, height)) = size {
+            browser.resize(width as f32, height as f32);
+        }
+        Ok(browser)
+    }
+
+    pub fn uses_compositor(&self) -> bool {
+        self.compositor.is_some()
+    }
+
+    fn build(compositor: Option<Compositor>) -> Result<Self, String> {
         install_crypto();
         let frame = Rc::new(AtomicBool::new(false));
         let painted = Rc::new(AtomicBool::new(false));
@@ -349,6 +412,7 @@ impl Browser {
             ready: Rc::new(RefCell::new(Vec::new())),
             saves: Rc::new(RefCell::new(Vec::new())),
             permissions: Rc::new(RefCell::new(Vec::new())),
+            shared: Rc::new(RefCell::new(None)),
         };
         let config = mithu_config_dir();
         let _ = std::fs::create_dir_all(&config);
@@ -452,6 +516,17 @@ impl Browser {
             paint_pending: false,
             last_paint: Instant::now(),
             memory: mithu_ui::memory::Monitor::new(),
+            compositor,
+            software: None,
+            chrome_dirty: true,
+            frame_seq: 0,
+            stable_level: 0,
+            last_hash: None,
+            interacted: Instant::now(),
+            chrome_pixels: Vec::new(),
+            chrome_rgba: Vec::new(),
+            chrome_upload: true,
+            composited_once: false,
         };
         browser.open_tab(start_url())?;
         browser.apply_prefs();
@@ -471,7 +546,7 @@ impl Browser {
     }
 
     pub fn content_revision(&self) -> u64 {
-        self.revision
+        self.revision.wrapping_add(self.frame_seq)
     }
 
     pub fn status_line(&self) -> String {
@@ -535,7 +610,16 @@ impl Browser {
     pub fn resize(&mut self, width: f32, height: f32) {
         self.viewport_w = width.max(1.0);
         self.viewport_h = height.max(1.0);
+        if let Some(compositor) = &self.compositor {
+            let window = PhysicalSize::new(
+                self.viewport_w.round() as u32,
+                self.viewport_h.round() as u32,
+            );
+            compositor.resize(window, self.content_physical());
+        }
         self.resize_active();
+        self.page_dirty = true;
+        self.bump();
     }
 
     pub fn set_scale(&mut self, scale: f32) {
@@ -566,6 +650,8 @@ impl Browser {
         self.overlay = None;
         self.frame.store(false, Ordering::SeqCst);
         self.painted.store(false, Ordering::SeqCst);
+        self.page_dirty = true;
+        self.note_interaction();
         self.pending_url = Some(url.to_string());
         self.wait_for_context();
         self.tabs[self.active].webview.load(url.clone());
@@ -1193,6 +1279,7 @@ impl Browser {
         if self.omnibox_focused || self.find_focused {
             return;
         }
+        self.note_interaction();
         if self.overlay.is_some() {
             return;
         }
@@ -1296,9 +1383,59 @@ impl Browser {
         pixels
     }
 
+    /// Present the page framebuffer and the chrome texture. Returns false when
+    /// there is no GL compositor or nothing has changed.
+    pub fn composite(&mut self) -> bool {
+        if self.compositor.is_none() {
+            return false;
+        }
+        if self.composited_once && !self.page_dirty && !self.chrome_dirty {
+            return false;
+        }
+        let width = self.viewport_w.round().max(1.0) as u32;
+        let height = self.viewport_h.round().max(1.0) as u32;
+        let count = (width as usize) * (height as usize);
+        if self.chrome_dirty || self.chrome_pixels.len() != count {
+            let mut pixels = vec![0u32; count];
+            if self.overlay.is_some() {
+                self.draw_overlay(&mut pixels, width, height);
+            }
+            self.draw_chrome(&mut pixels, width, height);
+            self.chrome_pixels = pixels;
+            self.chrome_rgba = mithu_composite::chrome_rgba(&self.chrome_pixels);
+            self.chrome_upload = true;
+        }
+        let top = self.content_top().round().max(0.0) as i32;
+        let blit_page = self.overlay.is_none()
+            && self
+                .tabs
+                .get(self.active)
+                .is_some_and(|tab| tab.has_frame && tab.discarded.is_none());
+        let upload = self.chrome_upload;
+        let mut compositor = self.compositor.take().expect("compositor");
+        compositor.present(&self.chrome_rgba, width, height, top, blit_page, upload);
+        self.compositor = Some(compositor);
+        self.page_dirty = false;
+        self.chrome_dirty = false;
+        self.chrome_upload = false;
+        self.composited_once = true;
+        true
+    }
+
+    fn page_context(&mut self) -> Result<Rc<dyn RenderingContext>, String> {
+        if let Some(compositor) = &self.compositor {
+            return Ok(compositor.page_context());
+        }
+        if self.software.is_none() {
+            self.software = Some(Rc::new(software_context(self.content_physical())?));
+        }
+        let context = self.software.clone().expect("software context");
+        Ok(context)
+    }
+
     fn open_tab(&mut self, url: Url) -> Result<(), String> {
-        let size = self.content_physical();
-        let context = Rc::new(software_context(size)?);
+        let context = self.page_context()?;
+        *self.delegate.shared.borrow_mut() = Some(context.clone());
         let _ = context.make_current();
         let dyn_ctx: Rc<dyn RenderingContext> = context.clone();
         let delegate: Rc<dyn WebViewDelegate> = Rc::new(self.delegate.clone());
@@ -1419,10 +1556,9 @@ impl Browser {
         if !url.scheme().starts_with("http") {
             return;
         }
-        let Ok(context) = software_context(PhysicalSize::new(64, 64)) else {
+        let Ok(context) = self.page_context() else {
             return;
         };
-        let context = Rc::new(context);
         let dyn_ctx: Rc<dyn RenderingContext> = context.clone();
         let delegate: Rc<dyn WebViewDelegate> = Rc::new(self.delegate.clone());
         // An about:blank webview stays on the in-process event loop, so the
@@ -1482,9 +1618,10 @@ impl Browser {
     /// Paint the focused tab if it has a new frame and a frame interval has
     /// passed since the last paint. Servo was producing ~120 frames a second
     /// on an idle Wikipedia page and every one was rasterised; now at most 60
-    /// are.
+    /// are, and fewer when the sampled scanlines stop changing or a load is
+    /// still parsing.
     fn paint_due_frame(&mut self) {
-        if !self.paint_pending || self.last_paint.elapsed() < Self::FRAME_INTERVAL {
+        if !self.paint_pending || self.last_paint.elapsed() < self.current_paint_interval() {
             return;
         }
         let Some(tab) = self.tabs.get(self.active) else {
@@ -1502,13 +1639,84 @@ impl Browser {
         self.last_paint = Instant::now();
         self.paint_pending = false;
         self.page_dirty = true;
-        self.bump();
+        self.frame_seq = self.frame_seq.wrapping_add(1);
+        let interacting = self.interacted.elapsed() < Duration::from_millis(400);
+        if interacting {
+            self.stable_level = 0;
+        } else if let Some(hash) = self.sample_hash() {
+            if self.last_hash == Some(hash) {
+                self.stable_level = self.stable_level.saturating_add(1).min(8);
+            } else {
+                self.stable_level = 0;
+            }
+            self.last_hash = Some(hash);
+        }
     }
 
     /// Time until a pending frame may be painted.
     pub fn paint_due(&self) -> Option<Duration> {
         self.paint_pending
-            .then(|| Self::FRAME_INTERVAL.saturating_sub(self.last_paint.elapsed()))
+            .then(|| self.current_paint_interval().saturating_sub(self.last_paint.elapsed()))
+    }
+
+    /// Deadline for the window thread's next wake.
+    pub fn next_wake(&self) -> Duration {
+        let busy = !self.load_settled()
+            || self.animation_frames_pending()
+            || self.paint_pending
+            || self.stable_level > 0;
+        let mut limit = if busy {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(1000)
+        };
+        if let Some(due) = self.scroll_frame_due() {
+            limit = limit.min(due);
+        }
+        if let Some(due) = self.paint_due() {
+            limit = limit.min(due);
+        }
+        limit.max(Duration::from_millis(1))
+    }
+
+    fn current_paint_interval(&self) -> Duration {
+        let loading = self.tabs.get(self.active).is_some_and(|tab| {
+            matches!(tab.status, LoadStatus::Started | LoadStatus::HeadParsed)
+        });
+        let interacting = self.interacted.elapsed() < Duration::from_millis(400);
+        mithu_composite::paint_interval(loading, self.stable_level, interacting)
+    }
+
+    fn note_interaction(&mut self) {
+        self.interacted = Instant::now();
+        self.stable_level = 0;
+    }
+
+    /// Hash a few full-width scanlines. A page that keeps asking for frames
+    /// but is not actually changing pixels backs off instead of rasterising
+    /// at 60 Hz.
+    fn sample_hash(&self) -> Option<u64> {
+        let tab = self.tabs.get(self.active)?;
+        let size = tab.context.size();
+        let width = size.width as i32;
+        let height = size.height as i32;
+        if width < 2 || height < 8 {
+            return None;
+        }
+        let _ = tab.context.make_current();
+        let mut hash = 0xcbf29ce484222325u64;
+        for frac in [1, 3, 5, 7] {
+            let y = (height * frac / 8).clamp(0, height - 1);
+            let rect = servo::DeviceIntRect::from_origin_and_size(
+                servo::DeviceIntPoint::new(0, y),
+                servo::DeviceIntSize::new(width, 1),
+            );
+            let image = tab.context.read_to_image(rect)?;
+            for byte in image.as_raw().iter().step_by(16) {
+                hash = hash.wrapping_mul(0x100000001b3).wrapping_add(*byte as u64);
+            }
+        }
+        Some(hash)
     }
 
     /// Use Servo's screenshot path (waits for images, fonts, and the load
@@ -1628,6 +1836,8 @@ impl Browser {
         self.omnibox_focused = false;
         let url = write_page(&document);
         self.pending_url = Some(url.to_string());
+        self.page_dirty = true;
+        self.note_interaction();
         if let Some(tab) = self.tabs.get(self.active) {
             tab.webview.load(url);
         }
@@ -1726,6 +1936,7 @@ impl Browser {
     }
 
     fn wheel(&mut self, dx: f64, dy: f64) {
+        self.note_interaction();
         if self.overlay.is_some() {
             return;
         }
@@ -2161,6 +2372,7 @@ impl Browser {
 
     fn bump(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+        self.chrome_dirty = true;
     }
 
     fn capture_page(&mut self) -> Option<servo::RgbaImage> {
@@ -2178,7 +2390,7 @@ impl Browser {
                 done_cb.set(true);
             });
         let started = Instant::now();
-        while !done.get() && started.elapsed() < Duration::from_secs(8) {
+        while !done.get() && started.elapsed() < Duration::from_secs(3) {
             self.spin();
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -2186,16 +2398,43 @@ impl Browser {
     }
 
     fn blit_page(&mut self, pixels: &mut [u32], width: u32) {
+        let internal = self.tabs.get(self.active).is_some_and(|tab| {
+            let url = tab.url.as_str();
+            url.starts_with("mithu:") || url.starts_with("about:") || url.starts_with("file:")
+        });
         let switched = std::mem::take(&mut self.switch_capture)
             && self.tabs.get(self.active).is_some_and(|tab| {
                 tab.discarded.is_none()
                     && tab.webview.load_status() == LoadStatus::Complete
             });
-        if self.exact_capture || switched {
+        // `take_screenshot` waits until every web font has loaded. Internal
+        // pages embed those fonts, and the wait can expire with no image,
+        // which used to leave the content rectangle blank.
+        if (self.exact_capture || switched) && !internal {
             if let Some(image) = self.capture_page() {
-                self.store_page(&image);
+                if !mithu_composite::rgba_is_blank(image.as_raw()) {
+                    self.store_page(&image);
+                }
             }
-        } else {
+        }
+        let cached = self.tabs.get(self.active).is_some_and(|tab| {
+            self.page_cache_id == Some(tab.webview.id()) && !self.page_dirty && !self.page_cache.is_empty()
+        });
+        if !cached {
+            self.refresh_page_cache();
+        }
+        let still_missing = self.tabs.get(self.active).is_some_and(|tab| {
+            self.page_cache_id != Some(tab.webview.id()) || self.page_cache.is_empty()
+        });
+        if still_missing {
+            if let Some(tab) = self.tabs.get(self.active) {
+                let _ = tab.context.make_current();
+                tab.webview.paint();
+            }
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.has_frame = true;
+            }
+            self.page_dirty = true;
             self.refresh_page_cache();
         }
         let Some(tab) = self.tabs.get(self.active) else {

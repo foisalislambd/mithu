@@ -11,9 +11,12 @@ description = "Mithu window frame around a Servo webview"
 [dependencies]
 dpi = "0.1"
 euclid = "0.22"
+glow = "0.17"
+mithu-composite = { path = "../composite" }
 mithu-host = { path = "../host" }
 mithu-text = { path = "../text" }
 mithu-ui = { path = "../ui" }
+raw-window-handle = "0.6"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit", "multiprocess"] }
 url = "2"

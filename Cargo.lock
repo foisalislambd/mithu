@@ -3856,6 +3856,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mithu-composite"
+version = "0.2.1"
+dependencies = [
+ "glow",
+]
+
+[[package]]
 name = "mithu-host"
 version = "0.2.1"
 
@@ -3885,9 +3892,12 @@ version = "0.2.1"
 dependencies = [
  "dpi",
  "euclid",
+ "glow",
+ "mithu-composite",
  "mithu-host",
  "mithu-text",
  "mithu-ui",
+ "raw-window-handle",
  "rustls",
  "servo",
  "url",
