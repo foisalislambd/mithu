@@ -114,7 +114,7 @@ Raw data: [`perf-data/after-vs-chromium.json`](perf-data/after-vs-chromium.json)
 | Servo before | 1999 | 11 | 0.1 | 37 |
 | Servo after | 637 | 8 | 0.0 | 0 |
 
-The Servo-after run hit the harness's 90 s "all tabs loaded" timeout: under forced critical pressure, tabs were discarded while others were still loading, so not every tab reported a load. Discarding works as designed (nine background tabs dropped, PSS down by two thirds), but the harness's load figure is not meaningful for that run.
+The Servo-after run hit the harness's 90 s "all tabs loaded" timeout: under forced critical pressure, tabs were discarded while others were still loading, so not every tab reported a load. Discarding still did its job: Lite ended with only the active tab's processes (3), and both editions' PSS fell by about two thirds, but the harness's load figure is not meaningful for that run.
 
 ### Summary
 
