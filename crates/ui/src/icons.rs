@@ -1,8 +1,9 @@
-//! Toolbar icons rasterized with resvg.
+//! Frame icons rasterized with resvg.
 //!
-//! The SVGs in `icons/` are filled Material paths. See THIRD_PARTY_NOTICES.md.
-//! Each glyph is drawn at twice the destination size and box-filtered back
-//! down so the 2px stroke stays crisp on a 1x framebuffer.
+//! The SVGs in `icons/chromium/` are converted one-to-one from Chromium's
+//! `.icon` vector sources (BSD-3-Clause; see `icons/NOTICE`). They are drawn
+//! on Chromium's 16 or 20 DIP grid, so they are rasterized straight at the
+//! destination size, as Skia does, which keeps the strokes pixel-aligned.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -32,6 +33,21 @@ pub enum Kind {
     History,
     Settings,
     Globe,
+    /// Tab close glyph (16 DIP grid).
+    CloseTab,
+    /// Tab search caret at the leading edge of the tab strip.
+    TabSearch,
+    /// Signed-out avatar.
+    Avatar,
+    /// Page-info "tune" glyph shown for HTTPS pages.
+    PageInfo,
+    /// Warning triangle for "Not secure".
+    NotSecure,
+    /// Info glyph for local and internal pages.
+    Info,
+    Folder,
+    NewTabPage,
+    Restore,
 }
 
 pub fn blit(
@@ -91,57 +107,15 @@ fn paint_svg(svg: &str, color: u32, size: u32) -> Vec<u8> {
     let tree = Tree::from_str(&svg, &usvg::Options::default()).unwrap_or_else(|_| {
         Tree::from_str(Kind::Close.source(), &usvg::Options::default()).expect("close icon")
     });
-    let scale = (size as f32 * 2.0) / tree.size().width().max(1.0);
-    let big = size.saturating_mul(2).max(2);
-    let mut pixmap = Pixmap::new(big, big).unwrap_or_else(|| Pixmap::new(2, 2).expect("pixmap"));
+    let size = size.max(1);
+    let scale = size as f32 / tree.size().width().max(1.0);
+    let mut pixmap = Pixmap::new(size, size).unwrap_or_else(|| Pixmap::new(1, 1).expect("pixmap"));
     resvg::render(
         &tree,
         tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
-    downsample(pixmap.data(), big, size)
-}
-
-fn downsample(src: &[u8], src_size: u32, dst_size: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (dst_size * dst_size * 4) as usize];
-    if src_size == 0 || dst_size == 0 {
-        return out;
-    }
-    for row in 0..dst_size {
-        for col in 0..dst_size {
-            let x0 = col * src_size / dst_size;
-            let x1 = ((col + 1) * src_size / dst_size).max(x0 + 1).min(src_size);
-            let y0 = row * src_size / dst_size;
-            let y1 = ((row + 1) * src_size / dst_size).max(y0 + 1).min(src_size);
-            let mut red = 0u32;
-            let mut green = 0u32;
-            let mut blue = 0u32;
-            let mut alpha = 0u32;
-            let mut count = 0u32;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let index = ((y * src_size + x) * 4) as usize;
-                    if index + 3 >= src.len() {
-                        continue;
-                    }
-                    red += src[index] as u32;
-                    green += src[index + 1] as u32;
-                    blue += src[index + 2] as u32;
-                    alpha += src[index + 3] as u32;
-                    count += 1;
-                }
-            }
-            if count == 0 {
-                continue;
-            }
-            let index = ((row * dst_size + col) * 4) as usize;
-            out[index] = (red / count) as u8;
-            out[index + 1] = (green / count) as u8;
-            out[index + 2] = (blue / count) as u8;
-            out[index + 3] = (alpha / count) as u8;
-        }
-    }
-    out
+    pixmap.data().to_vec()
 }
 
 fn blend(pixels: &mut [u32], width: u32, height: u32, x: i32, y: i32, color: u32, alpha: u8) {
@@ -165,25 +139,34 @@ fn blend(pixels: &mut [u32], width: u32, height: u32, x: i32, y: i32, color: u32
 impl Kind {
     fn source(self) -> &'static str {
         match self {
-            Kind::Back => include_str!("../icons/arrow-left.svg"),
-            Kind::Forward => include_str!("../icons/arrow-right.svg"),
-            Kind::Reload => include_str!("../icons/rotate-cw.svg"),
-            Kind::Stop => include_str!("../icons/x.svg"),
-            Kind::Home => include_str!("../icons/house.svg"),
-            Kind::Lock => include_str!("../icons/lock.svg"),
-            Kind::Star => include_str!("../icons/star.svg"),
-            Kind::StarFilled => include_str!("../icons/star-filled.svg"),
-            Kind::Extensions => include_str!("../icons/puzzle.svg"),
-            Kind::Menu => include_str!("../icons/ellipsis-vertical.svg"),
-            Kind::Plus => include_str!("../icons/plus.svg"),
-            Kind::Search => include_str!("../icons/search.svg"),
-            Kind::Minimize => include_str!("../icons/minus.svg"),
-            Kind::Maximize => include_str!("../icons/square.svg"),
-            Kind::Close => include_str!("../icons/x.svg"),
-            Kind::Download => include_str!("../icons/download.svg"),
-            Kind::History => include_str!("../icons/history.svg"),
-            Kind::Settings => include_str!("../icons/settings.svg"),
-            Kind::Globe => include_str!("../icons/globe.svg"),
+            Kind::Back => include_str!("../icons/chromium/back_arrow_20.svg"),
+            Kind::Forward => include_str!("../icons/chromium/forward_arrow_20.svg"),
+            Kind::Reload => include_str!("../icons/chromium/reload_20.svg"),
+            Kind::Stop => include_str!("../icons/chromium/navigate_stop_20.svg"),
+            Kind::Home => include_str!("../icons/chromium/navigate_home_20.svg"),
+            Kind::Lock => include_str!("../icons/chromium/lock_24.svg"),
+            Kind::Star => include_str!("../icons/chromium/star_20.svg"),
+            Kind::StarFilled => include_str!("../icons/chromium/star_active_20.svg"),
+            Kind::Extensions => include_str!("../icons/chromium/extension_20.svg"),
+            Kind::Menu => include_str!("../icons/chromium/browser_tools_20.svg"),
+            Kind::Plus => include_str!("../icons/chromium/add_16.svg"),
+            Kind::Search => include_str!("../icons/chromium/search_20.svg"),
+            Kind::Minimize => include_str!("../icons/window/minimize.svg"),
+            Kind::Maximize => include_str!("../icons/window/maximize.svg"),
+            Kind::Restore => include_str!("../icons/window/restore.svg"),
+            Kind::Close => include_str!("../icons/window/close.svg"),
+            Kind::Download => include_str!("../icons/chromium/file_download_20.svg"),
+            Kind::History => include_str!("../icons/chromium/history_20.svg"),
+            Kind::Settings => include_str!("../icons/chromium/settings_20.svg"),
+            Kind::Globe => include_str!("../icons/chromium/globe_16.svg"),
+            Kind::CloseTab => include_str!("../icons/chromium/close_tab_16.svg"),
+            Kind::TabSearch => include_str!("../icons/chromium/keyboard_arrow_down_20.svg"),
+            Kind::Avatar => include_str!("../icons/chromium/user_account_avatar_20.svg"),
+            Kind::PageInfo => include_str!("../icons/chromium/secure_page_info_16.svg"),
+            Kind::NotSecure => include_str!("../icons/chromium/not_secure_warning_16.svg"),
+            Kind::Info => include_str!("../icons/chromium/http_16.svg"),
+            Kind::Folder => include_str!("../icons/chromium/folder_20.svg"),
+            Kind::NewTabPage => include_str!("../icons/chromium/new_tab_16.svg"),
         }
     }
 }

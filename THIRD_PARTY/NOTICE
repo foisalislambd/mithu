@@ -11,11 +11,10 @@ Mozilla Public License, Version 2.0
 https://mozilla.org/MPL/2.0/
 
 crates/ui/icons
-  Lucide icons from lucide-static 0.544.0
-  https://github.com/lucide-icons/lucide
-  ISC License, with portions derived from Feather (MIT).
-  The full text is in THIRD_PARTY/lucide-LICENSE.
-  SVGs are stored in the repo and rasterized at draw time.
+  Chromium vector icons, copied from the Chromium source tree and converted
+  to SVG with tools/icon2svg.py. Copyright The Chromium Authors.
+  BSD 3-Clause License (full text in THIRD_PARTY_NOTICES.md).
+  Window caption glyphs in crates/ui/icons/window are Mithu's own.
   No Google or Chrome logos or product marks are included.
 
 crates/text/fonts/NotoSansBengali-Regular.ttf

@@ -1,5 +1,7 @@
 # Chromium source tree (cloned locally; do not commit)
 chromium/
+# Chromium vector icons used by the frame are part of the repo.
+!crates/ui/icons/chromium/
 
 # Rust build output
 target/
