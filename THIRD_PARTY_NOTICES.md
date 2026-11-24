@@ -1,9 +1,9 @@
 # Third-party notices
 
-Mithu's own code is licensed under the BSD 3-Clause License. See [LICENSE](LICENSE).
+Mithu's own code is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
 Copyright (c) 2026 Foisal Islam.
 
-The "Mithu" name and logo are not licensed under BSD-3-Clause or any other
+The "Mithu" name and logo are not licensed under Apache-2.0 or any other
 software license.
 
 ## Servo
