@@ -600,16 +600,38 @@ fn logo_src() -> String {
     }
 }
 
-/// Tab favicon for an internal page. Like Chrome, each page uses its own
-/// Material icon; only the version page carries the product mark.
-fn page_icon(title: &str) -> String {
-    let svg: &str = match title {
+/// SVG for an internal page's own icon. The New Tab page has none.
+fn page_svg(title: &str) -> Option<&'static str> {
+    Some(match title {
         "Settings" => include_str!("../icons/chromium/settings_20.svg"),
         "History" => include_str!("../icons/chromium/history_20.svg"),
         "Downloads" => include_str!("../icons/chromium/file_download_20.svg"),
         "Bookmarks" => include_str!("../icons/chromium/star_20.svg"),
         "Extensions" => include_str!("../icons/chromium/extension_20.svg"),
-        _ => return icon_src(),
+        _ => return None,
+    })
+}
+
+/// Straight RGBA for the tab strip. Internal pages use the same icon the
+/// document advertises; the New Tab page stays empty.
+pub fn favicon_rgba(title: &str) -> Option<(u32, u32, Vec<u8>)> {
+    if title.is_empty() || title == "New Tab" {
+        return None;
+    }
+    Some(match page_svg(title) {
+        Some(svg) => crate::icons::raster_svg(svg, 0x0B57_D0, 32),
+        None => {
+            let mark = crate::brand::mark();
+            (mark.width, mark.height, mark.rgba.clone())
+        }
+    })
+}
+
+/// Tab favicon for an internal page. Each page uses its own icon; the
+/// version page and the other unmarked pages carry the product mark.
+fn page_icon(title: &str) -> String {
+    let Some(svg) = page_svg(title) else {
+        return icon_src();
     };
     if file_assets() {
         return icon_src();
@@ -1746,6 +1768,12 @@ mod tests {
         assert_eq!(permission_for(&stored, "other.test", "camera"), "block");
         assert!(is_download_url("https://example.com/files/mithu.zip"));
         assert!(!is_download_url("https://example.com/watch"));
+        let downloads = favicon_rgba("Downloads").expect("downloads icon");
+        let history = favicon_rgba("History").expect("history icon");
+        assert_eq!(downloads.0, 32);
+        assert_ne!(downloads.2, history.2);
+        assert!(downloads.2.iter().any(|byte| *byte != 0));
+        assert!(favicon_rgba("New Tab").is_none());
     }
 
     #[test]
