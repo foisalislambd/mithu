@@ -103,10 +103,28 @@ fn run_with_glib(mut event_loop: EventLoop<()>, app: &mut App) {
     use gtk::glib;
     use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 
+    GLIB_OWNS_LOOP.store(true, std::sync::atomic::Ordering::Relaxed);
     let context = glib::MainContext::default();
     let fd = event_loop.as_raw_fd();
-    let _watch = glib::source::unix_fd_add_local(fd, glib::IOCondition::IN, |_, _| glib::ControlFlow::Continue);
+    let hits = Rc::new(Cell::new(0u64));
+    let _watch = glib::source::unix_fd_add_local(fd, glib::IOCondition::IN, {
+        let hits = hits.clone();
+        move |_, _| {
+            hits.set(hits.get() + 1);
+            glib::ControlFlow::Continue
+        }
+    });
+    let debug = std::env::var_os("MITHU_PUMP_DEBUG").is_some();
+    let mut spins = 0u64;
+    let mut mark = Instant::now();
     loop {
+        spins += 1;
+        if debug && mark.elapsed() >= Duration::from_secs(1) {
+            eprintln!("pump: {spins} iterations, {} winit fd wakes", hits.get());
+            spins = 0;
+            hits.set(0);
+            mark = Instant::now();
+        }
         if let PumpStatus::Exit(_) = event_loop.pump_app_events(Some(Duration::ZERO), app) {
             return;
         }
@@ -143,7 +161,15 @@ fn init_gtk() {
     }
 }
 
+/// Set while [`run_with_glib`] owns the loop. GTK is then drained by the
+/// outer glib iteration; `gtk::events_pending()` would also count winit's fd
+/// watch, which stays readable until winit runs, and never return false.
+static GLIB_OWNS_LOOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn pump_host() {
+    if GLIB_OWNS_LOOP.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     #[cfg(any(
         target_os = "linux",
         target_os = "dragonfly",

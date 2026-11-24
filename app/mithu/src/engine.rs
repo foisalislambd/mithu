@@ -183,6 +183,9 @@ fn engine_loop(
         if let Some(due) = session.browser.scroll_frame_due() {
             limit = limit.min(due);
         }
+        if let Some(due) = session.browser.paint_due() {
+            limit = limit.min(due);
+        }
         wake.wait(limit);
         wake.take();
         while let Ok(job) = rx.try_recv() {

@@ -66,7 +66,10 @@ struct PendingTab {
 
 impl WebViewDelegate for Delegate {
     fn notify_new_frame_ready(&self, webview: WebView) {
-        webview.paint();
+        // Do not paint here. `Browser::paint_due_frame` paints the focused
+        // tab at most once per 60 Hz interval and never paints hidden tabs,
+        // the way Chromium's cc scheduler only draws on a BeginFrame and
+        // stops BeginFrames for occluded/hidden surfaces.
         self.ready.borrow_mut().push(webview.id());
         self.painted.store(true, Ordering::SeqCst);
     }
@@ -307,6 +310,9 @@ pub struct Browser {
     /// `--screenshot` waits for Servo's screenshot readiness (images, fonts,
     /// load event). The interactive window never does.
     exact_capture: bool,
+    /// The focused tab has a new frame that has not been painted yet.
+    paint_pending: bool,
+    last_paint: Instant,
     /// Animated wheel scrolling (Chromium's ease-in-out scroll curve).
     scroller: mithu_ui::scroll::ScrollAnimator,
     /// System memory pressure (Chromium's 5 s evaluator).
@@ -433,6 +439,8 @@ impl Browser {
             page_dirty: true,
             exact_capture: false,
             scroller: mithu_ui::scroll::ScrollAnimator::new(),
+            paint_pending: false,
+            last_paint: Instant::now(),
             memory: mithu_ui::memory::Monitor::new(),
         };
         browser.open_tab(start_url())?;
@@ -1348,6 +1356,7 @@ impl Browser {
         self.sync_active();
         self.sync_visibility();
         self.drain_ready_frames();
+        self.paint_due_frame();
         self.relieve_memory_pressure();
         if self.frame.swap(false, Ordering::SeqCst) {
             self.bump();
@@ -1450,9 +1459,42 @@ impl Browser {
             }
         }
         if active.is_some_and(|active| ready.contains(&active)) {
-            self.page_dirty = true;
-            self.bump();
+            self.paint_pending = true;
         }
+    }
+
+    /// One frame interval at 60 Hz. Mithu has no vsync signal (it presents
+    /// through softbuffer), so this is Chromium's
+    /// `viz::DelayBasedBeginFrameSource` fallback: a timer at the display
+    /// rate.
+    const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+
+    /// Paint the focused tab if it has a new frame and a frame interval has
+    /// passed since the last paint. Servo was producing ~120 frames a second
+    /// on an idle Wikipedia page and every one was rasterised; now at most 60
+    /// are.
+    fn paint_due_frame(&mut self) {
+        if !self.paint_pending || self.last_paint.elapsed() < Self::FRAME_INTERVAL {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let _ = tab.context.make_current();
+        tab.webview.paint();
+        if mithu_host::bench_enabled() {
+            mithu_host::bench_count_frames(1);
+        }
+        self.last_paint = Instant::now();
+        self.paint_pending = false;
+        self.page_dirty = true;
+        self.bump();
+    }
+
+    /// Time until a pending frame may be painted.
+    pub fn paint_due(&self) -> Option<Duration> {
+        self.paint_pending
+            .then(|| Self::FRAME_INTERVAL.saturating_sub(self.last_paint.elapsed()))
     }
 
     /// Use Servo's screenshot path (waits for images, fonts, and the load
@@ -2812,6 +2854,11 @@ impl Browser {
         self.visibility_stamp = Some(stamp);
         self.scroller.cancel();
         self.restore_discarded_active();
+        // Hidden tabs were not painted; draw the newly focused one now.
+        if self.tabs.get(self.active).is_some_and(|tab| tab.has_frame) {
+            self.paint_pending = true;
+            self.last_paint = Instant::now() - Self::FRAME_INTERVAL;
+        }
         let active = self.active;
         for (index, tab) in self.tabs.iter().enumerate() {
             if index == active {
