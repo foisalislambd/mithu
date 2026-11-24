@@ -238,3 +238,40 @@ mod tests {
         assert!(console_needs_attach(true, 0));
     }
 }
+
+/// `MITHU_BENCH=1` turns on the benchmark lines read by `tools/bench`.
+pub fn bench_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MITHU_BENCH").is_some())
+}
+
+/// Print `bench loaded <unix ms> <url>` when a tab first finishes loading.
+/// The harness compares that wall-clock time with the moment it spawned the
+/// process, the same clock it reads from Chromium's `loadEventEnd`.
+pub fn bench_report_loaded(url: &str) {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "bench loaded {ms} {url}");
+    let _ = out.flush();
+}
+
+/// Count frames the engine painted and print `bench frames <n>` once a
+/// second (only with `MITHU_BENCH`), so the harness can read a frame rate.
+pub fn bench_count_frames(count: usize) {
+    use std::sync::Mutex;
+    static STATE: Mutex<Option<(std::time::Instant, usize)>> = Mutex::new(None);
+    let mut state = STATE.lock().unwrap_or_else(|poison| poison.into_inner());
+    let now = std::time::Instant::now();
+    let (start, total) = state.get_or_insert((now, 0));
+    *total += count;
+    if now.duration_since(*start) >= std::time::Duration::from_secs(1) {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "bench frames {total}");
+        let _ = out.flush();
+        *start = now;
+        *total = 0;
+    }
+}

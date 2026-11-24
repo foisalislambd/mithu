@@ -94,14 +94,25 @@ fn run() {
             }
             return;
         }
+        let rest: Vec<String> = std::iter::once(first).chain(args).collect();
+        let size = rest
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--window-size=").and_then(parse_size));
+        let urls: Vec<String> = rest.into_iter().filter(|arg| !arg.starts_with("--")).collect();
         let event_loop = event_loop();
         let engine = Engine::spawn(event_loop.create_proxy());
-        let url = first.clone();
+        // Each positional URL opens in its own tab, as Chrome's command line does.
         engine.post(move |session| {
-            session.browser.navigate(&url);
+            for (index, url) in urls.iter().enumerate() {
+                if index > 0 {
+                    session.browser.new_tab();
+                }
+                session.browser.navigate(url);
+            }
             Vec::new()
         });
         let mut app = App::new(engine);
+        app.size = size;
         if let Err(error) = event_loop.run_app(&mut app) {
             report_fatal(&format!("could not run the window: {error}"));
         }
@@ -155,6 +166,11 @@ fn hold(seconds: u64, url: &str, tabs: usize) {
     std::thread::sleep(Duration::from_secs(seconds));
 }
 
+fn parse_size(value: &str) -> Option<(f32, f32)> {
+    let (width, height) = value.split_once([',', 'x'])?;
+    Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+}
+
 fn event_loop() -> EventLoop<()> {
     let mut builder = EventLoop::builder();
     #[cfg(target_os = "linux")]
@@ -170,6 +186,7 @@ fn event_loop() -> EventLoop<()> {
 
 fn dump_screenshot(path: &str, url: Option<&str>) -> Result<(), String> {
     let mut browser = Browser::new();
+    browser.set_exact_capture(true);
     if let Some(url) = url {
         // Parser-blocking work stays inside navigate. The rest of the scripts
         // run here, sharing one 15 second budget with timers, so a page with
@@ -264,6 +281,11 @@ struct App {
     context: Option<softbuffer::Context<Arc<Window>>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     cursor: (f32, f32),
+    /// `--window-size=W,H`, in logical pixels.
+    size: Option<(f32, f32)>,
+    /// Sequence number of the frame on screen.
+    presented: u64,
+    title: String,
 }
 
 impl App {
@@ -274,6 +296,9 @@ impl App {
             context: None,
             surface: None,
             cursor: (0.0, 0.0),
+            size: None,
+            presented: 0,
+            title: String::new(),
         }
     }
 
@@ -283,7 +308,11 @@ impl App {
         }
     }
 
-    fn sync_title(&self, title: &str) {
+    fn sync_title(&mut self, title: &str) {
+        if self.title == title {
+            return;
+        }
+        self.title = title.to_string();
         if let Some(window) = &self.window {
             let private = if std::env::var_os("MITHU_PRIVATE").is_some() { "Private — " } else { "" };
             let title = if title.is_empty() {
@@ -316,17 +345,21 @@ impl App {
         }
         let px_w = width.get();
         let px_h = height.get();
-        let (frame, frame_w, frame_h, title) = self.engine.frame();
-        if frame_w != px_w || frame_h != px_h || frame.len() != (px_w as usize) * (px_h as usize) {
+        let frame = self.engine.frame();
+        if frame.width != px_w
+            || frame.height != px_h
+            || frame.pixels.len() != (px_w as usize) * (px_h as usize)
+        {
             return;
         }
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
-        let count = buffer.len().min(frame.len());
-        buffer[..count].copy_from_slice(&frame[..count]);
+        let count = buffer.len().min(frame.pixels.len());
+        buffer[..count].copy_from_slice(&frame.pixels[..count]);
         let _ = buffer.present();
-        self.sync_title(&title);
+        self.presented = frame.seq;
+        self.sync_title(&frame.title);
     }
 
     fn apply(&mut self, event_loop: &ActiveEventLoop, actions: Vec<UiAction>) {
@@ -362,7 +395,10 @@ impl ApplicationHandler for App {
             .with_title(format!("Mithu {}", env!("MITHU_VERSION")))
             .with_window_icon(app_icon())
             .with_decorations(false)
-            .with_inner_size(LogicalSize::new(1200.0, 800.0));
+            .with_inner_size({
+                let (width, height) = self.size.unwrap_or((1200.0, 800.0));
+                LogicalSize::new(width, height)
+            });
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => report_fatal(&format!("could not open a window: {error}")),
@@ -407,15 +443,19 @@ impl ApplicationHandler for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
         let actions = self.engine.take_actions();
         self.apply(event_loop, actions);
-        self.request_redraw();
+        // Only a new frame needs the window repainted; an action-only wake
+        // (drag, minimize) does not.
+        if self.engine.frame_seq() != self.presented {
+            self.request_redraw();
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let actions = self.engine.take_actions();
         self.apply(event_loop, actions);
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(32),
-        ));
+        // The engine thread wakes this loop through the proxy whenever a
+        // frame or a window action is ready, so there is nothing to poll.
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
 
@@ -475,11 +515,11 @@ fn on_window(session: &mut Session, event: WindowEvent, cursor: (f32, f32)) -> V
             }
         }
         WindowEvent::MouseWheel { delta, .. } => {
-            let dy = match delta {
-                MouseScrollDelta::LineDelta(_, y) => -y * 64.0,
-                MouseScrollDelta::PixelDelta(position) => -position.y as f32,
-            };
-            session.browser.scroll_by(dy);
+            match delta {
+                // Wheel notches are animated; touchpad pixels already are.
+                MouseScrollDelta::LineDelta(_, y) => session.browser.scroll_animated(-y * 64.0),
+                MouseScrollDelta::PixelDelta(position) => session.browser.scroll_by(-position.y as f32),
+            }
             Vec::new()
         }
         WindowEvent::Ime(Ime::Commit(text)) => {

@@ -19,8 +19,11 @@ pub enum UiAction {
     Drag,
 }
 
+/// The last finished frame. The window thread takes an `Arc` to it instead
+/// of copying 4 bytes per pixel under the lock, the same hand-off Chromium's
+/// viz uses between the compositor and the display.
 pub struct Shared {
-    pub pixels: Vec<u32>,
+    pub pixels: Arc<Vec<u32>>,
     pub width: u32,
     pub height: u32,
     pub title: String,
@@ -51,7 +54,7 @@ impl Session {
         let pixels = self.browser.render(width, height);
         let title = self.browser.title();
         let mut shared = self.shared.lock().expect("frame");
-        shared.pixels = pixels;
+        shared.pixels = Arc::new(pixels);
         shared.width = width.round() as u32;
         shared.height = height.round() as u32;
         shared.title = title;
@@ -60,6 +63,14 @@ impl Session {
         drop(shared);
         let _ = self.proxy.send_event(());
     }
+}
+
+pub struct Frame {
+    pub pixels: Arc<Vec<u32>>,
+    pub width: u32,
+    pub height: u32,
+    pub title: String,
+    pub seq: u64,
 }
 
 type Job = Box<dyn FnOnce(&mut Session) + Send>;
@@ -76,7 +87,7 @@ impl Engine {
         let (tx, rx) = mpsc::channel::<Job>();
         let wake = EngineWake::new();
         let shared = Arc::new(Mutex::new(Shared {
-            pixels: Vec::new(),
+            pixels: Arc::new(Vec::new()),
             width: 0,
             height: 0,
             title: String::new(),
@@ -118,14 +129,19 @@ impl Engine {
         std::mem::take(&mut *self.actions.lock().expect("actions"))
     }
 
-    pub fn frame(&self) -> (Vec<u32>, u32, u32, String) {
+    pub fn frame(&self) -> Frame {
         let shared = self.shared.lock().expect("frame");
-        (
-            shared.pixels.clone(),
-            shared.width,
-            shared.height,
-            shared.title.clone(),
-        )
+        Frame {
+            pixels: shared.pixels.clone(),
+            width: shared.width,
+            height: shared.height,
+            title: shared.title.clone(),
+            seq: shared.seq,
+        }
+    }
+
+    pub fn frame_seq(&self) -> u64 {
+        self.shared.lock().expect("frame").seq
     }
 }
 
@@ -153,16 +169,29 @@ fn engine_loop(
     session.browser.resize(session.width, session.height);
     session.publish();
     loop {
+        // Servo pokes `wake` through its EventLoopWaker whenever the
+        // constellation, a content process, or the refresh driver has work,
+        // so the timeout is only a safety net. Chromium's browser UI thread
+        // likewise sleeps in its message pump until a task is posted instead
+        // of polling. (Before: an 8 ms poll during loads and animations.)
         let idle = session.browser.load_settled() && !session.browser.animation_frames_pending();
-        wake.wait(if idle {
-            Duration::from_millis(200)
+        let mut limit = if idle {
+            Duration::from_millis(1000)
         } else {
-            Duration::from_millis(8)
-        });
+            Duration::from_millis(50)
+        };
+        if let Some(due) = session.browser.scroll_frame_due() {
+            limit = limit.min(due);
+        }
+        if let Some(due) = session.browser.paint_due() {
+            limit = limit.min(due);
+        }
+        wake.wait(limit);
         wake.take();
         while let Ok(job) = rx.try_recv() {
             job(&mut session);
         }
+        session.browser.tick_scroll();
         session.browser.spin_once();
         session.publish();
     }

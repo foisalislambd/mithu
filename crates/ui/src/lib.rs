@@ -10,8 +10,10 @@ pub mod brand;
 pub mod chrome;
 pub mod clipboard;
 pub mod icons;
+pub mod memory;
 pub mod menus;
 pub mod pages;
+pub mod scroll;
 
 /// Top of the toolbar: kTabStripHeight (41) minus kTabstripToolbarOverlap (1).
 pub const TAB_H: f32 = 40.0;
