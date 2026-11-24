@@ -57,6 +57,7 @@ fn main() {
         Scene { name: "light-loading", loading: true, ..base },
         Scene { name: "light-2x", scale: 2.0, ..base },
         Scene { name: "light-nobookmarks", bookmarks: false, ..base },
+        Scene { name: "dark-newtab-page", dark: true, omnibox: "", secure: Secure::Internal, ntp: true, ..base },
         Scene { name: "light-menu-newtab", omnibox: "", secure: Secure::Internal, menu: true, ntp: true, ..base },
         Scene { name: "light-group-permission", omnibox: "https://example.com/notes", ntp: false, group: true, ..base },
     ];
