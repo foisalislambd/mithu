@@ -4,7 +4,15 @@ Mithu follows the first line of `VERSION.md`. Dates are the day the release is t
 
 ## Unreleased
 
+## 0.2.0
+
 The browser frame is redrawn to match Chromium's desktop UI. Tab strip, toolbar, omnibox, bookmarks bar, menus, and bubbles use Chromium's layout metrics (40 DIP tab strip, 46 DIP toolbar, 34 DIP pill omnibox, 256 DIP tabs with an 18 DIP overlap) and its light and dark color tokens, so the dark theme now darkens the whole frame. Shapes are anti-aliased with tiny-skia, icons are Chromium's vector icons converted to SVG (`tools/icon2svg.py`), and text gets a contrast curve so it stays crisp. Tabs show the site favicon or the default globe, the New Tab page has no favicon, the profile button is a generic avatar, and the Mithu mark stays only on the window icon, the New Tab page, the About page, and the omnibox chip for internal pages. A throbber replaces the load bar.
+
+Dependencies are refreshed: wry 0.57.3, png 0.18.1 (with the `output_buffer_size` change), url 2.5.9 and other semver-compatible lockfile bumps, `actions/setup-java` v6, `actions/checkout` v7, and `gradle/actions/setup-gradle` v6 with the MIT `cache-provider: basic`.
+
+Painting follows a Chromium-style backend. The Servo edition reads the last painted frame instead of taking a screenshot every frame, paces paints at 60 Hz, holds the previous pixels on a tab switch, and does not paint hidden tabs. Lite uses a single glib poll for GTK and the winit fd. Wheel scrolling uses an inverse-delta smooth curve. Under memory pressure, least-recently-used background tabs are discarded. `tools/bench` compares Mithu with Chromium. See `docs/PERF.md`.
+
+The project license is Apache-2.0. Servo stays MPL-2.0.
 
 ## 0.1.9
 

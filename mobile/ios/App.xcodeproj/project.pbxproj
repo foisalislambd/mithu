@@ -1,5 +1,5 @@
 // Version keys only. This is not a buildable Xcode project.
 // MARKETING_VERSION and CURRENT_PROJECT_VERSION stay in lockstep with VERSION.md.
-MARKETING_VERSION = 0.1.9;
-CURRENT_PROJECT_VERSION = 1009;
+MARKETING_VERSION = 0.2.0;
+CURRENT_PROJECT_VERSION = 2000;
 PRODUCT_BUNDLE_IDENTIFIER = org.mithu.lite;
