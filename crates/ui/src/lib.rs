@@ -1,7 +1,7 @@
 //! Desktop frame shared by the Servo build and Mithu Lite.
 //!
 //! The tab strip, toolbar, omnibox, bookmarks bar, status bubble, and new-tab
-//! page are painted here. Lucide icons are rasterized in [`icons`]. Neither
+//! page are painted here. Chromium vector icons are rasterized in [`icons`]. Neither
 //! build draws a Google or Chrome mark.
 
 use url::Url;
@@ -13,22 +13,25 @@ pub mod icons;
 pub mod menus;
 pub mod pages;
 
-pub const TAB_H: f32 = 41.0;
-pub const TOOLBAR_H: f32 = 48.0;
+/// Top of the toolbar: kTabStripHeight (41) minus kTabstripToolbarOverlap (1).
+pub const TAB_H: f32 = 40.0;
+/// kToolbarButtonHeight (34) + TOOLBAR_INTERIOR_MARGIN (6) above and below.
+pub const TOOLBAR_H: f32 = 46.0;
+/// kBookmarkBarButtonHeight (28) + 6.
 pub const BOOKMARK_BAR_H: f32 = 34.0;
 pub const CAPTION_W: f32 = 46.0;
 pub const BTN: f32 = 34.0;
 
 pub const TAB_STRIP: u32 = rgb(211, 227, 253);
 pub const TOOLBAR: u32 = rgb(255, 255, 255);
-pub const ICON: u32 = rgb(31, 31, 31);
+pub const ICON: u32 = rgb(71, 71, 71);
 pub const ICON_OFF: u32 = rgb(143, 143, 143);
-pub const OMNIBOX: u32 = rgb(239, 237, 237);
+pub const OMNIBOX: u32 = rgb(237, 242, 250);
 pub const ADDRESS: u32 = rgb(255, 255, 255);
 pub const ADDRESS_BORDER: u32 = rgb(199, 199, 199);
 pub const ADDRESS_FOCUS: u32 = rgb(11, 87, 208);
 pub const INK: u32 = rgb(31, 31, 31);
-pub const MUTED: u32 = rgb(94, 94, 94);
+pub const MUTED: u32 = rgb(71, 71, 71);
 pub const HOVER: u32 = rgb(168, 199, 250);
 pub const PLUS: u32 = rgb(236, 243, 254);
 pub const STAR: u32 = rgb(242, 180, 0);
@@ -65,6 +68,15 @@ fn search_engine() -> String {
 
 thread_local! {
     static SEARCH_ENGINE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Display name of the address-bar search engine, for the omnibox placeholder.
+pub fn search_engine_label() -> &'static str {
+    match search_engine().as_str() {
+        "bing" => "Bing",
+        "wikipedia" => "Wikipedia",
+        _ => "DuckDuckGo",
+    }
 }
 
 /// Address-bar search used by both editions. Empty or unknown keeps DuckDuckGo.

@@ -2,6 +2,10 @@
 
 Mithu follows the first line of `VERSION.md`. Dates are the day the release is tagged.
 
+## Unreleased
+
+The browser frame is redrawn to match Chromium's desktop UI. Tab strip, toolbar, omnibox, bookmarks bar, menus, and bubbles use Chromium's layout metrics (40 DIP tab strip, 46 DIP toolbar, 34 DIP pill omnibox, 256 DIP tabs with an 18 DIP overlap) and its light and dark color tokens, so the dark theme now darkens the whole frame. Shapes are anti-aliased with tiny-skia, icons are Chromium's vector icons converted to SVG (`tools/icon2svg.py`), and text gets a contrast curve so it stays crisp. Tabs show the site favicon or the default globe, the New Tab page has no favicon, the profile button is a generic avatar, and the Mithu mark stays only on the window icon, the New Tab page, the About page, and the omnibox chip for internal pages. A throbber replaces the load bar.
+
 ## 0.1.9
 
 The Servo edition keeps the window thread off the engine. Script for each site runs in a content process, blank and internal pages stay in-process, and site processes stop at four. The chrome font book skips faces larger than 1 MB so a blank window stays under the previous idle RAM. Shutting down that in-process script thread on Windows no longer panics the constellation. Layout, network, and image work use a pool sized to the machine. Pages are stored in a small disk cache, background tabs are frozen, and the release build is optimized and stripped. See `docs/PROCESS.md`.

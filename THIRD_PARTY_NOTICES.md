@@ -15,14 +15,21 @@ A short notice is also in [THIRD_PARTY/NOTICE](THIRD_PARTY/NOTICE).
 
 ## Chromium
 
-Selected layout metrics, color tokens, filled Material icon paths under
-`crates/ui/icons/`, and the Roboto webfonts under
-`assets/fonts/roboto/` come from the Chromium project
-(`ui/webui/resources/cr_elements/cr_shared_vars.css`,
-`ui/webui/resources/cr_elements/cr_nav_menu_item_style_lit.css`,
+The browser frame in `crates/ui/src/chrome.rs` reproduces Chromium's desktop
+UI. Layout metrics, tab geometry, and color tokens were taken from the
+Chromium sources (`chrome/browser/ui/layout_constants.cc`,
+`chrome/browser/ui/tabs/tab_style.cc`,
+`chrome/browser/ui/views/tabs/tab_style_views.cc`,
+`chrome/browser/ui/views/toolbar/toolbar_view.cc`,
+`chrome/browser/ui/views/location_bar/`, `chrome/browser/ui/color/`,
 `ui/color/ref_color_mixer.cc`, `ui/color/sys_color_mixer.cc`, and
-`ui/webui/resources/roboto/`). Additional Chromium vector icons are noted in
-`crates/ui/icons/NOTICE`.
+`ui/views/layout/layout_provider.cc`). The vector icons under
+`crates/ui/icons/chromium/` are copied from Chromium's `.icon` sources and
+converted to SVG with `tools/icon2svg.py`; see `crates/ui/icons/NOTICE`.
+Settings-page metrics and the Roboto webfonts under `assets/fonts/roboto/`
+also come from Chromium (`ui/webui/resources/cr_elements/` and
+`ui/webui/resources/roboto/`). No Google or Chrome logos, names, or product
+marks are included; the product mark is Mithu's own.
 
 The following is the license from Chromium's `LICENSE` file
 (https://chromium.googlesource.com/chromium/src/+/refs/heads/main/LICENSE).
@@ -62,8 +69,6 @@ product UI. The window mark is Mithu's.
 
 Other bundled assets and dependencies keep their own licenses, including:
 
-- Lucide icons (`THIRD_PARTY/lucide-LICENSE`): ISC, with portions derived
-  from Feather (MIT).
 - Noto Sans Bengali (`crates/text/fonts/OFL.txt`): SIL Open Font License 1.1.
 - Rust crate dependencies declared in `Cargo.toml` / `Cargo.lock`, under
   each crate's own license.

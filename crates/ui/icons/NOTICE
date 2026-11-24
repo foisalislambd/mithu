@@ -1,18 +1,27 @@
-Chromium vector icons
-======================
+Icons
+=====
 
-The `.icon` files in this directory (except `maximize.icon`) are copied from the
-Chromium source tree:
+chromium/
+---------
 
-- `components/vector_icons/`
-- `chrome/app/vector_icons/`
+The `.icon` files in `chromium/` are copied unchanged from the Chromium source
+tree (`components/vector_icons/`, `chrome/app/vector_icons/`,
+`ui/views/vector_icons/`). The `.svg` files beside them are 1:1 conversions
+made with `tools/icon2svg.py`: same canvas size, same path commands, color
+replaced by `currentColor`.
 
 Copyright 2012-2026 The Chromium Authors. Use of this source code is governed
 by a BSD-style license that can be found at
 https://chromium.googlesource.com/chromium/src/+/main/LICENSE (BSD 3-Clause).
+The full license text is also in THIRD_PARTY_NOTICES.md.
 
-They are stored as the original path text and rasterized by `src/icons.rs`.
-No Google or Chrome logos, wordmarks, or product images are included.
+Only generic Material/UI glyphs are included (arrows, reload, home, star,
+puzzle piece, three-dot menu, globe, lock, person avatar, and similar). No
+Google or Chrome logos, wordmarks, product icons, or the dinosaur are
+included.
 
-`maximize.icon` is a geometric window glyph written for Mithu. It is not a
-Chromium asset.
+window/
+-------
+
+`minimize.svg`, `maximize.svg`, `restore.svg`, and `close.svg` are thin
+geometric caption glyphs written for Mithu and are under the same license as Mithu (Apache-2.0).

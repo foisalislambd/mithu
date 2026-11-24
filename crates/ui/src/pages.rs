@@ -600,6 +600,24 @@ fn logo_src() -> String {
     }
 }
 
+/// Tab favicon for an internal page. Like Chrome, each page uses its own
+/// Material icon; only the version page carries the product mark.
+fn page_icon(title: &str) -> String {
+    let svg: &str = match title {
+        "Settings" => include_str!("../icons/chromium/settings_20.svg"),
+        "History" => include_str!("../icons/chromium/history_20.svg"),
+        "Downloads" => include_str!("../icons/chromium/file_download_20.svg"),
+        "Bookmarks" => include_str!("../icons/chromium/star_20.svg"),
+        "Extensions" => include_str!("../icons/chromium/extension_20.svg"),
+        _ => return icon_src(),
+    };
+    if file_assets() {
+        return icon_src();
+    }
+    let svg = svg.replace("currentColor", "#0B57D0");
+    format!("data:image/svg+xml;base64,{}", b64(svg.as_bytes()))
+}
+
 fn icon_src() -> String {
     if file_assets() {
         "mark.png".into()
@@ -616,7 +634,7 @@ fn shell(title: &str, prefs: &Prefs, version: &str, body: &str) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} — Mithu</title>
+<title>{title}</title>
 <link rel="icon" href="{icon}">
 <style>
 {fonts}
@@ -724,6 +742,7 @@ html[data-theme="dark"] .htime {{ color:#9aa0a6; }}
 .aboutbox {{ text-align:center; padding:32px 0 8px; }}
 .aboutbox .logo {{ margin-bottom:12px; }}
 .sub {{ color:var(--muted); font-size:13px; margin:4px 0 16px; }}
+.app.ntp .searchrow {{ display:none; }}
 </style>
 </head>
 <body>
@@ -769,9 +788,14 @@ function go(op, params, back) {{
         theme = theme,
         font = prefs.font_px.clamp(12, 24),
         title = esc(title),
-        icon = icon_src(),
+        icon = page_icon(title),
         mark = mark_src(),
-        layout = if matches!(title, "Downloads" | "New Tab" | "Tasks") { "solo" } else { "" },
+        layout = match title {
+            // Chrome's New Tab page has no page header, only the logo and search.
+            "New Tab" => "solo ntp",
+            "Downloads" | "Tasks" => "solo",
+            _ => "",
+        },
         page_title = page_title(title),
         search_label = search_label(title),
         nav = nav_html(title, body, prefs),
@@ -956,11 +980,12 @@ fn section(keys: &str, title: &str, body: &str, on: bool) -> String {
 
 fn you_card(prefs: &Prefs) -> String {
     format!(
-        "<div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\">{name}<small>Local profile. Not an account.</small></div></div>
+        "<div class=\"card\"><div class=\"row\">{avatar}<div class=\"grow\">{name}<small>Local profile. Not an account.</small></div></div>
 <div class=\"row\"><div class=\"grow\">Customize profile</div><button class=\"btn quiet\" onclick=\"go('set', {{key:'name', value: prompt('Profile name', '{name}') || '{name}'}}, 'mithu://settings/you')\">Edit</button></div>
 <div class=\"row\"><div class=\"grow\">Import bookmarks</div><a href=\"mithu://bookmarks\">Open</a></div></div>",
         name = esc(&prefs.name),
-        mark = mark_src(),
+        // A generic person avatar, as Chrome shows for a profile without a photo.
+        avatar = include_str!("../icons/chromium/user_account_avatar_20.svg").replacen("<svg ", "<svg class=\"markimg\" aria-hidden=\"true\" ", 1),
     )
 }
 
