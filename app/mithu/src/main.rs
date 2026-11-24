@@ -5,11 +5,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mithu_shell::{Browser, FrameHit, KeyKind};
+use mithu_shell::{Browser, EngineWake, FrameHit, KeyKind, bind_engine_wake};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -33,7 +33,7 @@ fn app_icon() -> Option<winit::window::Icon> {
 
 mod engine;
 
-use engine::{Engine, Session, UiAction};
+use engine::{Session, UiAction};
 
 fn main() {
     mithu_shell::run_content_process_if_requested();
@@ -100,18 +100,8 @@ fn run() {
             .find_map(|arg| arg.strip_prefix("--window-size=").and_then(parse_size));
         let urls: Vec<String> = rest.into_iter().filter(|arg| !arg.starts_with("--")).collect();
         let event_loop = event_loop();
-        let engine = Engine::spawn(event_loop.create_proxy());
-        // Each positional URL opens in its own tab, as Chrome's command line does.
-        engine.post(move |session| {
-            for (index, url) in urls.iter().enumerate() {
-                if index > 0 {
-                    session.browser.new_tab();
-                }
-                session.browser.navigate(url);
-            }
-            Vec::new()
-        });
-        let mut app = App::new(engine);
+        let mut app = App::new(event_loop.create_proxy());
+        app.pending_urls = urls;
         app.size = size;
         if let Err(error) = event_loop.run_app(&mut app) {
             report_fatal(&format!("could not run the window: {error}"));
@@ -121,8 +111,7 @@ fn run() {
         std::process::exit(0);
     }
     let event_loop = event_loop();
-    let engine = Engine::spawn(event_loop.create_proxy());
-    let mut app = App::new(engine);
+    let mut app = App::new(event_loop.create_proxy());
     if let Err(error) = event_loop.run_app(&mut app) {
         report_fatal(&format!("could not run the window: {error}"));
     }
@@ -276,22 +265,27 @@ fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 struct App {
-    engine: Engine,
+    session: Option<Session>,
     window: Option<Arc<Window>>,
     context: Option<softbuffer::Context<Arc<Window>>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     cursor: (f32, f32),
     /// `--window-size=W,H`, in logical pixels.
     size: Option<(f32, f32)>,
-    /// Sequence number of the frame on screen.
+    /// Sequence number of the frame on screen (software readback path).
     presented: u64,
     title: String,
+    pending_urls: Vec<String>,
+    proxy: EventLoopProxy<()>,
+    wake: Option<Arc<EngineWake>>,
+    last_pump: Instant,
+    gpu: bool,
 }
 
 impl App {
-    fn new(engine: Engine) -> Self {
+    fn new(proxy: EventLoopProxy<()>) -> Self {
         Self {
-            engine,
+            session: None,
             window: None,
             context: None,
             surface: None,
@@ -299,12 +293,11 @@ impl App {
             size: None,
             presented: 0,
             title: String::new(),
-        }
-    }
-
-    fn request_redraw(&self) {
-        if let Some(window) = &self.window {
-            window.request_redraw();
+            pending_urls: Vec::new(),
+            proxy,
+            wake: None,
+            last_pump: Instant::now(),
+            gpu: false,
         }
     }
 
@@ -324,42 +317,104 @@ impl App {
         }
     }
 
-    fn redraw(&mut self) {
+    fn redraw_software(&mut self) {
         let Some(window) = self.window.clone() else {
             return;
         };
-        let Some(surface) = self.surface.as_mut() else {
-            return;
-        };
-        let size = window.inner_size();
-        let width = size.width.max(1);
-        let height = size.height.max(1);
-        let Some(width) = std::num::NonZeroU32::new(width) else {
-            return;
-        };
-        let Some(height) = std::num::NonZeroU32::new(height) else {
-            return;
-        };
-        if surface.resize(width, height).is_err() {
+        let revision = self
+            .session
+            .as_ref()
+            .map(|session| session.browser.content_revision())
+            .unwrap_or(0);
+        if revision == self.presented && self.presented != 0 {
             return;
         }
-        let px_w = width.get();
-        let px_h = height.get();
-        let frame = self.engine.frame();
-        if frame.width != px_w
-            || frame.height != px_h
-            || frame.pixels.len() != (px_w as usize) * (px_h as usize)
+        let size = window.inner_size();
+        let Some(width) = std::num::NonZeroU32::new(size.width.max(1)) else {
+            return;
+        };
+        let Some(height) = std::num::NonZeroU32::new(size.height.max(1)) else {
+            return;
+        };
+        if self
+            .surface
+            .as_mut()
+            .is_none_or(|surface| surface.resize(width, height).is_err())
         {
             return;
         }
+        let pixels = {
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            session.browser.render(width.get() as f32, height.get() as f32)
+        };
+        if pixels.len() != (width.get() as usize) * (height.get() as usize) {
+            return;
+        }
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
-        let count = buffer.len().min(frame.pixels.len());
-        buffer[..count].copy_from_slice(&frame.pixels[..count]);
+        let count = buffer.len().min(pixels.len());
+        buffer[..count].copy_from_slice(&pixels[..count]);
         let _ = buffer.present();
-        self.presented = frame.seq;
-        self.sync_title(&frame.title);
+        let (presented, title) = {
+            let Some(session) = self.session.as_ref() else {
+                return;
+            };
+            (session.browser.content_revision(), session.browser.title())
+        };
+        self.presented = presented;
+        self.sync_title(&title);
+    }
+
+    fn pump(&mut self, event_loop: &ActiveEventLoop) {
+        if self.last_pump.elapsed() < Duration::from_millis(4) {
+            if let Some(session) = self.session.as_ref() {
+                let due = session
+                    .browser
+                    .paint_due()
+                    .or_else(|| session.browser.scroll_frame_due())
+                    .unwrap_or(Duration::from_millis(8));
+                if due > Duration::from_millis(2) {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + due));
+                    return;
+                }
+            }
+        }
+        self.last_pump = Instant::now();
+        let wake = self.wake.clone();
+        if let Some(wake) = &wake {
+            wake.take();
+        }
+        let Some(session) = self.session.as_mut() else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+        session.browser.tick_scroll();
+        session.browser.spin_once();
+        if let Some(wake) = &wake {
+            // A wake posted by the spin we just ran is already accounted for.
+            wake.take();
+        }
+        let gpu = session.browser.uses_compositor();
+        let title = if gpu && session.browser.composite() {
+            Some(session.browser.title())
+        } else {
+            None
+        };
+        let wait = session.browser.next_wake();
+        self.gpu = gpu;
+        if let Some(title) = title {
+            self.sync_title(&title);
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wait));
+        if !gpu {
+            self.redraw_software();
+        }
     }
 
     fn apply(&mut self, event_loop: &ActiveEventLoop, actions: Vec<UiAction>) {
@@ -403,60 +458,96 @@ impl ApplicationHandler for App {
             Ok(window) => Arc::new(window),
             Err(error) => report_fatal(&format!("could not open a window: {error}")),
         };
-        let context = match softbuffer::Context::new(window.clone()) {
-            Ok(context) => context,
-            Err(error) => report_fatal(&format!("could not create a framebuffer: {error}")),
-        };
-        let surface = match softbuffer::Surface::new(&context, window.clone()) {
-            Ok(surface) => surface,
-            Err(error) => report_fatal(&format!("could not create a surface: {error}")),
-        };
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        let width = size.width.max(1) as f32;
-        let height = size.height.max(1) as f32;
-        self.engine.post(move |session| {
-            session.width = width;
-            session.height = height;
-            session.browser.set_scale(scale);
-            session.browser.resize(width, height);
-            Vec::new()
+        let width = size.width.max(1);
+        let height = size.height.max(1);
+        let wake = EngineWake::new();
+        let proxy = self.proxy.clone();
+        wake.set_notifier(move || {
+            let _ = proxy.send_event(());
         });
-        self.context = Some(context);
-        self.surface = Some(surface);
+        bind_engine_wake(wake.clone());
+        self.wake = Some(wake);
+        let force_software = std::env::var_os("MITHU_SOFTWARE").is_some();
+        let compositor = if force_software {
+            None
+        } else {
+            match compositor_for(&window) {
+                Ok(compositor) => Some(compositor),
+                Err(error) => {
+                    eprintln!("mithu: no window GL context ({error}); using the software framebuffer");
+                    None
+                }
+            }
+        };
+        let browser = match Browser::try_new_composited(compositor) {
+            Ok(browser) => browser,
+            Err(error) => report_fatal(&error),
+        };
+        let mut session = Session::new(browser, width as f32, height as f32);
+        session.browser.set_scale(scale);
+        session.browser.resize(width as f32, height as f32);
+        let urls = std::mem::take(&mut self.pending_urls);
+        for (index, url) in urls.iter().enumerate() {
+            if index > 0 {
+                session.browser.new_tab();
+            }
+            session.browser.navigate(url);
+        }
+        let gpu = session.browser.uses_compositor();
+        self.session = Some(session);
+        self.gpu = gpu;
+        if !gpu {
+            let context = match softbuffer::Context::new(window.clone()) {
+                Ok(context) => context,
+                Err(error) => report_fatal(&format!("could not create a framebuffer: {error}")),
+            };
+            let surface = match softbuffer::Surface::new(&context, window.clone()) {
+                Ok(surface) => surface,
+                Err(error) => report_fatal(&format!("could not create a surface: {error}")),
+            };
+            self.context = Some(context);
+            self.surface = Some(surface);
+        }
         self.window = Some(window);
-        self.request_redraw();
+        self.pump(event_loop);
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         if let WindowEvent::RedrawRequested = &event {
-            self.redraw();
+            self.pump(event_loop);
             return;
         }
         if let WindowEvent::CursorMoved { position, .. } = &event {
             self.cursor = (position.x as f32, position.y as f32);
         }
         let cursor = self.cursor;
-        self.engine.post(move |session| on_window(session, event, cursor));
+        let actions = {
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            on_window(session, event, cursor)
+        };
+        self.apply(event_loop, actions);
+        self.pump(event_loop);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
-        let actions = self.engine.take_actions();
-        self.apply(event_loop, actions);
-        // Only a new frame needs the window repainted; an action-only wake
-        // (drag, minimize) does not.
-        if self.engine.frame_seq() != self.presented {
-            self.request_redraw();
-        }
+        self.pump(event_loop);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let actions = self.engine.take_actions();
-        self.apply(event_loop, actions);
-        // The engine thread wakes this loop through the proxy whenever a
-        // frame or a window action is ready, so there is nothing to poll.
-        event_loop.set_control_flow(ControlFlow::Wait);
+        self.pump(event_loop);
     }
+}
+
+fn compositor_for(window: &Window) -> Result<mithu_shell::Compositor, String> {
+    use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+    let display = window.display_handle().map_err(|error| error.to_string())?;
+    let handle = window.window_handle().map_err(|error| error.to_string())?;
+    let size = window.inner_size();
+    mithu_shell::Compositor::attach(display, handle, winit::dpi::PhysicalSize::new(size.width.max(1), size.height.max(1)))
 }
 
 fn on_window(session: &mut Session, event: WindowEvent, cursor: (f32, f32)) -> Vec<UiAction> {

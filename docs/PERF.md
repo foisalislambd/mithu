@@ -1,169 +1,163 @@
 # Performance: Mithu vs Chromium
 
-This page records how Mithu's two editions compare with Chromium on one Linux machine, what was changed to close the gap, and what is still worse. Every number below comes from `tools/bench/bench.py`; the raw runs are in [`perf-data/`](perf-data/). Nothing is estimated.
+This page records how Mithu's Servo edition compares with Chromium on one Linux machine, what was changed, and what is still worse. Every number below comes from `tools/bench/bench.py` on this machine. The raw runs are in [`perf-data/gpu-composite-2026-11-24.json`](perf-data/gpu-composite-2026-11-24.json). Nothing is estimated.
+
+An earlier write-up of this page used an 8-CPU host (Chrome 156, Lite included). Those tables are not repeated here: that host is gone, and mixing the two would not be a before/after. The old files stay in [`perf-data/`](perf-data/) as `after-vs-chromium.json`, `baseline-run1.json`, and `tabs10-pressure.json`.
 
 ## Method
 
-- **Machine:** shared Linux box (kernel 6.12), 8 CPUs, 15 GB RAM, no GPU (Mesa llvmpipe software GL). Other jobs ran on the same box, so expect noise of roughly ±20% on CPU numbers.
-- **Browsers:** Google Chrome 156.0.8078.47 as the Chromium reference; Mithu Lite (wry 0.57.3, WebKitGTK 2.54.3); Mithu with Servo (`third_party/servo`, servo 0.8.0). rustc 1.100.0, `--release`.
-- **Before / after:** "before" is main at `bde830f` plus only the benchmark hooks (commit `91fd69b`, rebased), "after" is this branch. Both were built with the same toolchain on the same day.
-- **Display:** each run gets its own Xvfb at 1280x800, a fresh `HOME` and profile, and `--window-size=1280,800`.
-- **Runs:** 3 per browser and scenario, interleaved (Chromium, Lite before, Lite after, Servo before, Servo after, then repeat), so network drift hits all of them. Tables show the median.
-- **Process tree:** every descendant of the launched process plus anything carrying the `MITHU_BENCH_TAG` environment tag. Memory is PSS from `/proc/PID/smaps_rollup` (shared pages split fairly between processes; RSS is in the raw data). CPU is `utime + stime`. Wakeups are voluntary plus involuntary context switches summed over every thread.
-- **Load time:** Chromium: `performance.timing.loadEventEnd`, measured from launch, read over the DevTools protocol. Mithu: the `bench loaded` line printed when `MITHU_BENCH=1` and the tab reaches its load-complete state. Servo's `LoadStatus::Complete` fires earlier relative to the work done than Chromium's load event, so Servo's load times flatter it; treat them as "first complete" rather than an exact match.
-- **Idle:** a 10 s window starting 2 s after load. **Scroll:** the English Wikipedia article on Rust, 40 wheel notches down and 40 up, 50 ms apart (xdotool), CPU over the gesture.
-- **Chromium caveat:** a fresh profile does first-run work (component updates, field trials) that inflates its CPU and memory a little.
+- **Machine:** Linux 6.12, 4 CPUs, 15 GB RAM, no `/dev/dri`. The window GL context is Mesa llvmpipe (LLVM 20.1.2), GL 4.5. Expect noise of roughly ±20% on CPU numbers.
+- **Browsers:** Google Chrome 157.0.8103.50 as the Chromium reference; Mithu Servo before (unmodified `main`, release build saved before this change); Mithu Servo after (this branch). rustc 1.100.0. Lite was not rebuilt: this change does not touch it.
+- **Display:** each run gets its own Xvfb at 1280×800, a fresh `HOME` and profile, and `--window-size=1280,800`. `MITHU_BENCH=1`.
+- **Runs:** 3 per browser and scenario, interleaved, so network drift hits all of them. Tables show the median.
+- **Process tree:** every descendant of the launched process plus anything carrying `MITHU_BENCH_TAG`. Memory is PSS from `/proc/PID/smaps_rollup`. CPU is `utime + stime`. Wakeups are voluntary plus involuntary context switches over every thread.
+- **Load time:** Chromium uses `performance.timing.loadEventEnd` from launch, over the DevTools protocol. Mithu prints `bench loaded` when `LoadStatus::Complete` fires. That fires earlier relative to the work done than Chromium's load event, so Servo's load times flatter it.
+- **Idle:** 10 s starting 2 s after load. **Scroll:** the English Wikipedia article on Rust, 40 wheel notches down and 40 up, 50 ms apart (xdotool). The headed after-build composites on llvmpipe (`mithu: compositing on llvmpipe … (software GL)`). There is no hardware GPU on this box, so "GPU path" here means WebRender presents into the window GL surface with no full-frame `glReadPixels`. `MITHU_SOFTWARE=1` forces the old OSMesa plus softbuffer path.
+- **Chromium caveat:** a fresh profile does first-run work that inflates its CPU and memory a little.
 
 Reproduce with:
 
 ```sh
-python3 tools/bench/bench.py --runs 3 --out after.json \
+python3 tools/bench/bench.py --runs 3 --out gpu.json \
   --browser chromium=/usr/bin/google-chrome \
-  --browser lite=target/release/mithu-lite \
-  --browser servo=target/release/mithu
-python3 tools/bench/table.py after.json
+  --browser servo-before=/path/to/mithu-before \
+  --browser servo-after=target/release/mithu
+python3 tools/bench/table.py gpu.json
 ```
 
-## Results (medians of 3, run 2026-11-24 20:00 UTC+6)
-
-Raw data: [`perf-data/after-vs-chromium.json`](perf-data/after-vs-chromium.json) (the earlier baseline against older main is in `perf-data/baseline-run1.json`).
+## Results (medians of 3, 2026-11-24)
 
 ### Load time (ms, lower is better)
 
-| Scenario | Chromium | Lite before | Lite after | Servo before | Servo after |
-|---|---:|---:|---:|---:|---:|
-| example.com | 1684 | 894 | 742 | 583 | 558 |
-| Wikipedia main page | 2201 | 1524 | 1421 | 563 | 531 |
-| GitHub repo page | 5460 | 4158 | 3279 | 1973 | 3447 |
-| Hacker News | 1675 | 961 | 966 | 657 | 595 |
-| YouTube | 2354 | 2141 | 2099 | 612 | 595 |
-| The Guardian | 1874 | 1056 | 1031 | 553 | 448 |
-| 10 tabs | 5091 | 8801 | 8272 | 4989 | 4102 |
-| Scroll (Rust article) | 1844 | 2012 | 1970 | 563 | 537 |
+| Scenario | Chromium | Servo before | Servo after |
+|---|---:|---:|---:|
+| example.com | 384 | 379 | 369 |
+| Wikipedia main page | 455 | 394 | 398 |
+| GitHub repo page | 1856 | 1010 | 740 |
+| Hacker News | 851 | 639 | 641 |
+| YouTube | 1403 | 420 | 417 |
+| The Guardian | 3290 | 394 | 373 |
+| 10 tabs | 2602 | 4079 | 3882 |
+| Scroll (Rust article) | 559 | 396 | 393 |
 
 ### CPU used while loading (CPU-seconds, whole process tree)
 
-| Scenario | Chromium | Lite before | Lite after | Servo before | Servo after |
-|---|---:|---:|---:|---:|---:|
-| Blank tab | 5.09 | 1.08 | 0.89 | 0.55 | 0.54 |
-| example.com | 2.28 | 1.10 | 0.85 | 0.53 | 0.52 |
-| Wikipedia main page | 3.12 | 2.81 | 1.48 | 0.45 | 0.44 |
-| GitHub repo page | 6.35 | 7.38 | 2.64 | 0.51 | 3.14 |
-| Hacker News | 2.33 | 1.10 | 0.77 | 0.55 | 0.42 |
-| YouTube | 4.57 | 4.65 | 3.12 | 0.61 | 0.42 |
-| The Guardian | 3.40 | 1.82 | 1.25 | 0.49 | 0.56 |
-| 10 tabs | 8.12 | 11.80 | 12.58 | 8.64 | 7.46 |
-| Scroll (Rust article) | 3.04 | 3.75 | 1.83 | 0.46 | 0.45 |
+| Scenario | Chromium | Servo before | Servo after |
+|---|---:|---:|---:|
+| Blank tab | 1.67 | 0.36 | 0.45 |
+| example.com | 0.34 | 0.25 | 0.26 |
+| Wikipedia main page | 0.92 | 0.26 | 0.28 |
+| GitHub repo page | 1.78 | 0.54 | 0.35 |
+| Hacker News | 0.79 | 0.36 | 0.47 |
+| YouTube | 2.17 | 0.43 | 0.45 |
+| The Guardian | 4.66 | 0.26 | 0.28 |
+| 10 tabs | 4.29 | 6.57 | 6.47 |
+| Scroll (Rust article) | 1.05 | 0.26 | 0.25 |
 
 ### Memory after load (PSS MB, whole process tree)
 
-| Scenario | Chromium | Lite before | Lite after | Servo before | Servo after |
-|---|---:|---:|---:|---:|---:|
-| Blank tab | 689 | 448 | 448 | 322 | 319 |
-| example.com | 641 | 477 | 477 | 418 | 426 |
-| Wikipedia main page | 673 | 550 | 550 | 504 | 505 |
-| GitHub repo page | 750 | 674 | 675 | 731 | 740 |
-| Hacker News | 625 | 464 | 464 | 396 | 402 |
-| YouTube | 865 | 889 | 931 | 350 | 353 |
-| The Guardian | 716 | 615 | 619 | 725 | 735 |
-| 10 tabs | 1001 | 1435 | 1432 | 2075 | 1852 |
-| Scroll (Rust article) | 698 | 625 | 647 | 607 | 607 |
+| Scenario | Chromium | Servo before | Servo after |
+|---|---:|---:|---:|
+| Blank tab | 537.0 | 311.0 | 331.5 |
+| example.com | 487.5 | 417.7 | 419.2 |
+| Wikipedia main page | 519.6 | 500.4 | 506.5 |
+| GitHub repo page | 594.9 | 731.9 | 733.5 |
+| Hacker News | 481.9 | 406.3 | 412.5 |
+| YouTube | 725.2 | 358.0 | 364.4 |
+| The Guardian | 1104.6 | 1285.0 | 997.4 |
+| 10 tabs | 914.7 | 2091.7 | 1514.7 |
+| Scroll (Rust article) | 589.2 | 599.1 | 613.9 |
 
 ### Idle CPU after load (% of one core, 10 s window)
 
-| Scenario | Chromium | Lite before | Lite after | Servo before | Servo after |
-|---|---:|---:|---:|---:|---:|
-| Blank tab | 4.9 | 0.5 | 0.1 | 0.5 | 0.1 |
-| example.com | 6.3 | 8.5 | 9.9 | 0.1 | 0.0 |
-| Wikipedia main page | 7.7 | 28.1 | 27.9 | 131.1 | 72.4 |
-| GitHub repo page | 19.0 | 7.7 | 12.9 | 0.5 | 0.0 |
-| Hacker News | 3.6 | 7.7 | 7.6 | 0.1 | 0.0 |
-| YouTube | 5.0 | 20.7 | 20.9 | 0.2 | 0.0 |
-| The Guardian | 3.9 | 121.9 | 32.1 | 18.2 | 14.9 |
-| 10 tabs | 4.4 | 1.1 | 0.5 | 2.8 | 5.5 |
-| Scroll (Rust article) | 8.6 | 17.8 | 21.4 | 206.7 | 150.0 |
+| Scenario | Chromium | Servo before | Servo after |
+|---|---:|---:|---:|
+| Blank tab | 3.89 | 0.0 | 0.1 |
+| example.com | 4.09 | 0.0 | 0.1 |
+| Wikipedia main page | 6.09 | 51.28 | 10.89 |
+| GitHub repo page | 7.89 | 0.1 | 0.1 |
+| Hacker News | 3.3 | 0.0 | 0.1 |
+| YouTube | 9.08 | 0.0 | 0.0 |
+| The Guardian | 38.41 | 183.73 | 58.33 |
+| 10 tabs | 3.69 | 5.69 | 10.58 |
+| Scroll (Rust article) | 6.59 | 133.01 | 20.38 |
 
 ### Idle wakeups (context switches per second, all threads)
 
-| Scenario | Chromium | Lite before | Lite after | Servo before | Servo after |
-|---|---:|---:|---:|---:|---:|
-| Blank tab | 436 | 92 | 26 | 154 | 20 |
-| example.com | 514 | 3150 | 3633 | 36 | 1 |
-| Wikipedia main page | 902 | 7162 | 8755 | 23134 | 10300 |
-| GitHub repo page | 823 | 6616 | 12495 | 61 | 1 |
-| Hacker News | 376 | 3457 | 3423 | 36 | 1 |
-| YouTube | 613 | 6976 | 6898 | 36 | 1 |
-| The Guardian | 512 | 13954 | 12924 | 594 | 314 |
-| 10 tabs | 526 | 151 | 117 | 145 | 177 |
-| Scroll (Rust article) | 928 | 4569 | 5319 | 15052 | 11054 |
+| Scenario | Chromium | Servo before | Servo after |
+|---|---:|---:|---:|
+| Blank tab | 566.6 | 19.9 | 20.0 |
+| example.com | 546.4 | 1.0 | 20.0 |
+| Wikipedia main page | 1080.7 | 6788.9 | 919.5 |
+| GitHub repo page | 1319.6 | 1.0 | 20.0 |
+| Hacker News | 562.7 | 1.0 | 20.0 |
+| YouTube | 1425.8 | 1.0 | 1.0 |
+| The Guardian | 9462.8 | 17418.4 | 3964.4 |
+| 10 tabs | 657.9 | 267.2 | 426.8 |
+| Scroll (Rust article) | 983.4 | 7686.4 | 974.7 |
 
 ### CPU for 80 wheel notches (CPU-seconds)
 
-| Scenario | Chromium | Lite before | Lite after | Servo before | Servo after |
-|---|---:|---:|---:|---:|---:|
-| Scroll (Rust article) | 0.77 | 3.58 | 4.53 | 10.66 | 11.58 |
+| Scenario | Chromium | Servo before | Servo after |
+|---|---:|---:|---:|
+| Scroll (Rust article) | 1.04 | 9.56 | 9.05 |
 
-### Ten tabs under forced critical memory pressure (1 run)
+## Summary
 
-`MITHU_MEMORY_PRESSURE=critical`, 10 tabs, measured 50 s after load (one discard per 5 s sample). "Before" builds ignore the variable, so they show what the same ten tabs cost without discarding. Raw data: [`perf-data/tabs10-pressure.json`](perf-data/tabs10-pressure.json). One run only, so treat it as a functional check of discarding rather than a precise number.
+- **Animated pages.** Wikipedia's idle CPU fell from 51% of a core to 11% (Chromium 6%). Wakeups fell from about 6,800/s to about 920/s (Chromium about 1,100/s). The Guardian fell from 184% to 58% (Chromium 38% on this run). The Rust article, once the scroll gesture is over, fell from 133% to 20% (Chromium 7%). One of the three after-runs on that article idled at 61%; the other two were 20%.
+- **Scrolling.** The gesture itself only moved from 9.56 to 9.05 CPU-seconds (Chromium 1.04). On this machine the GL driver is llvmpipe, so WebRender still rasterizes every scroll frame on the CPU. Dropping the full-frame readback removed a small slice of that, not the raster. A hardware GPU uses the same present path; this box cannot show that saving.
+- **10 tabs.** Settled PSS fell from 2,092 MB to 1,515 MB (Chromium 915 MB). One shared rendering context replaced a context per tab. The content processes are still the bulk, and idle CPU on the ten-tab run rose from 5.7% to 10.6%.
+- **GitHub.** On this machine the after-build loaded faster and used less CPU (median 740 ms and 0.35 CPU-seconds, against 1,010 ms and 0.54 before). The before-runs were 693, 1,010 and 2,503 ms; the after-runs were 690, 740 and 766 ms. The earlier "Servo got slower on GitHub" result was on the 8-CPU host and is not what this host shows. Load CPU while a page is still parsing is capped at 10 paints per second, which is the change aimed at that.
+- **Static pages.** example.com, Hacker News, YouTube and GitHub stay near 0% idle. Wakeups on several of those pages rose from about 1/s to about 20/s because a backed-off paint timer still wakes the UI thread. The CPU cost of that is about 0.1%.
+- **Screenshots.** `mithu://` pages in `--screenshot` used to stay blank: `take_screenshot` waits for web fonts, the embedded fonts never satisfied that wait, and the content rectangle was left empty. Internal pages now paint through the readback path. A headed `mithu://newtab` also composites (logo and text visible).
 
-| Browser | Settled PSS (MB) | Processes after | Idle CPU (%) | Wakeups/s |
-|---|---:|---:|---:|---:|
-| Lite before | 1420 | 12 | 0.7 | 65 |
-| Lite after | 466 | 3 | 0.1 | 3 |
-| Servo before | 1999 | 11 | 0.1 | 37 |
-| Servo after | 637 | 8 | 0.0 | 0 |
+## What this change does
 
-The Servo-after run hit the harness's 90 s "all tabs loaded" timeout: under forced critical pressure, tabs were discarded while others were still loading, so not every tab reported a load. Discarding still did its job: Lite ended with only the active tab's processes (3), and both editions' PSS fell by about two thirds, but the harness's load figure is not meaningful for that run.
+The window thread owns Servo. The GL context cannot be current on two threads, and a `WebView` cannot be moved onto a different `RenderingContext` after it is created, so the window is created first and the page is painted on that thread.
 
-### Summary
-
-- **Idle (the "no jank, low idle CPU" goal):** after the change both editions idle well below Chromium on a blank tab (0.1% vs 4.9%, 20–26 wakeups/s vs 436). Servo on static pages (example.com, Hacker News, YouTube, GitHub) is at 0.0% idle with about 1 wakeup per second; before it woke 36–154 times a second.
-- **Servo on animated pages:** paint pacing cut Wikipedia idle CPU from 131% to 72% and wakeups from 23 k/s to 10 k/s, and The Guardian from 18% to 15%. It is still about 10x Chromium there (see "Still worse").
-- **Lite:** load CPU dropped on every site (for example GitHub 7.4 → 2.6 s, Wikipedia 2.8 → 1.5 s) because the UI no longer repaints the whole window 60 times a second while a page loads. The Guardian's idle CPU dropped from 122% to 32%. Idle on other pages is unchanged; that CPU is inside WebKitGTK's web process.
-- **Memory:** Mithu uses less PSS than Chromium for one page on every site except Servo on GitHub and The Guardian and Lite on YouTube. With ten tabs, both editions use more than Chromium (Chromium 1001 MB, Lite 1432 MB, Servo 1852 MB, down from 2075 MB). Memory-pressure discarding (below) brings that down when the machine is short of memory.
-- **Load time:** Mithu reaches its load-complete state before Chromium's load event on every single-page test. GitHub on Servo varied a lot in this run (after: 1563, 3447 and 4150 ms; before: 1867–2452 ms); two of the three after-runs also used about 3 s of CPU, so this is listed as an open item rather than explained away.
-
-## What was implemented, and the Chromium design each piece follows
-
-| Change | Where | Chromium design it follows |
+| Change | Where | What it replaces |
 | --- | --- | --- |
-| Read Servo's last painted frame straight from the rendering context instead of `take_screenshot` per window frame (which waits for images, fonts and the load event and spun the engine thread in 1 ms sleeps) | `crates/shell/src/lib.rs` (`refresh_page_cache`) | Viz/`components/viz/service/display/display.cc`: the display presents the latest submitted compositor frame; it never waits for the page to finish loading. |
-| Pace Servo painting at 60 Hz and only paint the focused tab; Servo produced ~120 frames/s on an idle Wikipedia page and every one was rasterised | `crates/shell/src/lib.rs` (`drain_ready_frames`, `paint_due_frame`, `paint_due`) | `components/viz/common/frame_sinks/delay_based_begin_frame_source.cc` (a timer at display rate when there is no vsync) and `cc/scheduler/scheduler.cc` (no BeginFrame for hidden or idle layer trees). |
-| Paint holding on tab switch: the old tab's pixels stay on screen until the newly shown tab has a complete frame (one screenshot-path capture, then fast readback) | `crates/shell/src/lib.rs` (`switch_capture`) | Paint holding (`content/browser/renderer_host/render_widget_host_impl.cc`, `ForceFirstFrameAfterNavigationTimeout`). |
-| Frame hand-off by `Arc` and a sequence number; the window thread only copies to `softbuffer` when the frame changed, and the window title is only set when it changed | `app/mithu/src/engine.rs`, `app/mithu/src/main.rs` | Viz: frames are submitted, not polled; unchanged frames are not redrawn (`cc/trees/layer_tree_host_impl.cc` damage tracking). |
-| Engine thread sleeps on the waker for up to 1 s when idle and 50 ms when busy (was 200 ms and 8 ms), waking earlier only for a paint deadline or a scroll frame | `app/mithu/src/engine.rs` | `base/message_loop/message_pump_glib.cc` / `message_pump_default.cc`: block until work or the next delayed task. |
-| Lite: one glib poll owns the loop and also watches winit's fd, instead of polling GTK and winit in turns; fixed a starvation bug where `gtk::events_pending()` never returned false | `app/mithu-lite/src/main.rs` (`run_with_glib`) | `base/message_loop/message_pump_glib.cc` (Chromium on Linux runs its UI loop inside one glib poll). |
-| Lite: repaint the frame only when the model changed or the hovered target changed, including while a screenshot or hold is waiting. A redraw on every wake reapplied the webview bounds; under Xvfb that expose came back before the glib poll blocked, so WebKit never finished the load | `app/mithu-lite/src/main.rs` (`about_to_wait`, `run_with_glib`) | Views invalidation (`ui/views/view.cc` `SchedulePaint` on state change only). |
-| Animated wheel scrolling for the Servo edition: ease-in-out cubic Bézier (0.42, 0, 0.58, 1), 6–12 frames depending on distance, retargeting without a stall; precise touchpad deltas pass through | `crates/ui/src/scroll.rs` (5 tests), `crates/shell` (`scroll_animated`, `tick_scroll`) | `cc/animation/scroll_offset_animation_curve.cc` (`DurationBehavior::kInverseDelta`). |
-| Memory pressure monitor: sample available memory every 5 s; moderate at ≤1000 MB, critical at ≤400 MB available (500/200 MB on machines under 1.5 GB) | `crates/ui/src/memory.rs` (`Monitor`, `evaluate`) | `components/memory_pressure/system_memory_pressure_evaluator_win.cc` (same thresholds and period). |
-| Tab discarding under pressure: least recently used background tab first; under moderate pressure only tabs hidden for 60 s; never the active tab or one that never loaded; a discarded tab reloads its URL when you switch to it | `crates/ui/src/memory.rs` (`pick_discard`), both editions (`relieve_memory_pressure`, `restore_discarded_active`) | `chrome/browser/performance_manager/policies/page_discarding_helper.cc`, `discard_eligibility_policy.cc`. |
-| Benchmark hooks and harness | `crates/host` (`bench_*`), `tools/bench/` | Chromium's own perf bots measure the same things (load, PSS, idle wakeups). |
+| Present the page by blitting Servo's offscreen framebuffer into the window GL surface, then draw the browser frame (tiny-skia / resvg / fontdue) as one texture. No full-frame readback on this path. | `crates/shell/src/present.rs`, `crates/composite`, `app/mithu/src/main.rs` | OSMesa framebuffer copied into softbuffer on every frame. |
+| `MITHU_SOFTWARE=1`, or a failed window-context creation, keeps OSMesa plus softbuffer. `--screenshot`, `--smoke-test` and `--hold` stay headless on that path. | `app/mithu/src/main.rs`, `Browser::try_new` | — |
+| One rendering context shared by every tab. Discarding a tab no longer swaps in a 64×64 context (that would resize the shared surface). | `crates/shell/src/lib.rs` (`page_context`, `discard_tab`) | One `SoftwareRenderingContext` per tab. |
+| While a load is `Started` or `HeadParsed`, paint at 10 Hz. After the sampled scanlines stop changing and the user has been idle for 400 ms, back off, up to about 4 Hz. Scroll and typing cancel the backoff and skip the scanline read. | `crates/composite` (`paint_interval`), `paint_due_frame` | A fixed 60 Hz paint of every ready frame, including during parse. |
+| `mithu://`, `about:` and `file:` screenshots do not wait on `take_screenshot`. A missing or flat capture is painted and read back. | `blit_page` | A font wait that expired and left the content rectangle blank. |
 
-`MITHU_MEMORY_PRESSURE=moderate|critical` forces a pressure level for testing, like `chrome://discards`.
+The browser frame is still Mithu's pixels. Unpainted pixels (value 0) are uploaded with alpha 0 so the page shows through. The chrome texture is uploaded only when the frame changes.
 
-## Crates chosen
+Earlier pacing, memory-pressure discarding, and the Lite glib loop are still in the tree. Their bench numbers were from the other host and stay in [`perf-data/`](perf-data/) (`after-vs-chromium.json`, `baseline-run1.json`, `tabs10-pressure.json`). The Lite load fix measured on this date is the next section; it is not part of the GPU-composite tables above.
 
-| Need | Choice | Why |
+## Lite page loads under Xvfb (2026-11-24)
+
+Separate from the Servo GPU-composite run above. These are `mithu-lite --screenshot` and `--hold` on one display (`GDK_BACKEND=x11`), not `tools/bench/bench.py`.
+
+On v0.2.0 and v0.2.1, Lite never finished a page load under Xvfb. Screenshot and hold mode asked for a redraw on every wake, and every redraw called `set_bounds` / `set_visible` and presented the frame. On Xvfb those X operations complete immediately and post another expose before `pump_app_events` returns, so the glib poll never blocks. WebKit never ran, the window stayed black, and the log said `load_ms timeout`.
+
+The glib loop stays. A wake now repaints only when the model changed, including while a screenshot or hold is waiting, and the webview bounds are applied only when the placement changed (`app/mithu-lite/src/main.rs`, `about_to_wait`, `run_with_glib`). After the load, `--hold` sits at 0% CPU.
+
+A plain Xvfb with no GLX visual failed earlier than that. GTK and winit share one Xlib `Display`. GTK's GL probe left `GLXBadWindow` (code 170, request 150, minor 32) on that connection, winit reported a failed `create_window`, and the process called `event_loop.exit()` (status 0, empty stdout). Lite paints with softbuffer, so it starts GTK with `GDK_GL=disable`. When the display does not advertise GLX, WebKit compositing and the dmabuf renderer are turned off. A window, framebuffer, or surface that still cannot open exits non-zero.
+
+`mithu://downloads` was a separate bug on every platform: `starts_with("mithu://do")` also matches `mithu://downloads`, so that navigation was cancelled. The check now requires `mithu://do` to end, or to be followed by `?` or `/`. Internal pages are served by a `mithu://` custom scheme and keep their URL and icon.
+
+| Page | Before | After |
 | --- | --- | --- |
-| Available/total memory on Linux, macOS, Windows | `sysinfo` 0.40, `default-features = false`, `features = ["system"]` (MIT) | Maintained, cross-platform, and with only the `system` feature it is small. Reading `/proc/meminfo` by hand would only cover Linux. |
-| One event loop for GTK/WebKit and winit | `glib` 0.18 `unix_fd_add_local` + winit 0.30 `EventLoopExtPumpEvents` (already dependencies, MIT) | No new crate needed; this is the supported way to drive both from one poll. |
-| Wheel animation curve, discard policy | Own code (~400 lines with tests) | Small and has to match Chromium's constants exactly; no crate does that. |
-| HTTP cache, DNS resolver (`http-cache`, `hickory-resolver`) | Not used | Servo and WebKit own their network stacks; a Mithu-side cache or resolver would not be on the page's request path. They become relevant when our own network engine plugs in (see [ENGINES.md](ENGINES.md)). |
-| Allocator (`mimalloc`) | Not adopted yet | Not measured in this round; it is a next step and should only land with an A/B that shows lower PSS or CPU. |
+| `https://example.com` | `load_ms timeout` (45 s), content 99.4% black | `load_ms` 632–715, page painted |
+| `mithu://downloads` | navigation never started | `load_ms` 634, `page_url mithu://downloads` |
+| `about:downloads` | finished as HTML, omnibox cleared to blank | `load_ms` 625, `page_url mithu://downloads` |
+| `mithu://settings` / `mithu://history` | could finish; downloads could not | `load_ms` 651 |
+| local page, Xvfb `-extension GLX` | `GLXBadWindow`, exit 0, no `load_ms` | `load_ms` 596, exit 0 |
+| local page, plain `xvfb-run -a` | same failure on CI | `load_ms` 595 |
 
-## Still worse than Chromium, and why
+## Still worse than Chromium
 
-1. **Servo on animated pages (Wikipedia, The Guardian, scrolling).** Servo keeps producing frames on pages with running animations or timers, and every frame is rasterised on the CPU by llvmpipe because this box has no GPU. Pacing caps that at 60 a second, but Wikipedia still costs ~72% of a core at idle against Chromium's ~8%, and scrolling the Rust article costs ~11.6 CPU-seconds against Chromium's 0.8. Chromium avoids this with damage-based partial raster, tiling and GPU compositing; Servo's WebRender re-renders the whole frame. Fixing it needs either a GPU path or engine-side work (frame throttling for unchanged display lists inside Servo).
-2. **Lite idle CPU and wakeups on some pages** (Wikipedia ~28%, YouTube ~21%, scroll page ~21%, thousands of wakeups/s). This is inside WebKitGTK's web process, which also composites in software here; Mithu's UI process is idle. Lite's scroll CPU is also ~5x Chromium's.
-3. **Many tabs.** Ten tabs cost 1.4 GB (Lite) and 1.9 GB (Servo) against Chromium's 1.0 GB, and Lite took 8.3 s to load all ten against Chromium's 5.1 s. Discarding only kicks in under memory pressure, as in Chromium.
-4. **Servo on GitHub** varied between 1.6 and 4.2 s to load in the after-runs (see above). Needs a dedicated A/B.
-5. **Load times are not exactly comparable.** Servo's load-complete fires earlier than Chromium's `loadEventEnd`.
+1. **Scroll CPU on this machine.** 9 CPU-seconds against Chromium's 1. The present path no longer reads the frame back, and llvmpipe still redraws the page for each notch. This is the gap a hardware GPU would be measured against.
+2. **Animated pages are closer, not equal.** Wikipedia idle is 11% against Chromium's 6%. The Guardian is 58% against 38%. Both still run animations through a CPU rasterizer here.
+3. **Ten tabs.** 1,515 MB against Chromium's 915 MB, down from 2,092 MB. Idle CPU on that run is higher than before (10.6% vs 5.7%).
+4. **A few static pages wake about 20 times a second** instead of once, at about 0.1% CPU.
+5. **Load times are not the same event.** Servo's complete status fires earlier than Chromium's `loadEventEnd`. One Wikipedia after-run took 1,457 ms while the other two took about 390 ms.
 
 ## Next steps
 
-- A/B `mimalloc` as the global allocator for the Servo edition (keep only if PSS or CPU drop).
-- Skip painting when Servo's frame is pixel-identical to the last one (hash the damage rect), or ask Servo upstream for display-list-unchanged signalling.
-- Repeat the GitHub load runs on Servo with more repetitions to separate noise from a regression.
-- Proactive discarding of long-hidden tabs (Chromium's "Memory Saver" mode) as a setting.
-- Measure on a machine with a GPU, where both engines composite on the GPU like Chromium does.
+- Re-measure the scroll gesture on a machine with a hardware GL driver. The code path is the same; this host only has llvmpipe.
+- Wake the UI thread on the paint deadline when a page has backed off, instead of every 50 ms.
+- The remaining ten-tab PSS is mostly content processes (the cap is still four site processes, `js_mem_max` 192). Do not lower that cap without a measurement that shows the pages still work.
