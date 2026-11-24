@@ -14,9 +14,9 @@ A full Chromium `gclient sync` was not run. Dependencies that Chromium pulls in 
 
 ## What we kept
 
-The frame stays Mithu's. The page engine is Servo, through the `servo` crate in `third_party/servo` (`components/servo`). The custom DOM, HTML, CSS, JavaScript, layout, and network crates are gone. The window is still `winit` and `softbuffer`. Servo paints into a software framebuffer and Mithu copies that into the content rectangle under the tab strip and toolbar.
+The frame stays Mithu's. The page engine is Servo, through the `servo` crate in `third_party/servo` (`components/servo`). The custom DOM, HTML, CSS, JavaScript, layout, and network crates are gone. The window is `winit`. When the window can create a GL context, Servo paints the page into an offscreen framebuffer and Mithu blits that into the content rectangle, then draws the tab strip and toolbar (tiny-skia, resvg, fontdue) as one textured quad and swaps buffers. `MITHU_SOFTWARE=1`, or a machine where that context cannot be created, keeps the older path: Servo paints with OSMesa and the window copies the pixels into `softbuffer`.
 
-The window stays on `winit` and `softbuffer`. Chromium draws its widgets with the Views toolkit (`chrome/browser/ui/views`) and draws web content with Skia (`SkCanvas` in the Skia tree) through the compositor (`cc/`). A GPU stack (`wgpu`) or a retained widget toolkit would add a large dependency for a UI that is a handful of rectangles and glyphs. Mithu already rasterizes the page and the browser frame into one CPU buffer. That is the lightweight stand-in for Skia plus Views: one framebuffer, no GPU process.
+Chromium draws its widgets with the Views toolkit (`chrome/browser/ui/views`) and draws web content with Skia through the compositor (`cc/`). Mithu does not take a widget toolkit for a frame that is a handful of rectangles and glyphs. The page is composited by Servo's WebRender into the window GL surface. The frame stays a CPU image uploaded only when it changes.
 
 Other existing edges stay as they are: `rustls` and `webpki-roots` for TLS, `fontdue` for glyphs, and the `image` crate (via `mithu-image`) for PNG, JPEG, GIF, and WebP. The screenshot path reuses that same `image` crate to write a PNG. `flate2` and `brotli` are the only new third-party crates. Nothing already in the workspace inflates gzip, deflate, or brotli.
 
@@ -42,7 +42,7 @@ Same order Chromium uses, with a much smaller implementation at each step:
 4. CSS is parsed and cascaded by Servo's Stylo (`mithu-style`, through the Blitz DOM). The user-agent sheet, author sheets, inline styles, and media queries all go through that cascade.
 5. Boa runs classic scripts and module scripts (`mithu-js`) against that DOM.
 6. Layout builds boxes with Taffy and Parley (`mithu-layout`). Paint writes pixels (`mithu-paint`) with glyphs from `mithu-text` (rustybuzz, including Bengali) and decoded images from `mithu-image`.
-7. The shell composites the page under the browser frame and `softbuffer` presents it.
+7. The shell composites the page under the browser frame. A window GL context presents that on the GPU; otherwise `softbuffer` presents the software framebuffer.
 
 ## Chromium component map
 
@@ -62,20 +62,20 @@ Same order Chromium uses, with a much smaller implementation at each step:
 | `third_party/blink/renderer/core/dom/document.h` | `mithu-dom` | Arena DOM. Scripts can mutate it through Boa. |
 | `third_party/blink/renderer/core/css` | `mithu-style` (Stylo via Blitz) | Parsing, cascade, selectors, custom properties, media queries, and `getComputedStyle`. `querySelector` still uses Mithu's selector matcher. |
 | `third_party/blink/renderer/core/layout/layout_object.h` | `mithu-layout` (Taffy + Parley) | Block, flex, grid, floats, and inline line breaking. |
-| `cc/` and Skia `SkCanvas` | `mithu-paint` | Software framebuffer, `0x00RRGGBB`. |
+| `cc/` compositor | Servo WebRender, `crates/composite` | The page is blitted from an offscreen framebuffer into the window. The browser frame is a CPU image drawn over it. |
 | `v8/src` | `mithu-js` (Boa) | DOM bindings, events, timers, `fetch`, modules. Boa, not V8. |
-| `chrome/browser/ui/views` widget tree | `winit` + `softbuffer` in `app/mithu` | One native window. Input is forwarded into `Browser`. |
+| `chrome/browser/ui/views` widget tree | `winit` in `app/mithu` | One native window. Input is applied on the window thread. `softbuffer` is the fallback when there is no GL context. |
 
 ## Footprint
 
 The design choices that keep the binary and the memory down:
 
 - One process, one cookie jar, one memory cache (no network service process, no GPU process).
-- CPU rasterization instead of Skia/GPU.
+- The browser frame is a CPU image. The page is Servo's WebRender, presented on the window GL context when one exists.
 - Boa instead of V8.
 - HTTP/1.1 by default, with HTTP/2 only after ALPN selects `h2`. Bodies are inflated with `flate2` (gzip, deflate) and `brotli`. Those two crates were added because nothing already in the workspace decodes `Content-Encoding`.
 - Images and stylesheets are capped (16 images, stylesheets limited in size and count).
 
 ## Window
 
-`app/mithu` creates the `winit` window and copies `Browser::render` into a `softbuffer` frame. `cargo run -p mithu -- --screenshot out.png https://example.com/` renders the same frame without opening a window, which is how the screenshot in the pull request was taken.
+`app/mithu` creates the `winit` window, attaches Servo's window GL context when it can, and presents from that context. `Browser::render` still fills a CPU buffer for `--screenshot`, `--smoke-test`, and the `softbuffer` fallback. `cargo run -p mithu -- --screenshot out.png https://example.com/` renders without opening a window.

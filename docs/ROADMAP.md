@@ -34,4 +34,4 @@ Mithu already loads a page: URL, HTTP, HTML, CSS, DOM, Boa, layout, and paint, p
 
 ## Explicitly out of scope until the list above moves
 
-WebGPU, a bundled assistant, an ad system, extension APIs, and a full port of Views. The window will keep using `winit` and `softbuffer`.
+WebGPU, a bundled assistant, an ad system, extension APIs, and a full port of Views. The window stays on `winit`. The page is composited through the window GL context, with `softbuffer` when that context is unavailable.

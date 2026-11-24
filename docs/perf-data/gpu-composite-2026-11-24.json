@@ -1,0 +1,2653 @@
+{
+ "started": "2026-11-24 19:26:24 +0000",
+ "host": "cursor",
+ "cpus": 4,
+ "window": "1280x800",
+ "runs": 3,
+ "browsers": {
+  "chromium": "/usr/bin/google-chrome",
+  "servo-before": "/tmp/mithu-before",
+  "servo-after": "/agent/repos/mithu/target/release/mithu"
+ },
+ "results": {
+  "blank": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 1.39,
+      "load_cpu_pct": 27.8,
+      "idle_cpu_pct": 3.89,
+      "idle_wakeups_per_s": 581.8,
+      "peak_rss_mb": 1872.8,
+      "peak_pss_mb": 535.3,
+      "settled_rss_mb": 1795.5,
+      "settled_pss_mb": 534.0,
+      "pss_complete": true,
+      "processes": 20,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.27,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 1.72,
+      "load_cpu_pct": 34.4,
+      "idle_cpu_pct": 3.89,
+      "idle_wakeups_per_s": 566.6,
+      "peak_rss_mb": 1845.2,
+      "peak_pss_mb": 540.2,
+      "settled_rss_mb": 1809.2,
+      "settled_pss_mb": 537.0,
+      "pss_complete": true,
+      "processes": 20,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.12,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 1.67,
+      "load_cpu_pct": 33.4,
+      "idle_cpu_pct": 3.59,
+      "idle_wakeups_per_s": 520.4,
+      "peak_rss_mb": 1983.6,
+      "peak_pss_mb": 548.1,
+      "settled_rss_mb": 1808.9,
+      "settled_pss_mb": 538.4,
+      "pss_complete": true,
+      "processes": 20,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.04,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": null,
+     "load_cpu_s": 1.67,
+     "load_cpu_pct": 33.4,
+     "peak_rss_mb": 1872.8,
+     "peak_pss_mb": 540.2,
+     "settled_rss_mb": 1808.9,
+     "settled_pss_mb": 537.0,
+     "idle_cpu_pct": 3.89,
+     "idle_wakeups_per_s": 566.6,
+     "scroll_cpu_s": null,
+     "processes": 20,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 0.36,
+      "load_cpu_pct": 7.2,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 19.9,
+      "peak_rss_mb": 349.3,
+      "peak_pss_mb": 311.0,
+      "settled_rss_mb": 349.3,
+      "settled_pss_mb": 311.0,
+      "pss_complete": true,
+      "processes": 1,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 0.36
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 0.36,
+      "load_cpu_pct": 7.2,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 19.9,
+      "peak_rss_mb": 349.5,
+      "peak_pss_mb": 311.3,
+      "settled_rss_mb": 349.5,
+      "settled_pss_mb": 311.3,
+      "pss_complete": true,
+      "processes": 1,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 0.36
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 0.35,
+      "load_cpu_pct": 7.0,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 349.2,
+      "peak_pss_mb": 310.9,
+      "settled_rss_mb": 349.2,
+      "settled_pss_mb": 310.9,
+      "pss_complete": true,
+      "processes": 1,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 0.36
+      }
+     }
+    ],
+    "median": {
+     "load_ms": null,
+     "load_cpu_s": 0.36,
+     "load_cpu_pct": 7.2,
+     "peak_rss_mb": 349.3,
+     "peak_pss_mb": 311.0,
+     "settled_rss_mb": 349.3,
+     "settled_pss_mb": 311.0,
+     "idle_cpu_pct": 0.0,
+     "idle_wakeups_per_s": 19.9,
+     "scroll_cpu_s": null,
+     "processes": 1,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 0.48,
+      "load_cpu_pct": 9.6,
+      "idle_cpu_pct": 0.2,
+      "idle_wakeups_per_s": 19.9,
+      "peak_rss_mb": 367.8,
+      "peak_pss_mb": 331.5,
+      "settled_rss_mb": 367.8,
+      "settled_pss_mb": 331.5,
+      "pss_complete": true,
+      "processes": 1,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 0.5
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 0.45,
+      "load_cpu_pct": 9.0,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 367.8,
+      "peak_pss_mb": 331.5,
+      "settled_rss_mb": 367.8,
+      "settled_pss_mb": 331.5,
+      "pss_complete": true,
+      "processes": 1,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 0.46
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [],
+      "load_ms": null,
+      "timeout": false,
+      "load_cpu_s": 0.44,
+      "load_cpu_pct": 8.8,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 367.9,
+      "peak_pss_mb": 331.6,
+      "settled_rss_mb": 367.9,
+      "settled_pss_mb": 331.6,
+      "pss_complete": true,
+      "processes": 1,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 0.45
+      }
+     }
+    ],
+    "median": {
+     "load_ms": null,
+     "load_cpu_s": 0.45,
+     "load_cpu_pct": 9.0,
+     "peak_rss_mb": 367.8,
+     "peak_pss_mb": 331.5,
+     "settled_rss_mb": 367.8,
+     "settled_pss_mb": 331.5,
+     "idle_cpu_pct": 0.1,
+     "idle_wakeups_per_s": 20.0,
+     "scroll_cpu_s": null,
+     "processes": 1,
+     "timeouts": 0
+    }
+   }
+  },
+  "https://example.com/": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 384,
+      "timeout": false,
+      "load_cpu_s": 0.33,
+      "load_cpu_pct": 77.9,
+      "idle_cpu_pct": 4.39,
+      "idle_wakeups_per_s": 521.9,
+      "peak_rss_mb": 1674.0,
+      "peak_pss_mb": 498.3,
+      "settled_rss_mb": 1625.8,
+      "settled_pss_mb": 486.1,
+      "pss_complete": true,
+      "processes": 20,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad",
+       "readlink"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 1.57,
+       "chrome_crashpad": 0.0,
+       "readlink": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 361,
+      "timeout": false,
+      "load_cpu_s": 0.34,
+      "load_cpu_pct": 84.1,
+      "idle_cpu_pct": 4.09,
+      "idle_wakeups_per_s": 546.4,
+      "peak_rss_mb": 1677.9,
+      "peak_pss_mb": 494.7,
+      "settled_rss_mb": 1627.0,
+      "settled_pss_mb": 487.5,
+      "pss_complete": true,
+      "processes": 20,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 1.4,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 716,
+      "timeout": false,
+      "load_cpu_s": 0.83,
+      "load_cpu_pct": 102.3,
+      "idle_cpu_pct": 3.69,
+      "idle_wakeups_per_s": 612.3,
+      "peak_rss_mb": 1683.8,
+      "peak_pss_mb": 500.3,
+      "settled_rss_mb": 1623.7,
+      "settled_pss_mb": 488.5,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 1.71,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 384,
+     "load_cpu_s": 0.34,
+     "load_cpu_pct": 84.1,
+     "peak_rss_mb": 1677.9,
+     "peak_pss_mb": 498.3,
+     "settled_rss_mb": 1625.8,
+     "settled_pss_mb": 487.5,
+     "idle_cpu_pct": 4.09,
+     "idle_wakeups_per_s": 546.4,
+     "scroll_cpu_s": null,
+     "processes": 20,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 378,
+      "timeout": false,
+      "load_cpu_s": 0.24,
+      "load_cpu_pct": 59.8,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 495.9,
+      "peak_pss_mb": 417.7,
+      "settled_rss_mb": 495.9,
+      "settled_pss_mb": 417.7,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 1.08
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 399,
+      "timeout": false,
+      "load_cpu_s": 0.25,
+      "load_cpu_pct": 62.3,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 495.9,
+      "peak_pss_mb": 417.8,
+      "settled_rss_mb": 495.9,
+      "settled_pss_mb": 417.8,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 1.07
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 379,
+      "timeout": false,
+      "load_cpu_s": 0.25,
+      "load_cpu_pct": 62.2,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 493.0,
+      "peak_pss_mb": 414.8,
+      "settled_rss_mb": 493.0,
+      "settled_pss_mb": 414.8,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 1.08
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 379,
+     "load_cpu_s": 0.25,
+     "load_cpu_pct": 62.2,
+     "peak_rss_mb": 495.9,
+     "peak_pss_mb": 417.7,
+     "settled_rss_mb": 495.9,
+     "settled_pss_mb": 417.7,
+     "idle_cpu_pct": 0.0,
+     "idle_wakeups_per_s": 1.0,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 370,
+      "timeout": false,
+      "load_cpu_s": 0.25,
+      "load_cpu_pct": 62.3,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 496.2,
+      "peak_pss_mb": 419.2,
+      "settled_rss_mb": 496.2,
+      "settled_pss_mb": 419.2,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 1.2
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 356,
+      "timeout": false,
+      "load_cpu_s": 0.26,
+      "load_cpu_pct": 64.8,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 496.0,
+      "peak_pss_mb": 417.7,
+      "settled_rss_mb": 496.0,
+      "settled_pss_mb": 417.7,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 1.23
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/"
+      ],
+      "load_ms": 369,
+      "timeout": false,
+      "load_cpu_s": 0.26,
+      "load_cpu_pct": 64.8,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 19.9,
+      "peak_rss_mb": 497.7,
+      "peak_pss_mb": 421.5,
+      "settled_rss_mb": 497.7,
+      "settled_pss_mb": 421.5,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 1.23
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 369,
+     "load_cpu_s": 0.26,
+     "load_cpu_pct": 64.8,
+     "peak_rss_mb": 496.2,
+     "peak_pss_mb": 419.2,
+     "settled_rss_mb": 496.2,
+     "settled_pss_mb": 419.2,
+     "idle_cpu_pct": 0.1,
+     "idle_wakeups_per_s": 20.0,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   }
+  },
+  "https://en.wikipedia.org/wiki/Main_Page": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 467,
+      "timeout": false,
+      "load_cpu_s": 1.0,
+      "load_cpu_pct": 156.5,
+      "idle_cpu_pct": 6.09,
+      "idle_wakeups_per_s": 1019.9,
+      "peak_rss_mb": 1716.5,
+      "peak_pss_mb": 547.4,
+      "settled_rss_mb": 1695.6,
+      "settled_pss_mb": 537.9,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.21,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 453,
+      "timeout": false,
+      "load_cpu_s": 0.92,
+      "load_cpu_pct": 146.0,
+      "idle_cpu_pct": 6.19,
+      "idle_wakeups_per_s": 1124.0,
+      "peak_rss_mb": 1703.9,
+      "peak_pss_mb": 531.4,
+      "settled_rss_mb": 1668.2,
+      "settled_pss_mb": 519.6,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.09,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 455,
+      "timeout": false,
+      "load_cpu_s": 0.92,
+      "load_cpu_pct": 144.3,
+      "idle_cpu_pct": 5.99,
+      "idle_wakeups_per_s": 1080.7,
+      "peak_rss_mb": 1686.6,
+      "peak_pss_mb": 529.4,
+      "settled_rss_mb": 1669.1,
+      "settled_pss_mb": 517.9,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.11,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 455,
+     "load_cpu_s": 0.92,
+     "load_cpu_pct": 146.0,
+     "peak_rss_mb": 1703.9,
+     "peak_pss_mb": 531.4,
+     "settled_rss_mb": 1669.1,
+     "settled_pss_mb": 519.6,
+     "idle_cpu_pct": 6.09,
+     "idle_wakeups_per_s": 1080.7,
+     "scroll_cpu_s": null,
+     "processes": 19,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 382,
+      "timeout": false,
+      "load_cpu_s": 0.27,
+      "load_cpu_pct": 67.2,
+      "idle_cpu_pct": 52.45,
+      "idle_wakeups_per_s": 6588.8,
+      "peak_rss_mb": 584.1,
+      "peak_pss_mb": 500.4,
+      "settled_rss_mb": 584.1,
+      "settled_pss_mb": 500.4,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 7.48
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 395,
+      "timeout": false,
+      "load_cpu_s": 0.25,
+      "load_cpu_pct": 62.2,
+      "idle_cpu_pct": 50.28,
+      "idle_wakeups_per_s": 6788.9,
+      "peak_rss_mb": 583.9,
+      "peak_pss_mb": 499.9,
+      "settled_rss_mb": 583.9,
+      "settled_pss_mb": 499.9,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 7.26
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 394,
+      "timeout": false,
+      "load_cpu_s": 0.26,
+      "load_cpu_pct": 64.7,
+      "idle_cpu_pct": 51.28,
+      "idle_wakeups_per_s": 6798.4,
+      "peak_rss_mb": 586.4,
+      "peak_pss_mb": 503.1,
+      "settled_rss_mb": 586.4,
+      "settled_pss_mb": 503.1,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 7.38
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 394,
+     "load_cpu_s": 0.26,
+     "load_cpu_pct": 64.7,
+     "peak_rss_mb": 584.1,
+     "peak_pss_mb": 500.4,
+     "settled_rss_mb": 584.1,
+     "settled_pss_mb": 500.4,
+     "idle_cpu_pct": 51.28,
+     "idle_wakeups_per_s": 6788.9,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 398,
+      "timeout": false,
+      "load_cpu_s": 0.26,
+      "load_cpu_pct": 64.7,
+      "idle_cpu_pct": 10.6,
+      "idle_wakeups_per_s": 946.1,
+      "peak_rss_mb": 588.5,
+      "peak_pss_mb": 506.8,
+      "settled_rss_mb": 588.3,
+      "settled_pss_mb": 506.5,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 3.23
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 1457,
+      "timeout": false,
+      "load_cpu_s": 1.72,
+      "load_cpu_pct": 107.3,
+      "idle_cpu_pct": 10.89,
+      "idle_wakeups_per_s": 919.5,
+      "peak_rss_mb": 669.4,
+      "peak_pss_mb": 575.4,
+      "settled_rss_mb": 669.4,
+      "settled_pss_mb": 575.4,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 4.31
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Main_Page"
+      ],
+      "load_ms": 380,
+      "timeout": false,
+      "load_cpu_s": 0.28,
+      "load_cpu_pct": 69.7,
+      "idle_cpu_pct": 11.49,
+      "idle_wakeups_per_s": 778.0,
+      "peak_rss_mb": 588.1,
+      "peak_pss_mb": 506.4,
+      "settled_rss_mb": 587.7,
+      "settled_pss_mb": 506.1,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 3.3
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 398,
+     "load_cpu_s": 0.28,
+     "load_cpu_pct": 69.7,
+     "peak_rss_mb": 588.5,
+     "peak_pss_mb": 506.8,
+     "settled_rss_mb": 588.3,
+     "settled_pss_mb": 506.5,
+     "idle_cpu_pct": 10.89,
+     "idle_wakeups_per_s": 919.5,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   }
+  },
+  "https://github.com/foisalislambd/mithu": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 1856,
+      "timeout": false,
+      "load_cpu_s": 1.78,
+      "load_cpu_pct": 95.2,
+      "idle_cpu_pct": 8.18,
+      "idle_wakeups_per_s": 1319.6,
+      "peak_rss_mb": 1817.0,
+      "peak_pss_mb": 605.8,
+      "settled_rss_mb": 1763.6,
+      "settled_pss_mb": 594.9,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.82,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 3287,
+      "timeout": false,
+      "load_cpu_s": 1.87,
+      "load_cpu_pct": 56.7,
+      "idle_cpu_pct": 4.49,
+      "idle_wakeups_per_s": 571.1,
+      "peak_rss_mb": 1889.8,
+      "peak_pss_mb": 612.8,
+      "settled_rss_mb": 1774.0,
+      "settled_pss_mb": 599.6,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.97,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 1141,
+      "timeout": false,
+      "load_cpu_s": 1.29,
+      "load_cpu_pct": 104.4,
+      "idle_cpu_pct": 7.89,
+      "idle_wakeups_per_s": 1338.7,
+      "peak_rss_mb": 1842.6,
+      "peak_pss_mb": 605.8,
+      "settled_rss_mb": 1755.4,
+      "settled_pss_mb": 589.1,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 2.67,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 1856,
+     "load_cpu_s": 1.78,
+     "load_cpu_pct": 95.2,
+     "peak_rss_mb": 1842.6,
+     "peak_pss_mb": 605.8,
+     "settled_rss_mb": 1763.6,
+     "settled_pss_mb": 594.9,
+     "idle_cpu_pct": 7.89,
+     "idle_wakeups_per_s": 1319.6,
+     "scroll_cpu_s": null,
+     "processes": 19,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 2503,
+      "timeout": false,
+      "load_cpu_s": 2.5,
+      "load_cpu_pct": 96.0,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 816.8,
+      "peak_pss_mb": 732.2,
+      "settled_rss_mb": 816.5,
+      "settled_pss_mb": 731.9,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 2.51
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 1010,
+      "timeout": false,
+      "load_cpu_s": 0.38,
+      "load_cpu_pct": 31.6,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 813.9,
+      "peak_pss_mb": 729.3,
+      "settled_rss_mb": 813.3,
+      "settled_pss_mb": 728.7,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 2.46
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 693,
+      "timeout": false,
+      "load_cpu_s": 0.54,
+      "load_cpu_pct": 67.3,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 819.5,
+      "peak_pss_mb": 735.8,
+      "settled_rss_mb": 818.8,
+      "settled_pss_mb": 735.2,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 2.58
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 1010,
+     "load_cpu_s": 0.54,
+     "load_cpu_pct": 67.3,
+     "peak_rss_mb": 816.8,
+     "peak_pss_mb": 732.2,
+     "settled_rss_mb": 816.5,
+     "settled_pss_mb": 731.9,
+     "idle_cpu_pct": 0.1,
+     "idle_wakeups_per_s": 1.0,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 740,
+      "timeout": false,
+      "load_cpu_s": 0.35,
+      "load_cpu_pct": 43.7,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 817.9,
+      "peak_pss_mb": 735.9,
+      "settled_rss_mb": 815.5,
+      "settled_pss_mb": 733.5,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 2.76
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 690,
+      "timeout": false,
+      "load_cpu_s": 0.47,
+      "load_cpu_pct": 58.6,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 813.9,
+      "peak_pss_mb": 731.9,
+      "settled_rss_mb": 813.9,
+      "settled_pss_mb": 731.9,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 2.65
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://github.com/foisalislambd/mithu"
+      ],
+      "load_ms": 766,
+      "timeout": false,
+      "load_cpu_s": 0.34,
+      "load_cpu_pct": 42.4,
+      "idle_cpu_pct": 0.3,
+      "idle_wakeups_per_s": 26.2,
+      "peak_rss_mb": 823.5,
+      "peak_pss_mb": 741.1,
+      "settled_rss_mb": 823.5,
+      "settled_pss_mb": 741.1,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 2.72
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 740,
+     "load_cpu_s": 0.35,
+     "load_cpu_pct": 43.7,
+     "peak_rss_mb": 817.9,
+     "peak_pss_mb": 735.9,
+     "settled_rss_mb": 815.5,
+     "settled_pss_mb": 733.5,
+     "idle_cpu_pct": 0.1,
+     "idle_wakeups_per_s": 20.0,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   }
+  },
+  "https://news.ycombinator.com/": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 874,
+      "timeout": false,
+      "load_cpu_s": 0.82,
+      "load_cpu_pct": 80.9,
+      "idle_cpu_pct": 4.29,
+      "idle_wakeups_per_s": 620.3,
+      "peak_rss_mb": 1802.0,
+      "peak_pss_mb": 509.4,
+      "settled_rss_mb": 1635.0,
+      "settled_pss_mb": 490.4,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 1.81,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 823,
+      "timeout": false,
+      "load_cpu_s": 0.79,
+      "load_cpu_pct": 77.8,
+      "idle_cpu_pct": 3.1,
+      "idle_wakeups_per_s": 562.7,
+      "peak_rss_mb": 1666.1,
+      "peak_pss_mb": 493.0,
+      "settled_rss_mb": 1621.3,
+      "settled_pss_mb": 481.9,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 1.63,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 851,
+      "timeout": false,
+      "load_cpu_s": 0.68,
+      "load_cpu_pct": 67.3,
+      "idle_cpu_pct": 3.3,
+      "idle_wakeups_per_s": 459.3,
+      "peak_rss_mb": 1796.0,
+      "peak_pss_mb": 490.3,
+      "settled_rss_mb": 1611.4,
+      "settled_pss_mb": 471.4,
+      "pss_complete": true,
+      "processes": 19,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 1.55,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 851,
+     "load_cpu_s": 0.79,
+     "load_cpu_pct": 77.8,
+     "peak_rss_mb": 1796.0,
+     "peak_pss_mb": 493.0,
+     "settled_rss_mb": 1621.3,
+     "settled_pss_mb": 481.9,
+     "idle_cpu_pct": 3.3,
+     "idle_wakeups_per_s": 562.7,
+     "scroll_cpu_s": null,
+     "processes": 19,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 641,
+      "timeout": false,
+      "load_cpu_s": 0.37,
+      "load_cpu_pct": 46.1,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 485.3,
+      "peak_pss_mb": 406.3,
+      "settled_rss_mb": 485.3,
+      "settled_pss_mb": 406.3,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 1.09
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 626,
+      "timeout": false,
+      "load_cpu_s": 0.36,
+      "load_cpu_pct": 44.9,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 485.6,
+      "peak_pss_mb": 405.6,
+      "settled_rss_mb": 485.6,
+      "settled_pss_mb": 405.6,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 1.11
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 639,
+      "timeout": false,
+      "load_cpu_s": 0.36,
+      "load_cpu_pct": 44.9,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 486.1,
+      "peak_pss_mb": 407.0,
+      "settled_rss_mb": 486.1,
+      "settled_pss_mb": 407.0,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 1.09
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 639,
+     "load_cpu_s": 0.36,
+     "load_cpu_pct": 44.9,
+     "peak_rss_mb": 485.6,
+     "peak_pss_mb": 406.3,
+     "settled_rss_mb": 485.6,
+     "settled_pss_mb": 406.3,
+     "idle_cpu_pct": 0.0,
+     "idle_wakeups_per_s": 1.0,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 641,
+      "timeout": false,
+      "load_cpu_s": 0.47,
+      "load_cpu_pct": 58.6,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 488.3,
+      "peak_pss_mb": 410.3,
+      "settled_rss_mb": 488.3,
+      "settled_pss_mb": 410.3,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 1.28
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 614,
+      "timeout": false,
+      "load_cpu_s": 0.46,
+      "load_cpu_pct": 57.4,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 20.0,
+      "peak_rss_mb": 489.6,
+      "peak_pss_mb": 412.5,
+      "settled_rss_mb": 489.6,
+      "settled_pss_mb": 412.5,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 1.26
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://news.ycombinator.com/"
+      ],
+      "load_ms": 1660,
+      "timeout": false,
+      "load_cpu_s": 1.31,
+      "load_cpu_pct": 72.7,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 19.9,
+      "peak_rss_mb": 495.1,
+      "peak_pss_mb": 416.5,
+      "settled_rss_mb": 495.1,
+      "settled_pss_mb": 416.5,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 1.32
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 641,
+     "load_cpu_s": 0.47,
+     "load_cpu_pct": 58.6,
+     "peak_rss_mb": 489.6,
+     "peak_pss_mb": 412.5,
+     "settled_rss_mb": 489.6,
+     "settled_pss_mb": 412.5,
+     "idle_cpu_pct": 0.1,
+     "idle_wakeups_per_s": 20.0,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   }
+  },
+  "https://www.youtube.com/": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 1484,
+      "timeout": false,
+      "load_cpu_s": 2.17,
+      "load_cpu_pct": 142.4,
+      "idle_cpu_pct": 9.08,
+      "idle_wakeups_per_s": 1564.0,
+      "peak_rss_mb": 2179.7,
+      "peak_pss_mb": 882.8,
+      "settled_rss_mb": 2063.7,
+      "settled_pss_mb": 721.9,
+      "pss_complete": true,
+      "processes": 21,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 5.14,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 1108,
+      "timeout": false,
+      "load_cpu_s": 1.68,
+      "load_cpu_pct": 127.5,
+      "idle_cpu_pct": 9.28,
+      "idle_wakeups_per_s": 1414.0,
+      "peak_rss_mb": 2182.0,
+      "peak_pss_mb": 879.8,
+      "settled_rss_mb": 2067.5,
+      "settled_pss_mb": 725.2,
+      "pss_complete": true,
+      "processes": 21,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 5.0,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 1403,
+      "timeout": false,
+      "load_cpu_s": 2.29,
+      "load_cpu_pct": 152.8,
+      "idle_cpu_pct": 9.08,
+      "idle_wakeups_per_s": 1425.8,
+      "peak_rss_mb": 2209.3,
+      "peak_pss_mb": 888.0,
+      "settled_rss_mb": 2077.2,
+      "settled_pss_mb": 729.2,
+      "pss_complete": true,
+      "processes": 21,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 5.11,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 1403,
+     "load_cpu_s": 2.17,
+     "load_cpu_pct": 142.4,
+     "peak_rss_mb": 2182.0,
+     "peak_pss_mb": 882.8,
+     "settled_rss_mb": 2067.5,
+     "settled_pss_mb": 725.2,
+     "idle_cpu_pct": 9.08,
+     "idle_wakeups_per_s": 1425.8,
+     "scroll_cpu_s": null,
+     "processes": 21,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 420,
+      "timeout": false,
+      "load_cpu_s": 0.43,
+      "load_cpu_pct": 71.4,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 435.0,
+      "peak_pss_mb": 359.1,
+      "settled_rss_mb": 435.0,
+      "settled_pss_mb": 359.1,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 0.53
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 452,
+      "timeout": false,
+      "load_cpu_s": 0.41,
+      "load_cpu_pct": 68.1,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 434.6,
+      "peak_pss_mb": 356.7,
+      "settled_rss_mb": 434.6,
+      "settled_pss_mb": 356.7,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 0.55
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 417,
+      "timeout": false,
+      "load_cpu_s": 0.43,
+      "load_cpu_pct": 71.5,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.1,
+      "peak_rss_mb": 436.0,
+      "peak_pss_mb": 358.0,
+      "settled_rss_mb": 436.0,
+      "settled_pss_mb": 358.0,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 0.52
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 420,
+     "load_cpu_s": 0.43,
+     "load_cpu_pct": 71.4,
+     "peak_rss_mb": 435.0,
+     "peak_pss_mb": 358.0,
+     "settled_rss_mb": 435.0,
+     "settled_pss_mb": 358.0,
+     "idle_cpu_pct": 0.0,
+     "idle_wakeups_per_s": 1.0,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 417,
+      "timeout": false,
+      "load_cpu_s": 0.45,
+      "load_cpu_pct": 74.8,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 439.0,
+      "peak_pss_mb": 364.5,
+      "settled_rss_mb": 439.0,
+      "settled_pss_mb": 364.5,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 0.62
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 447,
+      "timeout": false,
+      "load_cpu_s": 0.42,
+      "load_cpu_pct": 69.8,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 438.9,
+      "peak_pss_mb": 364.4,
+      "settled_rss_mb": 438.9,
+      "settled_pss_mb": 364.4,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 0.64
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.youtube.com/"
+      ],
+      "load_ms": 404,
+      "timeout": false,
+      "load_cpu_s": 0.48,
+      "load_cpu_pct": 79.8,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 1.0,
+      "peak_rss_mb": 439.4,
+      "peak_pss_mb": 363.2,
+      "settled_rss_mb": 439.4,
+      "settled_pss_mb": 363.2,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 0.64
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 417,
+     "load_cpu_s": 0.45,
+     "load_cpu_pct": 74.8,
+     "peak_rss_mb": 439.0,
+     "peak_pss_mb": 364.4,
+     "settled_rss_mb": 439.0,
+     "settled_pss_mb": 364.4,
+     "idle_cpu_pct": 0.0,
+     "idle_wakeups_per_s": 1.0,
+     "scroll_cpu_s": null,
+     "processes": 2,
+     "timeouts": 0
+    }
+   }
+  },
+  "https://www.theguardian.com/international": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 3290,
+      "timeout": false,
+      "load_cpu_s": 5.3,
+      "load_cpu_pct": 152.5,
+      "idle_cpu_pct": 30.67,
+      "idle_wakeups_per_s": 5628.7,
+      "peak_rss_mb": 4979.7,
+      "peak_pss_mb": 1112.1,
+      "settled_rss_mb": 4903.3,
+      "settled_pss_mb": 1104.6,
+      "pss_complete": true,
+      "processes": 45,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 10.49,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 4050,
+      "timeout": false,
+      "load_cpu_s": 4.66,
+      "load_cpu_pct": 114.8,
+      "idle_cpu_pct": 38.41,
+      "idle_wakeups_per_s": 9462.8,
+      "peak_rss_mb": 6253.7,
+      "peak_pss_mb": 1192.0,
+      "settled_rss_mb": 5757.7,
+      "settled_pss_mb": 1154.3,
+      "pss_complete": true,
+      "processes": 53,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 11.26,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 1290,
+      "timeout": false,
+      "load_cpu_s": 2.52,
+      "load_cpu_pct": 159.8,
+      "idle_cpu_pct": 50.79,
+      "idle_wakeups_per_s": 10345.4,
+      "peak_rss_mb": 5036.4,
+      "peak_pss_mb": 1076.1,
+      "settled_rss_mb": 4761.3,
+      "settled_pss_mb": 1059.0,
+      "pss_complete": false,
+      "processes": 44,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 10.79,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 3290,
+     "load_cpu_s": 4.66,
+     "load_cpu_pct": 152.5,
+     "peak_rss_mb": 5036.4,
+     "peak_pss_mb": 1112.1,
+     "settled_rss_mb": 4903.3,
+     "settled_pss_mb": 1104.6,
+     "idle_cpu_pct": 38.41,
+     "idle_wakeups_per_s": 9462.8,
+     "scroll_cpu_s": null,
+     "processes": 45,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 391,
+      "timeout": false,
+      "load_cpu_s": 0.26,
+      "load_cpu_pct": 64.8,
+      "idle_cpu_pct": 192.36,
+      "idle_wakeups_per_s": 19285.3,
+      "peak_rss_mb": 1622.2,
+      "peak_pss_mb": 1366.7,
+      "settled_rss_mb": 1532.9,
+      "settled_pss_mb": 1285.0,
+      "pss_complete": true,
+      "processes": 5,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 22.73
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 395,
+      "timeout": false,
+      "load_cpu_s": 0.25,
+      "load_cpu_pct": 62.3,
+      "idle_cpu_pct": 183.73,
+      "idle_wakeups_per_s": 17418.4,
+      "peak_rss_mb": 1684.0,
+      "peak_pss_mb": 1423.8,
+      "settled_rss_mb": 1654.5,
+      "settled_pss_mb": 1396.8,
+      "pss_complete": true,
+      "processes": 5,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 21.86
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 394,
+      "timeout": false,
+      "load_cpu_s": 0.27,
+      "load_cpu_pct": 67.2,
+      "idle_cpu_pct": 174.47,
+      "idle_wakeups_per_s": 14214.3,
+      "peak_rss_mb": 1500.5,
+      "peak_pss_mb": 1263.0,
+      "settled_rss_mb": 1429.8,
+      "settled_pss_mb": 1198.9,
+      "pss_complete": true,
+      "processes": 5,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 20.85
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 394,
+     "load_cpu_s": 0.26,
+     "load_cpu_pct": 64.8,
+     "peak_rss_mb": 1622.2,
+     "peak_pss_mb": 1366.7,
+     "settled_rss_mb": 1532.9,
+     "settled_pss_mb": 1285.0,
+     "idle_cpu_pct": 183.73,
+     "idle_wakeups_per_s": 17418.4,
+     "scroll_cpu_s": null,
+     "processes": 5,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 373,
+      "timeout": false,
+      "load_cpu_s": 0.28,
+      "load_cpu_pct": 69.8,
+      "idle_cpu_pct": 59.03,
+      "idle_wakeups_per_s": 3964.4,
+      "peak_rss_mb": 1224.8,
+      "peak_pss_mb": 1004.2,
+      "settled_rss_mb": 1218.9,
+      "settled_pss_mb": 997.4,
+      "pss_complete": true,
+      "processes": 5,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 9.38
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 366,
+      "timeout": false,
+      "load_cpu_s": 0.28,
+      "load_cpu_pct": 69.8,
+      "idle_cpu_pct": 58.33,
+      "idle_wakeups_per_s": 3974.2,
+      "peak_rss_mb": 1253.1,
+      "peak_pss_mb": 1020.6,
+      "settled_rss_mb": 1241.5,
+      "settled_pss_mb": 1010.9,
+      "pss_complete": true,
+      "processes": 5,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 9.11
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://www.theguardian.com/international"
+      ],
+      "load_ms": 415,
+      "timeout": false,
+      "load_cpu_s": 0.6,
+      "load_cpu_pct": 99.1,
+      "idle_cpu_pct": 52.05,
+      "idle_wakeups_per_s": 3163.7,
+      "peak_rss_mb": 1220.6,
+      "peak_pss_mb": 992.4,
+      "settled_rss_mb": 1208.0,
+      "settled_pss_mb": 979.9,
+      "pss_complete": true,
+      "processes": 5,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 8.71
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 373,
+     "load_cpu_s": 0.28,
+     "load_cpu_pct": 69.8,
+     "peak_rss_mb": 1224.8,
+     "peak_pss_mb": 1004.2,
+     "settled_rss_mb": 1218.9,
+     "settled_pss_mb": 997.4,
+     "idle_cpu_pct": 58.33,
+     "idle_wakeups_per_s": 3964.4,
+     "scroll_cpu_s": null,
+     "processes": 5,
+     "timeouts": 0
+    }
+   }
+  },
+  "tabs10": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 3052,
+      "timeout": false,
+      "load_cpu_s": 4.29,
+      "load_cpu_pct": 134.4,
+      "idle_cpu_pct": 3.69,
+      "idle_wakeups_per_s": 702.8,
+      "peak_rss_mb": 3329.2,
+      "peak_pss_mb": 884.8,
+      "settled_rss_mb": 3252.4,
+      "settled_pss_mb": 875.0,
+      "pss_complete": true,
+      "processes": 29,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 4.83,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 2602,
+      "timeout": false,
+      "load_cpu_s": 4.3,
+      "load_cpu_pct": 153.8,
+      "idle_cpu_pct": 3.59,
+      "idle_wakeups_per_s": 646.6,
+      "peak_rss_mb": 3443.3,
+      "peak_pss_mb": 932.3,
+      "settled_rss_mb": 3308.6,
+      "settled_pss_mb": 919.4,
+      "pss_complete": true,
+      "processes": 29,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 5.08,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 2183,
+      "timeout": false,
+      "load_cpu_s": 3.9,
+      "load_cpu_pct": 175.9,
+      "idle_cpu_pct": 3.79,
+      "idle_wakeups_per_s": 657.9,
+      "peak_rss_mb": 3367.0,
+      "peak_pss_mb": 928.0,
+      "settled_rss_mb": 3319.2,
+      "settled_pss_mb": 914.7,
+      "pss_complete": true,
+      "processes": 29,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 5.08,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 2602,
+     "load_cpu_s": 4.29,
+     "load_cpu_pct": 153.8,
+     "peak_rss_mb": 3367.0,
+     "peak_pss_mb": 928.0,
+     "settled_rss_mb": 3308.6,
+     "settled_pss_mb": 914.7,
+     "idle_cpu_pct": 3.69,
+     "idle_wakeups_per_s": 657.9,
+     "scroll_cpu_s": null,
+     "processes": 29,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 4079,
+      "timeout": false,
+      "load_cpu_s": 6.57,
+      "load_cpu_pct": 156.2,
+      "idle_cpu_pct": 5.69,
+      "idle_wakeups_per_s": 267.2,
+      "peak_rss_mb": 2754.6,
+      "peak_pss_mb": 2103.2,
+      "settled_rss_mb": 2754.6,
+      "settled_pss_mb": 2103.2,
+      "pss_complete": true,
+      "processes": 12,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 9.12
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 4687,
+      "timeout": false,
+      "load_cpu_s": 7.66,
+      "load_cpu_pct": 159.3,
+      "idle_cpu_pct": 1.6,
+      "idle_wakeups_per_s": 84.0,
+      "peak_rss_mb": 2657.3,
+      "peak_pss_mb": 2020.8,
+      "settled_rss_mb": 2656.3,
+      "settled_pss_mb": 2019.9,
+      "pss_complete": true,
+      "processes": 12,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 9.07
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 3944,
+      "timeout": false,
+      "load_cpu_s": 5.99,
+      "load_cpu_pct": 149.5,
+      "idle_cpu_pct": 7.19,
+      "idle_wakeups_per_s": 327.7,
+      "peak_rss_mb": 2731.0,
+      "peak_pss_mb": 2091.7,
+      "settled_rss_mb": 2731.0,
+      "settled_pss_mb": 2091.7,
+      "pss_complete": true,
+      "processes": 12,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 9.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 4079,
+     "load_cpu_s": 6.57,
+     "load_cpu_pct": 156.2,
+     "peak_rss_mb": 2731.0,
+     "peak_pss_mb": 2091.7,
+     "settled_rss_mb": 2731.0,
+     "settled_pss_mb": 2091.7,
+     "idle_cpu_pct": 5.69,
+     "idle_wakeups_per_s": 267.2,
+     "scroll_cpu_s": null,
+     "processes": 12,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 2651,
+      "timeout": false,
+      "load_cpu_s": 4.2,
+      "load_cpu_pct": 149.8,
+      "idle_cpu_pct": 12.48,
+      "idle_wakeups_per_s": 498.5,
+      "peak_rss_mb": 2102.9,
+      "peak_pss_mb": 1475.2,
+      "settled_rss_mb": 2102.9,
+      "settled_pss_mb": 1475.2,
+      "pss_complete": true,
+      "processes": 12,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 7.93
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 3882,
+      "timeout": false,
+      "load_cpu_s": 6.47,
+      "load_cpu_pct": 161.4,
+      "idle_cpu_pct": 7.79,
+      "idle_wakeups_per_s": 364.2,
+      "peak_rss_mb": 2144.4,
+      "peak_pss_mb": 1514.8,
+      "settled_rss_mb": 2144.4,
+      "settled_pss_mb": 1514.7,
+      "pss_complete": true,
+      "processes": 12,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 8.97
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 4302,
+      "timeout": false,
+      "load_cpu_s": 7.04,
+      "load_cpu_pct": 159.6,
+      "idle_cpu_pct": 10.58,
+      "idle_wakeups_per_s": 426.8,
+      "peak_rss_mb": 2190.3,
+      "peak_pss_mb": 1561.8,
+      "settled_rss_mb": 2190.0,
+      "settled_pss_mb": 1561.4,
+      "pss_complete": true,
+      "processes": 12,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 9.13
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 3882,
+     "load_cpu_s": 6.47,
+     "load_cpu_pct": 159.6,
+     "peak_rss_mb": 2144.4,
+     "peak_pss_mb": 1514.8,
+     "settled_rss_mb": 2144.4,
+     "settled_pss_mb": 1514.7,
+     "idle_cpu_pct": 10.58,
+     "idle_wakeups_per_s": 426.8,
+     "scroll_cpu_s": null,
+     "processes": 12,
+     "timeouts": 0
+    }
+   }
+  },
+  "scroll": {
+   "chromium": {
+    "raw": [
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 559,
+      "timeout": false,
+      "load_cpu_s": 1.1,
+      "load_cpu_pct": 162.7,
+      "scroll_cpu_s": 1.02,
+      "scroll_wall_s": 4.54,
+      "idle_cpu_pct": 7.19,
+      "idle_wakeups_per_s": 836.2,
+      "peak_rss_mb": 1816.9,
+      "peak_pss_mb": 591.7,
+      "settled_rss_mb": 1769.6,
+      "settled_pss_mb": 587.9,
+      "pss_complete": true,
+      "processes": 18,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 3.27,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 551,
+      "timeout": false,
+      "load_cpu_s": 1.05,
+      "load_cpu_pct": 155.9,
+      "scroll_cpu_s": 1.19,
+      "scroll_wall_s": 4.55,
+      "idle_cpu_pct": 6.59,
+      "idle_wakeups_per_s": 1071.8,
+      "peak_rss_mb": 1834.8,
+      "peak_pss_mb": 593.1,
+      "settled_rss_mb": 1765.1,
+      "settled_pss_mb": 589.2,
+      "pss_complete": true,
+      "processes": 18,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 3.3,
+       "chrome_crashpad": 0.0
+      }
+     },
+     {
+      "browser": "chromium",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 625,
+      "timeout": false,
+      "load_cpu_s": 1.04,
+      "load_cpu_pct": 158.5,
+      "scroll_cpu_s": 1.04,
+      "scroll_wall_s": 4.54,
+      "idle_cpu_pct": 6.29,
+      "idle_wakeups_per_s": 983.4,
+      "peak_rss_mb": 1832.4,
+      "peak_pss_mb": 593.0,
+      "settled_rss_mb": 1771.8,
+      "settled_pss_mb": 590.3,
+      "pss_complete": true,
+      "processes": 18,
+      "process_names": [
+       "cat",
+       "chrome",
+       "chrome_crashpad"
+      ],
+      "cpu_s_by_process": {
+       "cat": 0.0,
+       "chrome": 3.09,
+       "chrome_crashpad": 0.0
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 559,
+     "load_cpu_s": 1.05,
+     "load_cpu_pct": 158.5,
+     "peak_rss_mb": 1832.4,
+     "peak_pss_mb": 593.0,
+     "settled_rss_mb": 1769.6,
+     "settled_pss_mb": 589.2,
+     "idle_cpu_pct": 6.59,
+     "idle_wakeups_per_s": 983.4,
+     "scroll_cpu_s": 1.04,
+     "processes": 18,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 396,
+      "timeout": false,
+      "load_cpu_s": 0.26,
+      "load_cpu_pct": 64.8,
+      "scroll_cpu_s": 9.56,
+      "scroll_wall_s": 4.54,
+      "idle_cpu_pct": 135.99,
+      "idle_wakeups_per_s": 7963.0,
+      "peak_rss_mb": 697.2,
+      "peak_pss_mb": 610.6,
+      "settled_rss_mb": 685.3,
+      "settled_pss_mb": 599.1,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 28.68
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 428,
+      "timeout": false,
+      "load_cpu_s": 0.52,
+      "load_cpu_pct": 86.4,
+      "scroll_cpu_s": 9.64,
+      "scroll_wall_s": 4.54,
+      "idle_cpu_pct": 128.21,
+      "idle_wakeups_per_s": 7206.9,
+      "peak_rss_mb": 697.9,
+      "peak_pss_mb": 611.3,
+      "settled_rss_mb": 686.9,
+      "settled_pss_mb": 600.6,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 28.36
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 387,
+      "timeout": false,
+      "load_cpu_s": 0.26,
+      "load_cpu_pct": 64.7,
+      "scroll_cpu_s": 9.4,
+      "scroll_wall_s": 4.53,
+      "idle_cpu_pct": 133.01,
+      "idle_wakeups_per_s": 7686.4,
+      "peak_rss_mb": 690.3,
+      "peak_pss_mb": 603.6,
+      "settled_rss_mb": 683.6,
+      "settled_pss_mb": 597.5,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu-before"
+      ],
+      "cpu_s_by_process": {
+       "mithu-before": 28.31
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 396,
+     "load_cpu_s": 0.26,
+     "load_cpu_pct": 64.8,
+     "peak_rss_mb": 697.2,
+     "peak_pss_mb": 610.6,
+     "settled_rss_mb": 685.3,
+     "settled_pss_mb": 599.1,
+     "idle_cpu_pct": 133.01,
+     "idle_wakeups_per_s": 7686.4,
+     "scroll_cpu_s": 9.56,
+     "processes": 2,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 387,
+      "timeout": false,
+      "load_cpu_s": 0.25,
+      "load_cpu_pct": 62.2,
+      "scroll_cpu_s": 9.1,
+      "scroll_wall_s": 4.55,
+      "idle_cpu_pct": 20.38,
+      "idle_wakeups_per_s": 942.1,
+      "peak_rss_mb": 703.0,
+      "peak_pss_mb": 616.9,
+      "settled_rss_mb": 699.9,
+      "settled_pss_mb": 613.9,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 14.88
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 393,
+      "timeout": false,
+      "load_cpu_s": 0.25,
+      "load_cpu_pct": 62.2,
+      "scroll_cpu_s": 9.05,
+      "scroll_wall_s": 4.54,
+      "idle_cpu_pct": 19.99,
+      "idle_wakeups_per_s": 974.7,
+      "peak_rss_mb": 694.4,
+      "peak_pss_mb": 609.4,
+      "settled_rss_mb": 692.9,
+      "settled_pss_mb": 606.5,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 14.61
+      }
+     },
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+      ],
+      "load_ms": 620,
+      "timeout": false,
+      "load_cpu_s": 0.97,
+      "load_cpu_pct": 121.0,
+      "scroll_cpu_s": 9.05,
+      "scroll_wall_s": 4.54,
+      "idle_cpu_pct": 61.17,
+      "idle_wakeups_per_s": 3463.9,
+      "peak_rss_mb": 704.6,
+      "peak_pss_mb": 620.2,
+      "settled_rss_mb": 701.6,
+      "settled_pss_mb": 617.2,
+      "pss_complete": true,
+      "processes": 2,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 19.16
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 393,
+     "load_cpu_s": 0.25,
+     "load_cpu_pct": 62.2,
+     "peak_rss_mb": 703.0,
+     "peak_pss_mb": 616.9,
+     "settled_rss_mb": 699.9,
+     "settled_pss_mb": 613.9,
+     "idle_cpu_pct": 20.38,
+     "idle_wakeups_per_s": 974.7,
+     "scroll_cpu_s": 9.05,
+     "processes": 2,
+     "timeouts": 0
+    }
+   }
+  }
+ }
+}
