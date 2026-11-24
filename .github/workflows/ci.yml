@@ -34,6 +34,11 @@ jobs:
       - name: Sync version from VERSION.md
         shell: bash
         run: python3 tools/version.py sync
+      # windows-latest is windows-2025-vs2026: LLVM 20, but MSVC 14.52 STL
+      # needs Clang 22+ for mozangle's bindgen step (STL1000).
+      - name: Point bindgen at Clang 22+
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/windows-libclang.ps1
       - name: Build, package, and smoke-test Mithu
         shell: pwsh
         run: |
