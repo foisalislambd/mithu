@@ -138,6 +138,7 @@ struct Tab {
     has_frame: bool,
     /// When this tab was last the focused tab (discard order).
     last_active: Instant,
+    /// Last paint while hidden (rate limit).
     /// Set while the tab is discarded: the URL to load when it is selected.
     discarded: Option<Url>,
 }
@@ -310,9 +311,17 @@ pub struct Browser {
     /// `--screenshot` waits for Servo's screenshot readiness (images, fonts,
     /// load event). The interactive window never does.
     exact_capture: bool,
+    /// Set on a tab switch: the first window frame of the newly shown tab
+    /// goes through the screenshot path, which waits for Servo to rebuild
+    /// the shown pipeline's display list (paint holding: the old pixels stay
+    /// until then) instead of reading back a surface that is still blank.
+    switch_capture: bool,
     /// The focused tab has a new frame that has not been painted yet.
     paint_pending: bool,
     last_paint: Instant,
+    /// After a tab switch, paint every interval until this time even without
+    /// a new-frame notification: the first paint after `show()` can run
+    /// before the compositor has the shown tab's display list.
     /// Animated wheel scrolling (Chromium's ease-in-out scroll curve).
     scroller: mithu_ui::scroll::ScrollAnimator,
     /// System memory pressure (Chromium's 5 s evaluator).
@@ -438,6 +447,7 @@ impl Browser {
             page_cache_id: None,
             page_dirty: true,
             exact_capture: false,
+            switch_capture: false,
             scroller: mithu_ui::scroll::ScrollAnimator::new(),
             paint_pending: false,
             last_paint: Instant::now(),
@@ -1482,6 +1492,10 @@ impl Browser {
         };
         let _ = tab.context.make_current();
         tab.webview.paint();
+        let loaded = tab.webview.load_status() == LoadStatus::Complete;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.has_frame |= loaded;
+        }
         if mithu_host::bench_enabled() {
             mithu_host::bench_count_frames(1);
         }
@@ -2172,7 +2186,12 @@ impl Browser {
     }
 
     fn blit_page(&mut self, pixels: &mut [u32], width: u32) {
-        if self.exact_capture {
+        let switched = std::mem::take(&mut self.switch_capture)
+            && self.tabs.get(self.active).is_some_and(|tab| {
+                tab.discarded.is_none()
+                    && tab.webview.load_status() == LoadStatus::Complete
+            });
+        if self.exact_capture || switched {
             if let Some(image) = self.capture_page() {
                 self.store_page(&image);
             }
@@ -2851,14 +2870,14 @@ impl Browser {
         if self.visibility_stamp == Some(stamp) {
             return;
         }
+        let switched = self.visibility_stamp.map(|old| old.0) != Some(self.active);
         self.visibility_stamp = Some(stamp);
+        self.switch_capture |= switched;
         self.scroller.cancel();
         self.restore_discarded_active();
         // Hidden tabs were not painted; draw the newly focused one now.
-        if self.tabs.get(self.active).is_some_and(|tab| tab.has_frame) {
-            self.paint_pending = true;
-            self.last_paint = Instant::now() - Self::FRAME_INTERVAL;
-        }
+        self.paint_pending = true;
+        self.last_paint = Instant::now() - Self::FRAME_INTERVAL;
         let active = self.active;
         for (index, tab) in self.tabs.iter().enumerate() {
             if index == active {
