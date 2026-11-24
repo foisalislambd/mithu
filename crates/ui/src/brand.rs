@@ -16,7 +16,7 @@ pub struct Raster {
 fn decode(bytes: &[u8]) -> Raster {
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info().expect("mithu logo png");
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let mut buf = vec![0; reader.output_buffer_size().expect("mithu logo png buffer")];
     let info = reader.next_frame(&mut buf).expect("mithu logo frame");
     let pixels = &buf[..info.buffer_size()];
     let rgba = match info.color_type {
