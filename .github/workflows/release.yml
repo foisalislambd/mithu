@@ -22,7 +22,7 @@ jobs:
       version: ${{ steps.decide.outputs.version }}
       release: ${{ steps.decide.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
           submodules: false
@@ -68,7 +68,7 @@ jobs:
             artifact: mithu-windows-x64
             binary: target/release/mithu-windows-x64.zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
           fetch-depth: 1
@@ -131,7 +131,7 @@ jobs:
             artifact: mithu-lite-windows-x64
             binary: target/release/mithu-lite.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Cargo resolves every workspace member. mithu-shell path-depends on
           # the Servo package, so the submodule must be on disk even though
@@ -175,7 +175,7 @@ jobs:
     if: needs.gate.outputs.release == 'true' && needs.full.result == 'success' && needs.lite.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
           submodules: false
