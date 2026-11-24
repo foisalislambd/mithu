@@ -125,7 +125,28 @@ The window thread owns Servo. The GL context cannot be current on two threads, a
 
 The browser frame is still Mithu's pixels. Unpainted pixels (value 0) are uploaded with alpha 0 so the page shows through. The chrome texture is uploaded only when the frame changes.
 
-Earlier pacing, memory-pressure discarding, and the Lite glib loop are still in the tree. They are described in the previous version of this page; their numbers were from the other host.
+Earlier pacing, memory-pressure discarding, and the Lite glib loop are still in the tree. Their bench numbers were from the other host and stay in [`perf-data/`](perf-data/) (`after-vs-chromium.json`, `baseline-run1.json`, `tabs10-pressure.json`). The Lite load fix measured on this date is the next section; it is not part of the GPU-composite tables above.
+
+## Lite page loads under Xvfb (2026-11-24)
+
+Separate from the Servo GPU-composite run above. These are `mithu-lite --screenshot` and `--hold` on one display (`GDK_BACKEND=x11`), not `tools/bench/bench.py`.
+
+On v0.2.0 and v0.2.1, Lite never finished a page load under Xvfb. Screenshot and hold mode asked for a redraw on every wake, and every redraw called `set_bounds` / `set_visible` and presented the frame. On Xvfb those X operations complete immediately and post another expose before `pump_app_events` returns, so the glib poll never blocks. WebKit never ran, the window stayed black, and the log said `load_ms timeout`.
+
+The glib loop stays. A wake now repaints only when the model changed, including while a screenshot or hold is waiting, and the webview bounds are applied only when the placement changed (`app/mithu-lite/src/main.rs`, `about_to_wait`, `run_with_glib`). After the load, `--hold` sits at 0% CPU.
+
+A plain Xvfb with no GLX visual failed earlier than that. GTK and winit share one Xlib `Display`. GTK's GL probe left `GLXBadWindow` (code 170, request 150, minor 32) on that connection, winit reported a failed `create_window`, and the process called `event_loop.exit()` (status 0, empty stdout). Lite paints with softbuffer, so it starts GTK with `GDK_GL=disable`. When the display does not advertise GLX, WebKit compositing and the dmabuf renderer are turned off. A window, framebuffer, or surface that still cannot open exits non-zero.
+
+`mithu://downloads` was a separate bug on every platform: `starts_with("mithu://do")` also matches `mithu://downloads`, so that navigation was cancelled. The check now requires `mithu://do` to end, or to be followed by `?` or `/`. Internal pages are served by a `mithu://` custom scheme and keep their URL and icon.
+
+| Page | Before | After |
+| --- | --- | --- |
+| `https://example.com` | `load_ms timeout` (45 s), content 99.4% black | `load_ms` 632–715, page painted |
+| `mithu://downloads` | navigation never started | `load_ms` 634, `page_url mithu://downloads` |
+| `about:downloads` | finished as HTML, omnibox cleared to blank | `load_ms` 625, `page_url mithu://downloads` |
+| `mithu://settings` / `mithu://history` | could finish; downloads could not | `load_ms` 651 |
+| local page, Xvfb `-extension GLX` | `GLXBadWindow`, exit 0, no `load_ms` | `load_ms` 596, exit 0 |
+| local page, plain `xvfb-run -a` | same failure on CI | `load_ms` 595 |
 
 ## Still worse than Chromium
 

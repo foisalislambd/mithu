@@ -101,6 +101,13 @@ fn raster(kind: Kind, color: u32, size: u32) -> Vec<u8> {
     painted
 }
 
+/// Rasterize an SVG that uses `currentColor` into straight RGBA.
+pub(crate) fn raster_svg(svg: &str, color: u32, size: u32) -> (u32, u32, Vec<u8>) {
+    let size = size.max(1);
+    let bytes = paint_svg(svg, color, size);
+    (size, size, bytes)
+}
+
 fn paint_svg(svg: &str, color: u32, size: u32) -> Vec<u8> {
     let hex = format!("#{color:06x}");
     let svg = svg.replace("currentColor", &hex);
