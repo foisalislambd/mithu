@@ -49,6 +49,10 @@ struct Delegate {
     /// on every spin, so a page that paints once and then goes quiet would
     /// never count as settled.
     painted: Rc<AtomicBool>,
+    /// Webviews that produced a frame since the last spin. Only a frame from
+    /// the focused tab dirties the window, as Chromium's compositor only
+    /// draws visible surfaces.
+    ready: Rc<RefCell<Vec<servo::WebViewId>>>,
     opened: Rc<RefCell<Vec<PendingTab>>>,
     shot: Rc<RefCell<Option<servo::RgbaImage>>>,
     saves: Rc<RefCell<Vec<String>>>,
@@ -63,7 +67,7 @@ struct PendingTab {
 impl WebViewDelegate for Delegate {
     fn notify_new_frame_ready(&self, webview: WebView) {
         webview.paint();
-        self.frame.store(true, Ordering::SeqCst);
+        self.ready.borrow_mut().push(webview.id());
         self.painted.store(true, Ordering::SeqCst);
     }
 
@@ -126,6 +130,13 @@ struct Tab {
     group_id: u8,
     /// `MITHU_BENCH` printed this tab's first complete load.
     bench_reported: bool,
+    /// Servo has painted this tab's surface at least once, so reading it
+    /// back gives page pixels rather than an uninitialised buffer.
+    has_frame: bool,
+    /// When this tab was last the focused tab (discard order).
+    last_active: Instant,
+    /// Set while the tab is discarded: the URL to load when it is selected.
+    discarded: Option<Url>,
 }
 
 /// Wakes the engine thread when Servo has work, the same role as Chrome's
@@ -286,6 +297,20 @@ pub struct Browser {
     field: Field,
     permission_prompt: String,
     visibility_stamp: Option<(usize, usize, bool)>,
+    /// Last page pixels read from the focused tab's surface (0RGB rows).
+    /// Chrome-only repaints (hover, typing in the omnibox) reuse it instead
+    /// of reading the GL surface back again.
+    page_cache: Vec<u32>,
+    page_cache_dims: (u32, u32),
+    page_cache_id: Option<servo::WebViewId>,
+    page_dirty: bool,
+    /// `--screenshot` waits for Servo's screenshot readiness (images, fonts,
+    /// load event). The interactive window never does.
+    exact_capture: bool,
+    /// Animated wheel scrolling (Chromium's ease-in-out scroll curve).
+    scroller: mithu_ui::scroll::ScrollAnimator,
+    /// System memory pressure (Chromium's 5 s evaluator).
+    memory: mithu_ui::memory::Monitor,
 }
 
 impl Browser {
@@ -306,6 +331,7 @@ impl Browser {
             painted: painted.clone(),
             opened,
             shot: Rc::new(RefCell::new(None)),
+            ready: Rc::new(RefCell::new(Vec::new())),
             saves: Rc::new(RefCell::new(Vec::new())),
             permissions: Rc::new(RefCell::new(Vec::new())),
         };
@@ -401,6 +427,13 @@ impl Browser {
             field: Field::None,
             permission_prompt: String::new(),
             visibility_stamp: None,
+            page_cache: Vec::new(),
+            page_cache_dims: (0, 0),
+            page_cache_id: None,
+            page_dirty: true,
+            exact_capture: false,
+            scroller: mithu_ui::scroll::ScrollAnimator::new(),
+            memory: mithu_ui::memory::Monitor::new(),
         };
         browser.open_tab(start_url())?;
         browser.apply_prefs();
@@ -1105,6 +1138,34 @@ impl Browser {
         self.wheel(0.0, -f64::from(dy));
     }
 
+    /// A mouse-wheel notch: animate `dy` px over a few frames instead of
+    /// jumping (see [`mithu_ui::scroll`]). Touchpad pixel deltas use
+    /// [`Self::scroll_by`].
+    pub fn scroll_animated(&mut self, dy: f32) {
+        if self.overlay.is_some() {
+            return;
+        }
+        self.scroller.add(dy, Instant::now());
+        self.tick_scroll();
+    }
+
+    /// Emit this frame's share of any running wheel animation.
+    pub fn tick_scroll(&mut self) {
+        let delta = self.scroller.tick(Instant::now());
+        if delta != 0.0 {
+            self.wheel(0.0, -f64::from(delta));
+        }
+    }
+
+    /// Time until the next scroll animation frame, if one is running. The
+    /// engine thread uses it as its begin-frame deadline (60 Hz), like
+    /// Chromium's timer-based `DelayBasedBeginFrameSource` when there is no
+    /// vsync signal.
+    pub fn scroll_frame_due(&self) -> Option<Duration> {
+        self.scroller
+            .next_frame(Instant::now(), Duration::from_micros(16_667))
+    }
+
     pub fn scroll_page(&mut self, pages: f32) {
         let height = (self.viewport_h - self.content_top()).max(1.0);
         self.wheel(0.0, -f64::from(pages * height));
@@ -1242,6 +1303,9 @@ impl Browser {
             zoom: 1.0,
             group_id: 0,
             bench_reported: false,
+            has_frame: false,
+            last_active: Instant::now(),
+            discarded: None,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -1260,6 +1324,9 @@ impl Browser {
                 zoom: 1.0,
                 group_id: 0,
                 bench_reported: false,
+                has_frame: false,
+                last_active: Instant::now(),
+                discarded: None,
             });
             self.active = self.tabs.len() - 1;
             self.bump();
@@ -1280,12 +1347,118 @@ impl Browser {
         self.drain_permissions();
         self.sync_active();
         self.sync_visibility();
+        self.drain_ready_frames();
+        self.relieve_memory_pressure();
         if self.frame.swap(false, Ordering::SeqCst) {
             self.bump();
         }
         if mithu_host::bench_enabled() {
             self.bench_report();
         }
+    }
+
+    /// Discard one background tab when the system is short of memory
+    /// (see [`mithu_ui::memory`]).
+    fn relieve_memory_pressure(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.last_active = Instant::now();
+        }
+        if self.tabs.len() < 2 {
+            return;
+        }
+        let now = Instant::now();
+        let Some(level) = self.memory.poll(now) else {
+            return;
+        };
+        let candidates: Vec<mithu_ui::memory::Candidate> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| mithu_ui::memory::Candidate {
+                active: index == self.active,
+                discarded: tab.discarded.is_some(),
+                loaded: tab.has_frame || tab.webview.load_status() == LoadStatus::Complete,
+                last_active: tab.last_active,
+            })
+            .collect();
+        if let Some(index) = mithu_ui::memory::pick_discard(&candidates, level, now) {
+            self.discard_tab(index, level);
+        }
+    }
+
+    /// Chromium's tab discard: drop the page (and its content process once no
+    /// other tab of that site needs it) but keep the tab, its title, and its
+    /// URL. Selecting the tab loads the URL again.
+    fn discard_tab(&mut self, index: usize, level: mithu_ui::memory::Pressure) {
+        if index == self.active || index >= self.tabs.len() {
+            return;
+        }
+        let current = self.tabs[index].webview.url();
+        let Some(url) = current.or_else(|| Url::parse(&self.tabs[index].url).ok()) else {
+            return;
+        };
+        if !url.scheme().starts_with("http") {
+            return;
+        }
+        let Ok(context) = software_context(PhysicalSize::new(64, 64)) else {
+            return;
+        };
+        let context = Rc::new(context);
+        let dyn_ctx: Rc<dyn RenderingContext> = context.clone();
+        let delegate: Rc<dyn WebViewDelegate> = Rc::new(self.delegate.clone());
+        // An about:blank webview stays on the in-process event loop, so the
+        // placeholder does not start a content process.
+        let placeholder = WebViewBuilder::new(&self.servo, dyn_ctx)
+            .delegate(delegate)
+            .url(start_url())
+            .hidpi_scale_factor(euclid_scale())
+            .build();
+        placeholder.hide();
+        let tab = &mut self.tabs[index];
+        let old = std::mem::replace(&mut tab.webview, placeholder);
+        tab.context = context;
+        tab.has_frame = false;
+        tab.discarded = Some(url.clone());
+        drop(old);
+        if mithu_host::bench_enabled() {
+            eprintln!("mithu: discarded tab {index} ({url}) under {level:?} memory pressure");
+        }
+    }
+
+    /// Reload a discarded tab when it becomes the focused tab.
+    fn restore_discarded_active(&mut self) {
+        let size = self.content_physical();
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let Some(url) = tab.discarded.take() else {
+            return;
+        };
+        tab.webview.resize(size);
+        tab.webview.load(url);
+    }
+
+    fn drain_ready_frames(&mut self) {
+        let ready = std::mem::take(&mut *self.delegate.ready.borrow_mut());
+        if ready.is_empty() {
+            return;
+        }
+        let active = self.tabs.get(self.active).map(|tab| tab.webview.id());
+        for id in &ready {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.webview.id() == *id) {
+                tab.has_frame = true;
+            }
+        }
+        if active.is_some_and(|active| ready.contains(&active)) {
+            self.page_dirty = true;
+            self.bump();
+        }
+    }
+
+    /// Use Servo's screenshot path (waits for images, fonts, and the load
+    /// event) instead of reading the last painted frame.
+    pub fn set_exact_capture(&mut self, on: bool) {
+        self.exact_capture = on;
     }
 
     fn bench_report(&mut self) {
@@ -1307,6 +1480,11 @@ impl Browser {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
+        if tab.discarded.is_some() {
+            // Still the about:blank placeholder; the reload starts in
+            // `sync_visibility`, keep the remembered title and URL until then.
+            return;
+        }
         let status = tab.webview.load_status();
         let url = tab
             .webview
@@ -1952,34 +2130,77 @@ impl Browser {
     }
 
     fn blit_page(&mut self, pixels: &mut [u32], width: u32) {
-        let Some(image) = self.capture_page() else {
+        if self.exact_capture {
+            if let Some(image) = self.capture_page() {
+                self.store_page(&image);
+            }
+        } else {
+            self.refresh_page_cache();
+        }
+        let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
-        let top = self.content_top().round() as i32;
-        let raw = image.as_raw();
-        let iw = image.width() as i32;
-        let ih = image.height() as i32;
-        for y in 0..ih {
-            let dest_y = top + y;
-            if dest_y < 0 || dest_y >= self.viewport_h as i32 {
-                continue;
-            }
-            for x in 0..iw {
-                if x >= width as i32 {
-                    break;
-                }
-                let index = ((y as u32 * image.width()) + x as u32) as usize * 4;
-                if index + 3 >= raw.len() {
-                    break;
-                }
-                let pixel = rgb(
-                    raw[index] as u32,
-                    raw[index + 1] as u32,
-                    raw[index + 2] as u32,
-                );
-                pixels[(dest_y as u32 * width + x as u32) as usize] = pixel;
-            }
+        if self.page_cache_id != Some(tab.webview.id()) {
+            return;
         }
+        let (iw, ih) = self.page_cache_dims;
+        let top = self.content_top().round().max(0.0) as usize;
+        let width = width as usize;
+        let copy_w = (iw as usize).min(width);
+        let rows = (ih as usize).min((self.viewport_h as usize).saturating_sub(top));
+        for y in 0..rows {
+            let dest = (top + y) * width;
+            let src = y * iw as usize;
+            if dest + copy_w > pixels.len() {
+                break;
+            }
+            pixels[dest..dest + copy_w].copy_from_slice(&self.page_cache[src..src + copy_w]);
+        }
+    }
+
+    /// Read the focused tab's surface straight after Servo painted it, the
+    /// way a compositor presents its latest frame. Before, every window
+    /// frame went through `take_screenshot`, which waits until every image,
+    /// web font, and load event has finished, and spun the engine thread in
+    /// 1 ms sleeps until then.
+    fn refresh_page_cache(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let id = tab.webview.id();
+        let size = tab.context.size();
+        let fresh = !self.page_dirty
+            && self.page_cache_id == Some(id)
+            && self.page_cache_dims == (size.width, size.height);
+        if fresh || !tab.has_frame {
+            return;
+        }
+        let _ = tab.context.make_current();
+        let rect = servo::DeviceIntRect::from_origin_and_size(
+            servo::DeviceIntPoint::new(0, 0),
+            servo::DeviceIntSize::new(size.width as i32, size.height as i32),
+        );
+        let Some(image) = tab.context.read_to_image(rect) else {
+            return;
+        };
+        self.store_page(&image);
+    }
+
+    fn store_page(&mut self, image: &servo::RgbaImage) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let (iw, ih) = (image.width(), image.height());
+        let raw = image.as_raw();
+        self.page_cache.clear();
+        self.page_cache.reserve((iw as usize) * (ih as usize));
+        self.page_cache.extend(
+            raw.chunks_exact(4)
+                .map(|px| rgb(px[0] as u32, px[1] as u32, px[2] as u32)),
+        );
+        self.page_cache_dims = (iw, ih);
+        self.page_cache_id = Some(tab.webview.id());
+        self.page_dirty = false;
     }
 
     fn draw_overlay(&self, pixels: &mut [u32], width: u32, height: u32) {
@@ -2589,6 +2810,8 @@ impl Browser {
             return;
         }
         self.visibility_stamp = Some(stamp);
+        self.scroller.cancel();
+        self.restore_discarded_active();
         let active = self.active;
         for (index, tab) in self.tabs.iter().enumerate() {
             if index == active {

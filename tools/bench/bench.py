@@ -130,17 +130,20 @@ def proc_sample(pid):
         if line.startswith(b"VmRSS:"):
             rss = int(line.split()[1])
             break
-    # /proc/PID/status only counts the main thread's switches; sum every task.
-    switches = 0
+    # /proc/PID/status only counts the main thread's switches; read every
+    # task, keyed by thread id so a thread that exits keeps its last count.
+    switches = {}
     try:
         tasks = os.listdir(f"/proc/{pid}/task")
     except OSError:
         tasks = []
     for task in tasks:
         task_status = read(f"/proc/{pid}/task/{task}/status") or b""
+        count = 0
         for line in task_status.split(b"\n"):
             if line.startswith(b"voluntary_ctxt_switches:") or line.startswith(b"nonvoluntary_ctxt_switches:"):
-                switches += int(line.split()[1])
+                count += int(line.split()[1])
+        switches[int(task)] = count
     pss = None
     rollup = read(f"/proc/{pid}/smaps_rollup")
     if rollup:
@@ -159,7 +162,8 @@ class Sampler:
         self.root, self.tag, self.period = root, tag, period
         self.samples = []  # (t, rss_kb, pss_kb, pss_complete, procs)
         self.cpu = {}  # pid -> last ticks
-        self.switches = {}  # pid -> last switches
+        self.cpu_by_name = {}
+        self.switches = {}  # (pid, tid) -> last switch count
         self.names = {}
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -183,7 +187,9 @@ class Sampler:
             if not sample:
                 continue
             self.cpu[pid] = sample["ticks"]
-            self.switches[pid] = sample["switches"]
+            self.cpu_by_name[pid] = (sample["comm"], sample["ticks"])
+            for tid, count in sample["switches"].items():
+                self.switches[(pid, tid)] = count
             self.names[pid] = sample["comm"]
             rss += sample["rss"]
             if sample["pss"] is None:
@@ -317,7 +323,7 @@ def mithu_command(binary, urls):
 
 
 class Run:
-    def __init__(self, browser, binary, urls, display):
+    def __init__(self, browser, binary, urls, display, extra_env=None):
         self.browser, self.binary, self.urls = browser, binary, urls
         self.home = tempfile.mkdtemp(prefix="mithu-bench-home-")
         self.tag = uuid.uuid4().hex
@@ -328,6 +334,7 @@ class Run:
                     "XDG_DATA_HOME": f"{self.home}/.local/share", "XDG_CACHE_HOME": f"{self.home}/.cache",
                     "GDK_BACKEND": "x11", "NO_AT_BRIDGE": "1"})
         env.pop("WAYLAND_DISPLAY", None)
+        env.update(extra_env or {})
         if browser == "chromium":
             command = chrome_command(binary, f"{self.home}/profile", self.port, urls)
         else:
@@ -385,8 +392,9 @@ class Run:
         shutil.rmtree(self.home, ignore_errors=True)
 
 
-def measure(browser, binary, urls, display, idle=10.0, timeout=60.0, settle=0.0, scroll=False):
-    run = Run(browser, binary, urls, display)
+def measure(browser, binary, urls, display, idle=10.0, timeout=60.0, settle=0.0, scroll=False,
+            extra_env=None, after_load=0.0):
+    run = Run(browser, binary, urls, display, extra_env)
     result = {"browser": browser, "urls": urls}
     try:
         if urls:
@@ -417,7 +425,7 @@ def measure(browser, binary, urls, display, idle=10.0, timeout=60.0, settle=0.0,
             result["scroll_wall_s"] = round(elapsed, 2)
         # Two seconds for post-load work (late scripts, first paint of
         # below-the-fold images) before the idle window opens.
-        time.sleep(2.0)
+        time.sleep(2.0 + after_load)
         run.sampler.once()
         cpu0, sw0, t0 = run.sampler.cpu_seconds(), run.sampler.total_switches(), time.monotonic()
         time.sleep(idle)
@@ -434,6 +442,10 @@ def measure(browser, binary, urls, display, idle=10.0, timeout=60.0, settle=0.0,
         result["pss_complete"] = all(s[3] for s in tail)
         result["processes"] = tail[-1][4] if tail else None
         result["process_names"] = sorted(set(run.sampler.names.values()))
+        by_name = {}
+        for comm, ticks in run.sampler.cpu_by_name.values():
+            by_name[comm] = by_name.get(comm, 0) + ticks / TICK
+        result["cpu_s_by_process"] = {k: round(v, 2) for k, v in sorted(by_name.items())}
     finally:
         run.stop()
     return result
@@ -486,6 +498,13 @@ def main():
                         result = measure(kind, path, [], display, idle=args.idle, settle=5.0)
                     elif scenario == "tabs10":
                         result = measure(kind, path, TEN_TABS, display, idle=args.idle, timeout=90)
+                    elif scenario == "tabs10-pressure":
+                        # Mithu only: force critical memory pressure (one discard per
+                        # 5 s sample) and wait long enough for nine discards.
+                        if kind == "chromium":
+                            continue
+                        result = measure(kind, path, TEN_TABS, display, idle=args.idle, timeout=90,
+                                         extra_env={"MITHU_MEMORY_PRESSURE": "critical"}, after_load=50.0)
                     elif scenario == "scroll":
                         result = measure(kind, path, [SCROLL_URL], display, idle=args.idle, scroll=True)
                     else:
@@ -496,6 +515,8 @@ def main():
                     time.sleep(1.0)
             for name, _ in browsers:
                 cell = report["results"][scenario][name]
+                if not cell["raw"]:
+                    continue
                 cell["median"] = {key: median_of(cell["raw"], key) for key in KEYS}
                 cell["median"]["timeouts"] = sum(1 for r in cell["raw"] if r.get("timeout"))
             with open(args.out, "w") as handle:

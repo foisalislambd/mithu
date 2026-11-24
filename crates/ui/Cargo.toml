@@ -12,6 +12,7 @@ description = "Shared Mithu desktop frame: tabs, toolbar, omnibox, and icons"
 mithu-text = { path = "../text" }
 arboard = "3.7"
 png = "0.18"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 resvg = "0.50"
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
 url = "2"

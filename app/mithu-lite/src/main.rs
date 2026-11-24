@@ -59,8 +59,68 @@ fn main() {
         }
     };
     let mut app = App::new(config);
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    run_with_glib(event_loop, &mut app);
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
     if let Err(error) = event_loop.run_app(&mut app) {
         mithu_host::report_fatal(&format!("could not run the window: {error}"));
+    }
+}
+
+/// One blocking wait for both winit and GTK/WebKit.
+///
+/// Before, the window woke every 16 ms to drain GTK, whether or not anything
+/// had happened. Chromium on Linux runs its UI thread on
+/// `base::MessagePumpGlib` (`base/message_loop/message_pump_glib.cc`): one
+/// `poll()` over the glib sources plus Chromium's own wakeup fd. This does the
+/// same: winit's event-loop fd is added to the default glib context, the loop
+/// blocks in `g_main_context_iteration`, and winit is pumped whenever its fd
+/// is readable or a GTK/WebKit source ran.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn run_with_glib(mut event_loop: EventLoop<()>, app: &mut App) {
+    use std::cell::Cell;
+    use std::os::fd::AsRawFd;
+    use std::rc::Rc;
+
+    use gtk::glib;
+    use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+
+    let context = glib::MainContext::default();
+    let fd = event_loop.as_raw_fd();
+    let _watch = glib::source::unix_fd_add_local(fd, glib::IOCondition::IN, |_, _| glib::ControlFlow::Continue);
+    loop {
+        if let PumpStatus::Exit(_) = event_loop.pump_app_events(Some(Duration::ZERO), app) {
+            return;
+        }
+        let fired = Rc::new(Cell::new(false));
+        let timer = app.next_wake().map(|wait| {
+            let fired = fired.clone();
+            glib::timeout_add_local_once(wait, move || fired.set(true))
+        });
+        context.iteration(true);
+        if let Some(timer) = timer {
+            if !fired.get() {
+                timer.remove();
+            }
+        }
     }
 }
 
@@ -160,6 +220,12 @@ struct TabInfo {
     id: u64,
     /// `MITHU_BENCH` printed this tab's first finished load.
     bench_reported: bool,
+    /// A load finished at least once (discard eligibility).
+    loaded: bool,
+    /// When this tab was last the focused tab (discard order).
+    last_active: Instant,
+    /// Set while discarded: the URL to load when the tab is selected again.
+    discarded: Option<String>,
     title: String,
     url: String,
     loading: bool,
@@ -205,6 +271,9 @@ struct Model {
     prefs: mithu_ui::pages::Prefs,
     group_editor: bool,
     window_name: String,
+    /// Bumped whenever a WebKit callback changes the model, so the frame is
+    /// repainted once per change instead of on a timer.
+    generation: u64,
 }
 
 impl Model {
@@ -248,6 +317,7 @@ impl Model {
             prefs,
             group_editor: false,
             window_name: String::new(),
+            generation: 0,
         }
     }
 
@@ -295,6 +365,9 @@ struct Tab {
     webview: WebView,
 }
 
+/// System memory pressure for tab discarding (see `mithu_ui::memory`).
+struct Memory(mithu_ui::memory::Monitor);
+
 struct App {
     config: Config,
     shared: Arc<Mutex<Model>>,
@@ -311,6 +384,10 @@ struct App {
     captured: bool,
     rss_mark: Instant,
     scale: f32,
+    painted_generation: u64,
+    memory: Memory,
+    /// Chrome hit target under the pointer at the last paint.
+    hover: Hit,
 }
 
 impl App {
@@ -336,6 +413,9 @@ impl App {
             captured: false,
             rss_mark: Instant::now(),
             scale: 1.0,
+            painted_generation: 0,
+            memory: Memory(mithu_ui::memory::Monitor::new()),
+            hover: Hit::None,
         }
     }
 
@@ -351,6 +431,9 @@ impl App {
             model.tabs.push(TabInfo {
                 id,
                 bench_reported: false,
+                loaded: false,
+                last_active: Instant::now(),
+                discarded: None,
                 title: "New Tab".into(),
                 url: if show_ntp { "about:newtab".into() } else { url.to_string() },
                 loading: !show_ntp && !url.is_empty(),
@@ -498,6 +581,79 @@ impl App {
             if show {
                 let _ = tab.webview.set_bounds(bounds);
             }
+        }
+        self.restore_discarded_active();
+    }
+
+    /// Reload a discarded tab once it is the focused tab again.
+    fn restore_discarded_active(&mut self) {
+        let url = {
+            let mut model = self.model();
+            let Some(tab) = model.active_mut() else {
+                return;
+            };
+            tab.last_active = Instant::now();
+            let Some(url) = tab.discarded.take() else {
+                return;
+            };
+            tab.loading = true;
+            url
+        };
+        if let Some(webview) = self.active_webview() {
+            let _ = webview.load_url(&url);
+        }
+    }
+
+    /// Chromium-style tab discarding under memory pressure: replace one
+    /// background tab's webview (and with it the WebKit web process that
+    /// rendered it) by an empty one, keeping its title and URL in the strip.
+    fn relieve_memory_pressure(&mut self) {
+        let now = Instant::now();
+        let (candidates, urls) = {
+            let mut model = self.model();
+            if model.tabs.len() < 2 {
+                return;
+            }
+            let active = model.active;
+            if let Some(tab) = model.active_mut() {
+                tab.last_active = now;
+            }
+            let candidates: Vec<mithu_ui::memory::Candidate> = model
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(index, tab)| mithu_ui::memory::Candidate {
+                    active: index == active,
+                    discarded: tab.discarded.is_some(),
+                    loaded: tab.loaded && tab.url.starts_with("http"),
+                    last_active: tab.last_active,
+                })
+                .collect();
+            let urls: Vec<(u64, String)> = model.tabs.iter().map(|tab| (tab.id, tab.url.clone())).collect();
+            (candidates, urls)
+        };
+        let Some(level) = self.memory.0.poll(now) else {
+            return;
+        };
+        let Some(index) = mithu_ui::memory::pick_discard(&candidates, level, now) else {
+            return;
+        };
+        let (id, url) = urls[index].clone();
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let Ok(fresh) = self.build_webview(&window, id) else {
+            return;
+        };
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            let old = std::mem::replace(&mut tab.webview, fresh);
+            drop(old);
+        }
+        if let Some(tab) = self.model().tab_mut(id) {
+            tab.discarded = Some(url.clone());
+        }
+        if mithu_host::bench_enabled() {
+            eprintln!("mithu-lite: discarded tab {index} ({url}) under {level:?} memory pressure");
         }
     }
 
@@ -1308,13 +1464,16 @@ impl App {
         }
         let px_w = width.get();
         let px_h = height.get();
-        let pixels = {
+        let (pixels, hover, generation) = {
             let mut pixels = vec![0x00ff_ffff; (px_w as usize) * (px_h as usize)];
             let model = self.model();
             let state = self.paint_state(&model);
             chrome::paint(&mut pixels, px_w, px_h, &state);
-            pixels
+            let hover = chrome::hit(&state, model.pointer.0, model.pointer.1);
+            (pixels, hover, model.generation)
         };
+        self.hover = hover;
+        self.painted_generation = generation;
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
@@ -1361,6 +1520,33 @@ impl App {
             } else {
                 self.load_in_active(&action);
             }
+        }
+    }
+
+    fn measuring(&self) -> bool {
+        (!self.reported && self.config.hold.is_some()) || self.config.screenshot.is_some()
+    }
+
+    /// How long the loop may sleep with no input. On Linux the GTK/WebKit
+    /// sources and winit's own fd wake [`run_with_glib`], so only the
+    /// screenshot/hold timers need a deadline. Elsewhere WebKit callbacks are
+    /// not tied to winit's loop here, so keep the 16 ms tick.
+    fn next_wake(&self) -> Option<Duration> {
+        if self.measuring() || self.config.hold.is_some() {
+            return Some(Duration::from_millis(16));
+        }
+        // With two or more tabs, wake for the 5 s memory-pressure sample.
+        let sample = (self.tabs.len() >= 2).then(|| self.memory.0.due_in(Instant::now()));
+        if cfg!(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )) {
+            sample
+        } else {
+            Some(Duration::from_millis(16))
         }
     }
 
@@ -1499,8 +1685,20 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::CursorMoved { position, .. } => {
-                self.model().pointer = (position.x as f32, position.y as f32);
-                self.request_redraw();
+                // Repaint only when the hovered control changes, as a Views
+                // widget schedules paint on mouse enter/exit rather than on
+                // every motion event. Open popups track the pointer, so they
+                // still repaint on each move.
+                let point = (position.x as f32, position.y as f32);
+                let (hit, tracking) = {
+                    let mut model = self.model();
+                    model.pointer = point;
+                    let tracking = model.pressed || model.menu.is_some() || model.tab_search || model.extensions || model.profile || model.group_editor;
+                    (chrome::hit(&self.paint_state(&model), point.0, point.1), tracking)
+                };
+                if tracking || hit != self.hover {
+                    self.request_redraw();
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let (x, y) = self.model().pointer;
@@ -1614,12 +1812,19 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         pump_host();
         self.poll_shared();
+        self.relieve_memory_pressure();
         self.maybe_finish(event_loop);
-        if self.model().active().is_some_and(|tab| tab.loading) || !self.reported && self.config.hold.is_some() || self.config.screenshot.is_some()
-        {
+        // The frame has no time-based animation, so a loading tab does not
+        // need a 60 Hz repaint: repaint when a WebKit callback changed the
+        // model (load started/finished, title, IPC) and otherwise sleep.
+        let dirty = self.model().generation != self.painted_generation;
+        if dirty || self.measuring() {
             self.request_redraw();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
+        event_loop.set_control_flow(match self.next_wake() {
+            Some(wait) => ControlFlow::WaitUntil(Instant::now() + wait),
+            None => ControlFlow::Wait,
+        });
     }
 }
 
@@ -1644,6 +1849,7 @@ fn on_load(shared: &Mutex<Model>, id: u64, event: PageLoadEvent, url: &str) {
                     tab.url = url.to_string();
                 }
                 tab.loading = false;
+                tab.loaded = true;
                 if track && !tab.bench_reported && mithu_host::bench_enabled() {
                     tab.bench_reported = true;
                     mithu_host::bench_report_loaded(url);
@@ -1699,8 +1905,12 @@ fn on_ipc(shared: &Mutex<Model>, id: u64, body: &str) {
     }
 }
 
+/// Lock the model from a WebKit callback. Every callback locks to change
+/// something, so this also marks the frame dirty.
 fn lock(shared: &Mutex<Model>) -> std::sync::MutexGuard<'_, Model> {
-    shared.lock().unwrap_or_else(|poison| poison.into_inner())
+    let mut model = shared.lock().unwrap_or_else(|poison| poison.into_inner());
+    model.generation = model.generation.wrapping_add(1);
+    model
 }
 
 fn menu_labels(model: &Model) -> Vec<String> {
