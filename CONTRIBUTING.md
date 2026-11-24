@@ -1,6 +1,6 @@
 # Contributing to Mithu
 
-Mithu is open source under the BSD 3-Clause license. Issues and pull requests are welcome at [github.com/foisalislambd/mithu](https://github.com/foisalislambd/mithu).
+Mithu is open source under the Apache License, Version 2.0. Issues and pull requests are welcome at [github.com/foisalislambd/mithu](https://github.com/foisalislambd/mithu).
 
 ## What to send
 

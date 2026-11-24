@@ -68,9 +68,8 @@ Other bundled assets and dependencies keep their own licenses, including:
 - Rust crate dependencies declared in `Cargo.toml` / `Cargo.lock`, under
   each crate's own license.
 
-## Engines (Lintel, Reed, Tercel, Gable)
+## Engines (Lintel, Reed, Tercel, Gable, Purlin, Transom, Eave, Wainscot)
 
-Lintel, Reed, Tercel, and Gable are separate projects, each dual-licensed
-under AGPL-3.0-only and a commercial license. A Mithu build that links any
-of those engines is subject to AGPL-3.0 unless a commercial license is
-obtained from Foisal Islam.
+These engines are separate projects, each licensed under the Apache License,
+Version 2.0, the same license as Mithu. Each keeps its own upstream notices in
+its `THIRD_PARTY_NOTICES.md`.

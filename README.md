@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/foisalislambd/mithu/releases"><img alt="Release" src="https://img.shields.io/github/v/release/foisalislambd/mithu?label=release"></a>
   <a href="https://github.com/foisalislambd/mithu/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/foisalislambd/mithu/ci.yml?branch=main&amp;label=CI"></a>
-  <a href="LICENSE"><img alt="License: BSD-3-Clause" src="https://img.shields.io/badge/license-BSD--3--Clause-blue"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
   <a href="https://github.com/foisalislambd/mithu/releases"><img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey"></a>
   <a href="VERSION.md"><img alt="Version 0.1.9" src="https://img.shields.io/badge/version-0.1.9-2ea44f"></a>
 </p>
@@ -243,6 +243,8 @@ Pushing `main` publishes a GitHub Release only when that version is strictly gre
 
 [docs/ROADMAP.md](docs/ROADMAP.md) is the older note from the in-tree engine. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the Servo shell.
 
+Engine progress (Lintel, Reed, Tercel, Gable, Purlin, Transom, Eave, Wainscot) is measured by upstream test conformance, not by headline estimates; see [docs/MEASURING.md](docs/MEASURING.md).
+
 ## Contributing
 
 Issues and pull requests go to [github.com/foisalislambd/mithu](https://github.com/foisalislambd/mithu). Read [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Report a security problem through [SECURITY.md](SECURITY.md).
@@ -251,8 +253,8 @@ The interface stays in English. Workspace crates forbid `unsafe` code, except `c
 
 ## License
 
-Mithu's own code is licensed under the [BSD 3-Clause License](LICENSE). Copyright (c) 2026 Foisal Islam.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Upstream notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-The "Mithu" name and logo are not licensed under the BSD-3-Clause (or any other software license). You may not use them to endorse or promote a derived product without permission.
+The "Mithu" name and logo are not licensed under Apache-2.0 (or any other software license). You may not use them to endorse or promote a derived product without permission.
 
-`third_party/servo` is [Servo](https://github.com/servo/servo) and remains under MPL-2.0. Other third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). A build that links the Lintel, Reed, Tercel, or Gable engines is subject to those engines' AGPL-3.0 terms unless a commercial license is obtained.
+`third_party/servo` is [Servo](https://github.com/servo/servo) and stays under MPL-2.0; it is not relicensed. The Lintel, Reed, Tercel, Gable, Purlin, Transom, Eave, and Wainscot engines are also Apache-2.0.
