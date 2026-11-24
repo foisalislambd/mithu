@@ -1616,7 +1616,10 @@ fn paint_group_editor(pixels: &mut [u32], width: u32, height: u32, state: &State
 
 fn permission_bar(state: &State<'_>) -> Rect {
     let tools = toolbar(state.width, state.scale, state.show_home);
-    let w = dip(420.0).min(state.width - tools.address.x - dip(8.0)).max(dip(240.0));
+    // Wide enough for the prompt, Block and Allow, like Chrome's permission bubble.
+    let text = text_width(state.fonts, state.permission_prompt, MENU_FONT);
+    let wanted = (dip(16.0) + text + dip(8.0) + dip(72.0) * 2.0 + dip(20.0) + dip(12.0)).ceil();
+    let w = wanted.max(dip(420.0)).min(state.width - tools.address.x - dip(8.0)).max(dip(240.0));
     Rect { x: tools.address.x, y: content_chrome(state) + dip(4.0), w, h: dip(48.0) }
 }
 
