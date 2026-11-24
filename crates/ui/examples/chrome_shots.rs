@@ -19,6 +19,10 @@ struct Scene {
     menu: bool,
     loading: bool,
     bookmarks: bool,
+    /// New Tab page overlay, full window height.
+    ntp: bool,
+    /// Named tab group with its editor open and a permission prompt.
+    group: bool,
 }
 
 fn main() {
@@ -36,6 +40,8 @@ fn main() {
         menu: false,
         loading: false,
         bookmarks: true,
+        ntp: false,
+        group: false,
     };
     let scenes = [
         Scene { ..base },
@@ -51,16 +57,27 @@ fn main() {
         Scene { name: "light-loading", loading: true, ..base },
         Scene { name: "light-2x", scale: 2.0, ..base },
         Scene { name: "light-nobookmarks", bookmarks: false, ..base },
+        Scene { name: "dark-newtab-page", dark: true, omnibox: "", secure: Secure::Internal, ntp: true, ..base },
+        Scene { name: "light-menu-newtab", omnibox: "", secure: Secure::Internal, menu: true, ntp: true, ..base },
+        Scene { name: "light-group-permission", omnibox: "https://example.com/notes", ntp: false, group: true, ..base },
     ];
     for scene in scenes {
         let s = scene.scale;
         let (w, h) = (1280.0 * s, 220.0 * s);
-        let tabs = vec![
+        let mut tabs = vec![
             tab("Wikipedia, the free encyclopedia", 0),
             tab("Rust Programming Language", 0),
             tab("GitHub - foisalislambd/mithu: A Rust browser", 0),
             tab("New Tab", 0),
         ];
+        if scene.ntp {
+            tabs = vec![tab("New Tab", 0)];
+        }
+        if scene.group {
+            tabs = vec![tab("Notes - example.com", 1), tab("Maps - example.com", 1), tab("Rust Programming Language", 0)];
+            tabs[0].group_name = "Work".into();
+            tabs[1].group_name = "Work".into();
+        }
         let menu_labels: Vec<String> = mithu_ui::menus::labels(&mithu_ui::menus::app_menu(), 100);
         let state = State {
             width: w,
@@ -85,7 +102,7 @@ fn main() {
             link_status: String::new(),
             pointer: (scene.pointer.0 * s, scene.pointer.1 * s),
             pressed: false,
-            ntp: false,
+            ntp: scene.ntp,
             menu: if scene.menu { Some(Popup::App) } else { None },
             menu_labels,
             submenu_at: None,
@@ -101,10 +118,11 @@ fn main() {
             scale: s,
             dark: scene.dark,
             show_home: true,
-            group_editor: false,
-            permission_prompt: "",
+            group_editor: scene.group,
+            permission_prompt: if scene.group { "example.com wants to use your camera" } else { "" },
         };
-        let (pw, ph) = (w as u32, if scene.menu { 720.0 * s } else { h } as u32);
+        let full = scene.ntp || scene.group;
+        let (pw, ph) = (w as u32, if full { 800.0 * s } else if scene.menu { 720.0 * s } else { h } as u32);
         let state = State { height: ph as f32, ..state };
         let page = if scene.dark { 0x202124 } else { 0xffffff };
         let mut pixels = vec![page; (pw * ph) as usize];

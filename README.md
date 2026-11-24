@@ -96,11 +96,11 @@ Those sizes are from Linux x86_64 release builds (`opt-level = "z"`, thin LTO, s
   <img src="docs/screenshots/lite-github.png" alt="Mithu Lite on GitHub" width="420">
 </p>
 <p align="center">
-  <img src="docs/screenshots/mithu-newtab.png" alt="Full Mithu new-tab page" width="420">
+  <img src="docs/screenshots/mithu-newtab.png" alt="Full Mithu new-tab page in the dark theme" width="420">
   <img src="docs/screenshots/lite-newtab.png" alt="Mithu Lite new-tab page" width="420">
 </p>
 
-<p align="center"><em>Same frame on Wikipedia, GitHub, and the new tab. Servo still drops some images on Wikipedia.</em></p>
+<p align="center"><em>Same Chromium-style frame on Wikipedia, GitHub, and the new tab. Servo still drops some images on Wikipedia.</em></p>
 
 The internal pages use the same layout in light and dark.
 
@@ -109,19 +109,19 @@ The internal pages use the same layout in light and dark.
   <img src="docs/screenshots/page-settings.png" alt="Mithu settings, You page, light theme" width="420">
 </p>
 <p align="center">
-  <img src="docs/screenshots/page-settings-dark.png" alt="Mithu settings in the dark theme" width="420">
+  <img src="docs/screenshots/page-settings-dark.png" alt="Mithu settings, Appearance page, dark theme" width="420">
   <img src="docs/screenshots/page-site-settings.png" alt="Mithu site settings, with Ask first on each permission" width="420">
 </p>
 <p align="center">
-  <img src="docs/screenshots/page-history.png" alt="Mithu history page" width="420">
-  <img src="docs/screenshots/page-downloads.png" alt="Mithu downloads page" width="420">
+  <img src="docs/screenshots/page-history.png" alt="Mithu history page with visits grouped by day" width="420">
+  <img src="docs/screenshots/page-downloads.png" alt="Mithu download history with two finished downloads" width="420">
 </p>
 <p align="center">
-  <img src="docs/screenshots/page-bookmarks.png" alt="Mithu bookmarks manager" width="420">
+  <img src="docs/screenshots/page-bookmarks.png" alt="Mithu bookmarks manager with the Bookmarks bar folder open" width="420">
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/group-permission.png" alt="A named tab group, its color editor, and a camera permission prompt with Block and Allow" width="720">
+  <img src="docs/screenshots/group-permission.png" alt="A tab group named Work, its color editor, and a camera permission prompt with Block and Allow" width="720">
 </p>
 
 <p align="center"><em>App menu, settings, site settings, history, downloads, and bookmarks. The last picture is a tab group named Work, its editor, and a camera prompt.</em></p>
