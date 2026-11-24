@@ -106,25 +106,11 @@ fn run_with_glib(mut event_loop: EventLoop<()>, app: &mut App) {
     GLIB_OWNS_LOOP.store(true, std::sync::atomic::Ordering::Relaxed);
     let context = glib::MainContext::default();
     let fd = event_loop.as_raw_fd();
-    let hits = Rc::new(Cell::new(0u64));
-    let _watch = glib::source::unix_fd_add_local(fd, glib::IOCondition::IN, {
-        let hits = hits.clone();
-        move |_, _| {
-            hits.set(hits.get() + 1);
-            glib::ControlFlow::Continue
-        }
+    // The watch only wakes `iteration`; winit reads its own fd when pumped.
+    let _watch = glib::source::unix_fd_add_local(fd, glib::IOCondition::IN, |_, _| {
+        glib::ControlFlow::Continue
     });
-    let debug = std::env::var_os("MITHU_PUMP_DEBUG").is_some();
-    let mut spins = 0u64;
-    let mut mark = Instant::now();
     loop {
-        spins += 1;
-        if debug && mark.elapsed() >= Duration::from_secs(1) {
-            eprintln!("pump: {spins} iterations, {} winit fd wakes", hits.get());
-            spins = 0;
-            hits.set(0);
-            mark = Instant::now();
-        }
         if let PumpStatus::Exit(_) = event_loop.pump_app_events(Some(Duration::ZERO), app) {
             return;
         }
