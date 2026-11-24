@@ -3885,6 +3885,7 @@ version = "0.1.9"
 dependencies = [
  "dpi",
  "euclid",
+ "mithu-host",
  "mithu-text",
  "mithu-ui",
  "rustls",
