@@ -4,7 +4,7 @@ Mithu follows the first line of `VERSION.md`. Dates are the day the release is t
 
 ## Unreleased
 
-Lite finishes page loads under Xvfb again. The glib loop from 0.2.0 stays, and a wake no longer repaints the frame, which on Xvfb turned into a resize loop that never ran WebKit. `mithu://downloads` was treated as a `mithu://do` settings command because the check was a string prefix, so that page never started; it is now a real navigation. `mithu://` pages are served by a custom scheme, and internal pages keep their URL and icon in the frame.
+Lite finishes page loads under Xvfb again. The glib loop from 0.2.0 stays, and a wake no longer repaints the frame, which on Xvfb turned into a resize loop that never ran WebKit. A plain Xvfb with no GLX visual no longer fails window creation with `GLXBadWindow` (GTK's GL probe was sharing winit's X connection); if the window still cannot open, Lite exits non-zero. `mithu://downloads` was treated as a `mithu://do` settings command because the check was a string prefix, so that page never started; it is now a real navigation. `mithu://` pages are served by a custom scheme, and internal pages keep their URL and icon in the frame.
 
 ## 0.2.1
 

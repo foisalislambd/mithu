@@ -42,6 +42,14 @@ fn app_icon() -> Option<winit::window::Icon> {
 }
 
 fn main() {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    ensure_gl_env();
     mithu_host::init("mithu-lite");
     let config = Config::from_args();
     #[cfg(any(
@@ -139,6 +147,13 @@ fn run_with_glib(mut event_loop: EventLoop<()>, app: &mut App) {
 
 /// Dispatch sources that are already ready. The winit fd watch stays ready
 /// until winit is pumped, so this cannot loop until `pending` is false.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
 fn drain_glib(context: &gtk::glib::MainContext) {
     for _ in 0..32 {
         if !context.pending() {
@@ -146,6 +161,49 @@ fn drain_glib(context: &gtk::glib::MainContext) {
         }
         context.iteration(false);
     }
+}
+
+/// GTK and winit share the process-wide Xlib `Display`. On a plain Xvfb,
+/// GTK's GL probe leaves `GLXBadWindow` on that connection and winit reports
+/// it as a failed `create_window`. `std::env::set_var` is unsafe, so start
+/// one child with the variables set and exit with its status.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn ensure_gl_env() {
+    if std::env::var_os("MITHU_GL_READY").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = std::process::Command::new(exe);
+    command.args(std::env::args_os().skip(1));
+    command.env("MITHU_GL_READY", "1");
+    if std::env::var_os("GDK_GL").is_none() {
+        // Lite paints with softbuffer, not a GTK GL context.
+        command.env("GDK_GL", "disable");
+    }
+    if !display_has_glx() {
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            command.env("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            command.env("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
+    let code = match command.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("mithu-lite: could not apply the display settings: {error}");
+            1
+        }
+    };
+    std::process::exit(code);
 }
 
 #[cfg(any(
@@ -165,6 +223,144 @@ fn init_gtk() {
         eprintln!("mithu-lite: the frame shares an X11 window with WebKit. Set GDK_BACKEND=x11.");
         std::process::exit(1);
     }
+}
+
+/// `true` when the display advertises GLX, or when we could not ask.
+/// A definite "no" is the plain Xvfb case: WebKit must not open a GLX window.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn display_has_glx() -> bool {
+    let Ok(display) = std::env::var("DISPLAY") else {
+        return true;
+    };
+    let Some(number) = x11_display_number(&display) else {
+        return true;
+    };
+    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(format!("/tmp/.X11-unix/X{number}")) else {
+        return true;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+    match x11_glx_present(&mut stream, x11_cookie(number).as_deref()) {
+        Some(present) => present,
+        None => true,
+    }
+}
+
+fn x11_display_number(display: &str) -> Option<u16> {
+    let rest = display.trim().rsplit(':').next()?;
+    let number = rest.split(['.', ' ']).next()?.trim();
+    if number.is_empty() {
+        return None;
+    }
+    number.parse().ok()
+}
+
+fn x11_cookie(display_number: u16) -> Option<Vec<u8>> {
+    let path = std::env::var_os("XAUTHORITY").map(PathBuf::from).or_else(|| {
+        let home = std::env::var_os("HOME")?;
+        Some(PathBuf::from(home).join(".Xauthority"))
+    })?;
+    let bytes = std::fs::read(&path).ok()?;
+    find_mit_cookie(&bytes, &display_number.to_string())
+}
+
+fn find_mit_cookie(bytes: &[u8], number: &str) -> Option<Vec<u8>> {
+    let mut index = 0;
+    let mut fallback = None;
+    while index + 4 <= bytes.len() {
+        index += 2; // address family
+        let _address = take_counted(bytes, &mut index)?;
+        let display_number = take_counted(bytes, &mut index)?;
+        let name = take_counted(bytes, &mut index)?;
+        let data = take_counted(bytes, &mut index)?;
+        if name != b"MIT-MAGIC-COOKIE-1" {
+            continue;
+        }
+        if display_number == number.as_bytes() {
+            return Some(data.to_vec());
+        }
+        if display_number.is_empty() {
+            fallback = Some(data.to_vec());
+        }
+    }
+    fallback
+}
+
+fn take_counted<'a>(bytes: &'a [u8], index: &mut usize) -> Option<&'a [u8]> {
+    if *index + 2 > bytes.len() {
+        return None;
+    }
+    let len = u16::from_be_bytes([bytes[*index], bytes[*index + 1]]) as usize;
+    *index += 2;
+    let end = index.checked_add(len)?;
+    if end > bytes.len() {
+        return None;
+    }
+    let slice = &bytes[*index..end];
+    *index = end;
+    Some(slice)
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn x11_glx_present(stream: &mut std::os::unix::net::UnixStream, cookie: Option<&[u8]>) -> Option<bool> {
+    use std::io::{Read, Write};
+    let name: &[u8] = if cookie.is_some() { b"MIT-MAGIC-COOKIE-1" } else { b"" };
+    let data = cookie.unwrap_or(b"");
+    let mut request = Vec::new();
+    request.push(b'l');
+    request.push(0);
+    request.extend_from_slice(&11u16.to_le_bytes());
+    request.extend_from_slice(&0u16.to_le_bytes());
+    request.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    request.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    request.extend_from_slice(&0u16.to_le_bytes());
+    request.extend_from_slice(name);
+    request.extend(std::iter::repeat(0).take((4 - name.len() % 4) % 4));
+    request.extend_from_slice(data);
+    request.extend(std::iter::repeat(0).take((4 - data.len() % 4) % 4));
+    stream.write_all(&request).ok()?;
+    let mut prefix = [0u8; 8];
+    stream.read_exact(&mut prefix).ok()?;
+    if prefix[0] != 1 {
+        return None;
+    }
+    let extra = u16::from_le_bytes([prefix[6], prefix[7]]) as usize * 4;
+    let mut skip = vec![0u8; extra];
+    stream.read_exact(&mut skip).ok()?;
+    let ext = b"GLX";
+    let words = 2 + (ext.len() + (4 - ext.len() % 4) % 4) / 4;
+    let mut query = Vec::new();
+    query.push(98);
+    query.push(0);
+    query.extend_from_slice(&(words as u16).to_le_bytes());
+    query.extend_from_slice(&(ext.len() as u16).to_le_bytes());
+    query.extend_from_slice(&0u16.to_le_bytes());
+    query.extend_from_slice(ext);
+    query.extend(std::iter::repeat(0).take((4 - ext.len() % 4) % 4));
+    stream.write_all(&query).ok()?;
+    let mut reply = [0u8; 32];
+    stream.read_exact(&mut reply).ok()?;
+    if reply[0] != 1 {
+        return None;
+    }
+    Some(reply[8] != 0)
+}
+
+fn fail_startup(message: &str) -> ! {
+    eprintln!("mithu-lite: {message}");
+    std::process::exit(1);
 }
 
 /// Set while [`run_with_glib`] owns the loop. GTK is then drained by the
@@ -1891,27 +2087,15 @@ impl ApplicationHandler for App {
             .with_position(PhysicalPosition::new(0, 0));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
-            Err(error) => {
-                eprintln!("mithu-lite: could not open a window: {error}");
-                event_loop.exit();
-                return;
-            }
+            Err(error) => fail_startup(&format!("could not open a window: {error}")),
         };
         let context = match softbuffer::Context::new(window.clone()) {
             Ok(context) => context,
-            Err(error) => {
-                eprintln!("mithu-lite: could not create a framebuffer: {error}");
-                event_loop.exit();
-                return;
-            }
+            Err(error) => fail_startup(&format!("could not create a framebuffer: {error}")),
         };
         let surface = match softbuffer::Surface::new(&context, window.clone()) {
             Ok(surface) => surface,
-            Err(error) => {
-                eprintln!("mithu-lite: could not create a surface: {error}");
-                event_loop.exit();
-                return;
-            }
+            Err(error) => fail_startup(&format!("could not create a surface: {error}")),
         };
         let size = window.inner_size();
         self.config.width = size.width.max(1) as f32;
@@ -2598,6 +2782,26 @@ mod tests {
             .find(|line| !line.is_empty() && !line.starts_with('#'))
             .expect("version line");
         assert_eq!(env!("MITHU_VERSION"), want);
+    }
+
+    #[test]
+    fn x11_display_number_and_cookie() {
+        assert_eq!(x11_display_number(":1"), Some(1));
+        assert_eq!(x11_display_number("localhost:95.0"), Some(95));
+        assert!(x11_display_number("no-colon").is_none());
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&256u16.to_be_bytes());
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(b'h');
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(b'1');
+        let name = b"MIT-MAGIC-COOKIE-1";
+        bytes.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(&4u16.to_be_bytes());
+        bytes.extend_from_slice(&[9, 8, 7, 6]);
+        assert_eq!(find_mit_cookie(&bytes, "1").as_deref(), Some(&[9, 8, 7, 6][..]));
+        assert!(find_mit_cookie(&bytes, "2").is_none());
     }
 
     #[test]

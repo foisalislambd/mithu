@@ -116,7 +116,14 @@ fn run_lite(profile: &std::path::Path, args: &[&str]) -> String {
     if let Some(mut stderr) = child.stderr.take() {
         let _ = stderr.read_to_string(&mut err);
     }
-    assert!(status.success(), "exit {status:?}\n{out}\n{err}");
+    assert!(
+        status.success(),
+        "exit {status:?}\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        out.lines().any(|line| line.starts_with("load_ms ")),
+        "no load_ms\nstdout:\n{out}\nstderr:\n{err}"
+    );
     out
 }
 
@@ -125,5 +132,5 @@ fn load_ms(output: &str) -> u128 {
         .lines()
         .find_map(|line| line.strip_prefix("load_ms "))
         .and_then(|value| value.parse().ok())
-        .unwrap_or_else(|| panic!("no load_ms in {output}"))
+        .expect("load_ms")
 }
