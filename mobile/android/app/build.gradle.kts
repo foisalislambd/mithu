@@ -26,8 +26,8 @@ android {
         applicationId = "org.mithu.lite"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1009
-        versionName = "0.1.9"
+        versionCode = 2000
+        versionName = "0.2.0"
     }
 
     flavorDimensions += "engine"
