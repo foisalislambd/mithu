@@ -1,0 +1,233 @@
+{
+ "started": "2026-11-24 20:46:00 +0600",
+ "host": "grok-bot-vm-215425385",
+ "cpus": 8,
+ "window": "1280x800",
+ "runs": 1,
+ "browsers": {
+  "lite-before": "/workspace/mithu-bench/before/mithu-lite",
+  "lite-after": "/workspace/mithu-bench/after/mithu-lite",
+  "servo-before": "/workspace/mithu-bench/before/mithu",
+  "servo-after": "/workspace/mithu-bench/after/mithu"
+ },
+ "results": {
+  "tabs10-pressure": {
+   "lite-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 10441,
+      "timeout": false,
+      "load_cpu_s": 12.54,
+      "load_cpu_pct": 118.1,
+      "idle_cpu_pct": 0.7,
+      "idle_wakeups_per_s": 64.5,
+      "peak_rss_mb": 3081.4,
+      "peak_pss_mb": 1463.2,
+      "settled_rss_mb": 3038.4,
+      "settled_pss_mb": 1419.9,
+      "pss_complete": true,
+      "processes": 12,
+      "process_names": [
+       "WebKitNetworkPr",
+       "WebKitWebProces",
+       "gst-plugin-scan",
+       "mithu-lite"
+      ],
+      "cpu_s_by_process": {
+       "WebKitNetworkPr": 1.16,
+       "WebKitWebProces": 10.38,
+       "gst-plugin-scan": 0.05,
+       "mithu-lite": 1.55
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 10441,
+     "load_cpu_s": 12.54,
+     "load_cpu_pct": 118.1,
+     "peak_rss_mb": 3081.4,
+     "peak_pss_mb": 1463.2,
+     "settled_rss_mb": 3038.4,
+     "settled_pss_mb": 1419.9,
+     "idle_cpu_pct": 0.7,
+     "idle_wakeups_per_s": 64.5,
+     "scroll_cpu_s": null,
+     "processes": 12,
+     "timeouts": 0
+    }
+   },
+   "lite-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 13407,
+      "timeout": false,
+      "load_cpu_s": 13.78,
+      "load_cpu_pct": 102.7,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 2.5,
+      "peak_rss_mb": 3078.9,
+      "peak_pss_mb": 1461.8,
+      "settled_rss_mb": 706.5,
+      "settled_pss_mb": 466.0,
+      "pss_complete": true,
+      "processes": 3,
+      "process_names": [
+       "WebKitNetworkPr",
+       "WebKitWebProces",
+       "gst-plugin-scan",
+       "mithu-lite"
+      ],
+      "cpu_s_by_process": {
+       "WebKitNetworkPr": 1.16,
+       "WebKitWebProces": 12.44,
+       "gst-plugin-scan": 0.18,
+       "mithu-lite": 1.44
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 13407,
+     "load_cpu_s": 13.78,
+     "load_cpu_pct": 102.7,
+     "peak_rss_mb": 3078.9,
+     "peak_pss_mb": 1461.8,
+     "settled_rss_mb": 706.5,
+     "settled_pss_mb": 466.0,
+     "idle_cpu_pct": 0.1,
+     "idle_wakeups_per_s": 2.5,
+     "scroll_cpu_s": null,
+     "processes": 3,
+     "timeouts": 0
+    }
+   },
+   "servo-before": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": 6204,
+      "timeout": false,
+      "load_cpu_s": 13.52,
+      "load_cpu_pct": 217.4,
+      "idle_cpu_pct": 0.1,
+      "idle_wakeups_per_s": 36.8,
+      "peak_rss_mb": 2686.2,
+      "peak_pss_mb": 2022.6,
+      "settled_rss_mb": 2503.5,
+      "settled_pss_mb": 1999.1,
+      "pss_complete": true,
+      "processes": 11,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 15.76
+      }
+     }
+    ],
+    "median": {
+     "load_ms": 6204,
+     "load_cpu_s": 13.52,
+     "load_cpu_pct": 217.4,
+     "peak_rss_mb": 2686.2,
+     "peak_pss_mb": 2022.6,
+     "settled_rss_mb": 2503.5,
+     "settled_pss_mb": 1999.1,
+     "idle_cpu_pct": 0.1,
+     "idle_wakeups_per_s": 36.8,
+     "scroll_cpu_s": null,
+     "processes": 11,
+     "timeouts": 0
+    }
+   },
+   "servo-after": {
+    "raw": [
+     {
+      "browser": "mithu",
+      "urls": [
+       "https://example.com/",
+       "https://en.wikipedia.org/wiki/Main_Page",
+       "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+       "https://en.wikipedia.org/wiki/Bangladesh",
+       "https://news.ycombinator.com/",
+       "https://github.com/foisalislambd/mithu",
+       "https://www.rust-lang.org/",
+       "https://developer.mozilla.org/en-US/",
+       "https://www.theguardian.com/international",
+       "https://docs.rs/"
+      ],
+      "load_ms": null,
+      "timeout": true,
+      "load_cpu_s": 10.49,
+      "load_cpu_pct": 180.6,
+      "idle_cpu_pct": 0.0,
+      "idle_wakeups_per_s": 0.0,
+      "peak_rss_mb": 2385.9,
+      "peak_pss_mb": 1784.5,
+      "settled_rss_mb": 1050.3,
+      "settled_pss_mb": 636.9,
+      "pss_complete": true,
+      "processes": 8,
+      "process_names": [
+       "mithu"
+      ],
+      "cpu_s_by_process": {
+       "mithu": 10.49
+      }
+     }
+    ],
+    "median": {
+     "load_ms": null,
+     "load_cpu_s": 10.49,
+     "load_cpu_pct": 180.6,
+     "peak_rss_mb": 2385.9,
+     "peak_pss_mb": 1784.5,
+     "settled_rss_mb": 1050.3,
+     "settled_pss_mb": 636.9,
+     "idle_cpu_pct": 0.0,
+     "idle_wakeups_per_s": 0.0,
+     "scroll_cpu_s": null,
+     "processes": 8,
+     "timeouts": 1
+    }
+   }
+  }
+ }
+}

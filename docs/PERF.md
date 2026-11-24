@@ -103,6 +103,19 @@ Raw data: [`perf-data/after-vs-chromium.json`](perf-data/after-vs-chromium.json)
 |---|---:|---:|---:|---:|---:|
 | Scroll (Rust article) | 0.77 | 3.58 | 4.53 | 10.66 | 11.58 |
 
+### Ten tabs under forced critical memory pressure (1 run)
+
+`MITHU_MEMORY_PRESSURE=critical`, 10 tabs, measured 50 s after load (one discard per 5 s sample). "Before" builds ignore the variable, so they show what the same ten tabs cost without discarding. Raw data: [`perf-data/tabs10-pressure.json`](perf-data/tabs10-pressure.json). One run only, so treat it as a functional check of discarding rather than a precise number.
+
+| Browser | Settled PSS (MB) | Processes after | Idle CPU (%) | Wakeups/s |
+|---|---:|---:|---:|---:|
+| Lite before | 1420 | 12 | 0.7 | 65 |
+| Lite after | 466 | 3 | 0.1 | 3 |
+| Servo before | 1999 | 11 | 0.1 | 37 |
+| Servo after | 637 | 8 | 0.0 | 0 |
+
+The Servo-after run hit the harness's 90 s "all tabs loaded" timeout: under forced critical pressure, tabs were discarded while others were still loading, so not every tab reported a load. Discarding works as designed (nine background tabs dropped, PSS down by two thirds), but the harness's load figure is not meaningful for that run.
+
 ### Summary
 
 - **Idle (the "no jank, low idle CPU" goal):** after the change both editions idle well below Chromium on a blank tab (0.1% vs 4.9%, 20–26 wakeups/s vs 436). Servo on static pages (example.com, Hacker News, YouTube, GitHub) is at 0.0% idle with about 1 wakeup per second; before it woke 36–154 times a second.
