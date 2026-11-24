@@ -94,14 +94,25 @@ fn run() {
             }
             return;
         }
+        let rest: Vec<String> = std::iter::once(first).chain(args).collect();
+        let size = rest
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--window-size=").and_then(parse_size));
+        let urls: Vec<String> = rest.into_iter().filter(|arg| !arg.starts_with("--")).collect();
         let event_loop = event_loop();
         let engine = Engine::spawn(event_loop.create_proxy());
-        let url = first.clone();
+        // Each positional URL opens in its own tab, as Chrome's command line does.
         engine.post(move |session| {
-            session.browser.navigate(&url);
+            for (index, url) in urls.iter().enumerate() {
+                if index > 0 {
+                    session.browser.new_tab();
+                }
+                session.browser.navigate(url);
+            }
             Vec::new()
         });
         let mut app = App::new(engine);
+        app.size = size;
         if let Err(error) = event_loop.run_app(&mut app) {
             report_fatal(&format!("could not run the window: {error}"));
         }
@@ -153,6 +164,11 @@ fn hold(seconds: u64, url: &str, tabs: usize) {
     println!("loaded_ms {}", started.elapsed().as_millis());
     eprintln!("hold {}", browser.hold_status());
     std::thread::sleep(Duration::from_secs(seconds));
+}
+
+fn parse_size(value: &str) -> Option<(f32, f32)> {
+    let (width, height) = value.split_once([',', 'x'])?;
+    Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
 }
 
 fn event_loop() -> EventLoop<()> {
@@ -264,6 +280,8 @@ struct App {
     context: Option<softbuffer::Context<Arc<Window>>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     cursor: (f32, f32),
+    /// `--window-size=W,H`, in logical pixels.
+    size: Option<(f32, f32)>,
 }
 
 impl App {
@@ -274,6 +292,7 @@ impl App {
             context: None,
             surface: None,
             cursor: (0.0, 0.0),
+            size: None,
         }
     }
 
@@ -362,7 +381,10 @@ impl ApplicationHandler for App {
             .with_title(format!("Mithu {}", env!("MITHU_VERSION")))
             .with_window_icon(app_icon())
             .with_decorations(false)
-            .with_inner_size(LogicalSize::new(1200.0, 800.0));
+            .with_inner_size({
+                let (width, height) = self.size.unwrap_or((1200.0, 800.0));
+                LogicalSize::new(width, height)
+            });
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => report_fatal(&format!("could not open a window: {error}")),

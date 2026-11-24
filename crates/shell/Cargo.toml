@@ -11,6 +11,7 @@ description = "Mithu window frame around a Servo webview"
 [dependencies]
 dpi = "0.1"
 euclid = "0.22"
+mithu-host = { path = "../host" }
 mithu-text = { path = "../text" }
 mithu-ui = { path = "../ui" }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }

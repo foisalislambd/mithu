@@ -98,6 +98,9 @@ fn pump_host() {
 
 struct Config {
     url: Option<String>,
+    /// Further positional URLs, each opened in its own tab (Chrome's
+    /// command line does the same).
+    extra: Vec<String>,
     screenshot: Option<PathBuf>,
     hold: Option<Duration>,
     width: f32,
@@ -110,8 +113,18 @@ impl Config {
         let mut screenshot = None;
         let mut hold = None;
         let mut url = None;
+        let mut extra = Vec::new();
         let mut sized = false;
+        let mut size = None;
         while let Some(arg) = args.next() {
+            if let Some(value) = arg.strip_prefix("--window-size=") {
+                size = parse_size(value);
+                continue;
+            }
+            if url.is_some() {
+                extra.push(arg);
+                continue;
+            }
             if arg == "--version" || arg == "-V" {
                 println!("mithu-lite {}", env!("MITHU_VERSION"));
                 std::process::exit(0);
@@ -130,20 +143,23 @@ impl Config {
                 break;
             }
             url = Some(arg);
-            break;
         }
+        let (width, height) = size.unwrap_or((if sized { 1280.0 } else { 1200.0 }, 800.0));
         Self {
             url,
+            extra,
             screenshot,
             hold,
-            width: if sized { 1280.0 } else { 1200.0 },
-            height: 800.0,
+            width,
+            height,
         }
     }
 }
 
 struct TabInfo {
     id: u64,
+    /// `MITHU_BENCH` printed this tab's first finished load.
+    bench_reported: bool,
     title: String,
     url: String,
     loading: bool,
@@ -334,6 +350,7 @@ impl App {
             model.next_id += 1;
             model.tabs.push(TabInfo {
                 id,
+                bench_reported: false,
                 title: "New Tab".into(),
                 url: if show_ntp { "about:newtab".into() } else { url.to_string() },
                 loading: !show_ntp && !url.is_empty(),
@@ -1445,6 +1462,9 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.started = Instant::now();
         if let Some(url) = self.config.url.clone() {
+            for extra in self.config.extra.clone() {
+                self.open_tab(&extra, false);
+            }
             self.open_tab(&url, false);
         } else {
             let startup = {
@@ -1624,6 +1644,10 @@ fn on_load(shared: &Mutex<Model>, id: u64, event: PageLoadEvent, url: &str) {
                     tab.url = url.to_string();
                 }
                 tab.loading = false;
+                if track && !tab.bench_reported && mithu_host::bench_enabled() {
+                    tab.bench_reported = true;
+                    mithu_host::bench_report_loaded(url);
+                }
             }
         }
     }
@@ -1705,6 +1729,11 @@ fn reveal_path(path: &str, folder: bool) {
     {
         let _ = std::process::Command::new("xdg-open").arg(&target).spawn();
     }
+}
+
+fn parse_size(value: &str) -> Option<(f32, f32)> {
+    let (w, h) = value.split_once([',', 'x'])?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
 fn chrome_top(bookmarks: bool, scale: f32) -> f32 {

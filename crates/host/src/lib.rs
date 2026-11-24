@@ -238,3 +238,22 @@ mod tests {
         assert!(console_needs_attach(true, 0));
     }
 }
+
+/// `MITHU_BENCH=1` turns on the benchmark lines read by `tools/bench`.
+pub fn bench_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MITHU_BENCH").is_some())
+}
+
+/// Print `bench loaded <unix ms> <url>` when a tab first finishes loading.
+/// The harness compares that wall-clock time with the moment it spawned the
+/// process, the same clock it reads from Chromium's `loadEventEnd`.
+pub fn bench_report_loaded(url: &str) {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "bench loaded {ms} {url}");
+    let _ = out.flush();
+}

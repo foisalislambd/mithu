@@ -124,6 +124,8 @@ struct Tab {
     status: LoadStatus,
     zoom: f32,
     group_id: u8,
+    /// `MITHU_BENCH` printed this tab's first complete load.
+    bench_reported: bool,
 }
 
 /// Wakes the engine thread when Servo has work, the same role as Chrome's
@@ -1239,6 +1241,7 @@ impl Browser {
             status: LoadStatus::Started,
             zoom: 1.0,
             group_id: 0,
+            bench_reported: false,
         });
         self.active = self.tabs.len() - 1;
         Ok(())
@@ -1256,6 +1259,7 @@ impl Browser {
                 status: LoadStatus::Started,
                 zoom: 1.0,
                 group_id: 0,
+                bench_reported: false,
             });
             self.active = self.tabs.len() - 1;
             self.bump();
@@ -1278,6 +1282,24 @@ impl Browser {
         self.sync_visibility();
         if self.frame.swap(false, Ordering::SeqCst) {
             self.bump();
+        }
+        if mithu_host::bench_enabled() {
+            self.bench_report();
+        }
+    }
+
+    fn bench_report(&mut self) {
+        for tab in &mut self.tabs {
+            if tab.bench_reported || tab.webview.load_status() != LoadStatus::Complete {
+                continue;
+            }
+            let Some(url) = tab.webview.url() else {
+                continue;
+            };
+            if url.scheme().starts_with("http") {
+                tab.bench_reported = true;
+                mithu_host::bench_report_loaded(url.as_str());
+            }
         }
     }
 
