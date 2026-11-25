@@ -13,7 +13,7 @@ members = [
 exclude = ["third_party/servo"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
