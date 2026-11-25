@@ -4,6 +4,8 @@ Mithu follows the first line of `VERSION.md`. Dates are the day the release is t
 
 ## Unreleased
 
+A closed script or namespace channel no longer aborts the browser. The in-process script thread stays up while tabs close, and if a receiver still disconnects the affected tab shows "This page crashed" with Reload. Other tabs stay open. A pipeline panic stays in that tab (`hard_fail` is off). The fatal dialog is only for a panic on the thread that started the process.
+
 ## 0.2.2
 
 The README screenshots are retaken on the Chromium-style frame, including the Servo Wikipedia page.

@@ -5,7 +5,21 @@ Servo starts a new content process whenever a document has no registrable
 domain, so every about:blank tab becomes its own process. This patch keeps
 those documents, and mithu: pages, on one in-process event loop. http(s)
 sites still get a content process, and past four site processes a new site
-reuses one that already exists. The Servo submodule itself is not forked.
+reuses one that already exists.
+
+That in-process thread is also pinned until shutdown. Closing the last blank
+or internal page used to drop the thread, which drops its cloned namespace
+sender. On Windows, ipc-channel then reports the constellation's routed
+receiver disconnected even though the constellation still holds a sender.
+The arm that panics is the namespace receiver, but Servo copy-pasted the
+expect text "Unexpected script channel panic in constellation" (this is
+constellation.rs:1244 after the line shift from the edits above). A closed
+script or namespace receiver is logged, only event loops that no longer
+answer are marked crashed, and the other tabs stay up. A closed hang-monitor
+alert channel is logged and ignored. The crash page says
+"This page crashed" and offers Reload.
+
+The Servo submodule itself is not forked.
 """
 
 from __future__ import annotations
@@ -101,6 +115,16 @@ NEW_CREATE = """        let sandboxed = load_data
         }
 
         let event_loop = EventLoop::spawn(self, is_private, internal)?;
+        if internal {
+            // Closing the last about:/mithu:/data: page must not drop this
+            // thread. Its cloned namespace sender is what Windows ipc-channel
+            // treats as the last client, and the constellation then panics in
+            // the namespace arm (the message text says "script channel").
+            // MITHU_PROCESS_CAP
+            if self.pinned_internal_event_loop.is_none() {
+                self.pinned_internal_event_loop = Some(event_loop.clone());
+            }
+        }
         if let Some(registered_domain_name) = registered_domain_name {
             self.set_event_loop(&event_loop, registered_domain_name, &webview_id);
         }
@@ -141,12 +165,18 @@ NEW_SIG = """    pub(crate) fn spawn<STF: ScriptThreadFactory, SWF: ServiceWorke
 
 
 def replace_once(path: Path, old: str, new: str, label: str) -> None:
+    replace_any(path, [old], new, label)
+
+
+def replace_any(path: Path, olds: list[str], new: str, label: str) -> None:
     text = path.read_text(encoding="utf-8")
     if new in text:
         return
-    if old not in text:
-        sys.exit(f"{path.name}: could not find {label}")
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    for old in olds:
+        if old in text:
+            path.write_text(text.replace(old, new, 1), encoding="utf-8")
+            return
+    sys.exit(f"{path.name}: could not find {label}")
 
 
 OLD_MONITOR = """                let (
@@ -217,12 +247,32 @@ NEW_MEDIA = """        // In-process event loops share this process with the bro
         // MITHU_PROCESS_CAP
         media_platform::init();"""
 
+OLD_NAMESPACE_RECV = """                1 => oper
+                    .recv(&self.namespace_receiver)
+                    .expect("Unexpected script channel panic in constellation")
+                    .map(Request::PipelineNamespace),"""
+
+NEW_NAMESPACE_RECV = """                1 => match oper.recv(&self.namespace_receiver) {
+                    Ok(message) => message.map(Request::PipelineNamespace),
+                    Err(error) => {
+                        // This arm is the namespace receiver. Servo's expect text
+                        // says "script channel" on this arm and on the script arm.
+                        // Windows ipc-channel delivers RecvError here when an
+                        // in-process script thread drops its cloned sender.
+                        // MITHU_PROCESS_CAP
+                        self.note_namespace_channel_disconnected(&error);
+                        return;
+                    },
+                },"""
+
 OLD_SCRIPT_RECV = """                2 => oper
                     .recv(&self.script_receiver)
                     .expect("Unexpected script channel panic in constellation")
                     .map(Request::Script),"""
 
-NEW_SCRIPT_RECV = """                2 => match oper.recv(&self.script_receiver) {
+# Earlier Mithu builds replaced only the script arm, and answered a disconnect
+# by shutting down every pipeline. A browsing disconnect must not do that.
+OLD_SCRIPT_RECV_SHUTDOWN = """                2 => match oper.recv(&self.script_receiver) {
                     Ok(message) => message.map(Request::Script),
                     Err(error) => {
                         // Windows ipc-channel reports the channel disconnected when
@@ -238,6 +288,196 @@ NEW_SCRIPT_RECV = """                2 => match oper.recv(&self.script_receiver)
                     },
                 },"""
 
+OLD_BHM_RECV = """                3 => oper
+                    .recv(&self.background_hang_monitor_receiver)
+                    .expect("Unexpected BHM channel panic in constellation")
+                    .map(Request::BackgroundHangMonitor),"""
+
+NEW_BHM_RECV = """                3 => match oper.recv(&self.background_hang_monitor_receiver) {
+                    Ok(message) => message.map(Request::BackgroundHangMonitor),
+                    Err(error) => {
+                        // The hang monitor is not a page. A closed alert
+                        // channel used to panic this thread and take the
+                        // process with it. Retire the receiver and keep going.
+                        // MITHU_PROCESS_CAP
+                        warn!(
+                            "background hang monitor disconnected ({error:?}); continuing. MITHU_PROCESS_CAP"
+                        );
+                        self.background_hang_monitor_receiver = crossbeam_channel::never();
+                        return;
+                    },
+                },"""
+
+NEW_SCRIPT_RECV = """                2 => match oper.recv(&self.script_receiver) {
+                    Ok(message) => message.map(Request::Script),
+                    Err(error) => {
+                        // Same Windows disconnect as the namespace arm above.
+                        // Do not panic and do not shut the browser down.
+                        // MITHU_PROCESS_CAP
+                        self.note_script_channel_disconnected(&error);
+                        return;
+                    },
+                },"""
+
+OLD_FIELD = """    /// A vector of [`JoinHandle`]s used to ensure full termination of threaded [`EventLoop`]s
+    /// which are runnning in the same process.
+    event_loop_join_handles: Vec<JoinHandle<()>>,"""
+
+NEW_FIELD = """    /// A vector of [`JoinHandle`]s used to ensure full termination of threaded [`EventLoop`]s
+    /// which are runnning in the same process.
+    event_loop_join_handles: Vec<JoinHandle<()>>,
+
+    /// Keeps the shared in-process script thread alive across tab closes.
+    /// Dropped only from shutdown. MITHU_PROCESS_CAP
+    pinned_internal_event_loop: Option<Rc<EventLoop>>,"""
+
+OLD_FIELD_INIT = """                    event_loop_join_handles: Default::default(),"""
+
+NEW_FIELD_INIT = """                    event_loop_join_handles: Default::default(),
+                    pinned_internal_event_loop: None,"""
+
+OLD_SHUTDOWN = """        debug!("Handling shutdown.");
+
+        for join_handle in self.event_loop_join_handles.drain(..) {"""
+
+NEW_SHUTDOWN = """        debug!("Handling shutdown.");
+
+        // The pinned in-process thread exits only now, after pipelines are
+        // gone, so its sender drop cannot race a live tab. MITHU_PROCESS_CAP
+        self.pinned_internal_event_loop = None;
+
+        for join_handle in self.event_loop_join_handles.drain(..) {"""
+
+OLD_HANDLER_ANCHOR = """    fn handle_request_for_pipeline_namespace(&mut self, request: PipelineNamespaceRequest) {"""
+
+NEW_HANDLER_ANCHOR = """    /// The namespace or script router closed. Retire that receiver so the
+    /// select loop does not spin, and crash only the event loops that no
+    /// longer accept messages. MITHU_PROCESS_CAP
+    fn note_namespace_channel_disconnected(&mut self, error: &impl core::fmt::Debug) {
+        self.namespace_receiver = crossbeam_channel::never();
+        self.handle_routed_receiver_disconnected("namespace channel", error);
+    }
+
+    fn note_script_channel_disconnected(&mut self, error: &impl core::fmt::Debug) {
+        self.script_receiver = crossbeam_channel::never();
+        self.handle_routed_receiver_disconnected("script channel", error);
+    }
+
+    fn handle_routed_receiver_disconnected(&mut self, which: &str, error: &impl core::fmt::Debug) {
+        warn!("{which} disconnected ({error:?}); other tabs stay open. MITHU_PROCESS_CAP");
+        if self.shutting_down {
+            self.pipelines.clear();
+            return;
+        }
+        // One small message. A live script thread accepts it. A thread that
+        // already dropped its receiver returns immediately, so this does not
+        // wait on a full pipe while that thread is blocked on us.
+        let event_loops = self.event_loops();
+        let mut dead = Vec::new();
+        for event_loop in &event_loops {
+            if event_loop
+                .send(ScriptThreadMessage::TickAllAnimations(Vec::new()))
+                .is_err()
+            {
+                dead.push(event_loop.id());
+            }
+        }
+        drop(event_loops);
+        for id in &dead {
+            self.forget_event_loop(*id);
+        }
+        let reason = format!("This page crashed. {which} disconnected ({error:?})");
+        for id in dead {
+            self.handle_panic(Some(id), reason.clone(), None);
+        }
+    }
+
+    fn forget_event_loop(&mut self, id: ScriptEventLoopId) {
+        if self
+            .pinned_internal_event_loop
+            .as_ref()
+            .is_some_and(|pinned| pinned.id() == id)
+        {
+            self.pinned_internal_event_loop = None;
+        }
+        for webview in self.webviews.values() {
+            webview
+                .browsing_context_group()
+                .borrow_mut()
+                .event_loops
+                .retain(|_, weak| match weak.upgrade() {
+                    Some(event_loop) => event_loop.id() != id,
+                    None => false,
+                });
+        }
+    }
+
+    fn handle_request_for_pipeline_namespace(&mut self, request: PipelineNamespaceRequest) {"""
+
+OLD_SW_RECV = """                0 => oper
+                    .recv(&self.sw_manager_receiver)
+                    .expect("Unexpected service worker manager channel panic in constellation")
+                    .map(Request::ServiceWorkerManager),"""
+
+NEW_SW_RECV = """                0 => match oper.recv(&self.sw_manager_receiver) {
+                    Ok(message) => message.map(Request::ServiceWorkerManager),
+                    Err(error) => {
+                        // Same class of disconnect as the script channel: the
+                        // router closed, and panicking here aborts the browser.
+                        // MITHU_PROCESS_CAP
+                        warn!(
+                            "service worker manager disconnected ({error:?}); continuing. MITHU_PROCESS_CAP"
+                        );
+                        self.sw_manager_receiver = crossbeam_channel::never();
+                        return;
+                    },
+                },"""
+
+MESSAGING = ROOT / "third_party/servo/components/script/messaging.rs"
+OLD_SCRIPT_UNWRAP = """            } else if index == constellation_index {
+                MixedMessage::FromConstellation(
+                    operation
+                        .recv(&self.constellation_receiver)
+                        .unwrap()
+                        .unwrap(),
+                )"""
+
+NEW_SCRIPT_UNWRAP = """            } else if index == constellation_index {
+                // A closed constellation channel is the script thread being
+                // asked to leave. Unwrapping that RecvError aborts the
+                // process under panic=abort. MITHU_PROCESS_CAP
+                let message = match operation.recv(&self.constellation_receiver) {
+                    Ok(Ok(message)) => message,
+                    Ok(Err(error)) => {
+                        log::warn!(
+                            "constellation message failed ({error}); exiting script thread. MITHU_PROCESS_CAP"
+                        );
+                        ScriptThreadMessage::ExitScriptThread
+                    },
+                    Err(error) => {
+                        log::warn!(
+                            "constellation channel closed ({error}); exiting script thread. MITHU_PROCESS_CAP"
+                        );
+                        ScriptThreadMessage::ExitScriptThread
+                    },
+                };
+                MixedMessage::FromConstellation(message)"""
+
+FONT_SERVICE = ROOT / "third_party/servo/components/fonts/system_font_service.rs"
+OLD_FONT_RECV = """        loop {
+            let msg = self.port.recv().unwrap();"""
+
+NEW_FONT_RECV = """        loop {
+            // The constellation dropped this channel. Leave the thread
+            // instead of panicking the process. MITHU_PROCESS_CAP
+            let Ok(msg) = self.port.recv() else {
+                break;
+            };"""
+
+OLD_CRASH_PAGE = "<p>Servo crashed!</p>"
+NEW_CRASH_PAGE = "<p>This page crashed.</p>"
+CRASH_PAGE = ROOT / "third_party/servo/components/default-resources/resources/crash.html"
+
 
 def main() -> None:
     if not CONSTELLATION.is_file() or not EVENT_LOOP.is_file():
@@ -249,7 +489,22 @@ def main() -> None:
         replace_once(EVENT_LOOP, OLD_SIG, NEW_SIG, "spawn signature")
         replace_once(EVENT_LOOP, OLD_SPAWN, NEW_SPAWN, "spawn branch")
     replace_once(CONSTELLATION, OLD_MONITOR, NEW_MONITOR, "hang monitor")
-    replace_once(CONSTELLATION, OLD_SCRIPT_RECV, NEW_SCRIPT_RECV, "script channel shutdown")
+    replace_once(CONSTELLATION, OLD_FIELD, NEW_FIELD, "pinned event loop field")
+    replace_once(CONSTELLATION, OLD_FIELD_INIT, NEW_FIELD_INIT, "pinned event loop init")
+    replace_once(CONSTELLATION, OLD_SHUTDOWN, NEW_SHUTDOWN, "drop pinned event loop")
+    replace_once(CONSTELLATION, OLD_HANDLER_ANCHOR, NEW_HANDLER_ANCHOR, "disconnect handler")
+    replace_once(CONSTELLATION, OLD_NAMESPACE_RECV, NEW_NAMESPACE_RECV, "namespace channel")
+    replace_any(
+        CONSTELLATION,
+        [OLD_SCRIPT_RECV, OLD_SCRIPT_RECV_SHUTDOWN],
+        NEW_SCRIPT_RECV,
+        "script channel",
+    )
+    replace_once(CONSTELLATION, OLD_BHM_RECV, NEW_BHM_RECV, "hang monitor channel")
+    replace_once(CONSTELLATION, OLD_SW_RECV, NEW_SW_RECV, "service worker channel")
+    replace_once(MESSAGING, OLD_SCRIPT_UNWRAP, NEW_SCRIPT_UNWRAP, "script thread exit")
+    replace_once(FONT_SERVICE, OLD_FONT_RECV, NEW_FONT_RECV, "font service exit")
+    replace_once(CRASH_PAGE, OLD_CRASH_PAGE, NEW_CRASH_PAGE, "crash page")
     replace_once(SERVO, OLD_JS, NEW_JS, "js engine")
     replace_once(SERVO, OLD_MEDIA, NEW_MEDIA, "media platform")
 

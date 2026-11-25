@@ -6,16 +6,21 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static APP: OnceLock<&'static str> = OnceLock::new();
 static NO_DIALOG: AtomicBool = AtomicBool::new(false);
+/// Thread that called [`init`]. A panic on any other thread is logged and
+/// left for that thread (Servo catches script-thread panics and turns them
+/// into a crashed page). Only this thread gets the fatal dialog.
+static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
 
 /// Attach to a parent console when this is a Windows release build, then
 /// install the panic log. Call this before any `println!`.
 pub fn init(app: &'static str) {
     let _ = APP.set(app);
+    let _ = MAIN_THREAD.set(std::thread::current().id());
     attach_parent_console();
     install_crash_hook();
 }
@@ -25,7 +30,7 @@ pub fn suppress_dialog() {
 }
 
 pub fn report_fatal(message: &str) -> ! {
-    record(message);
+    record(message, true);
     std::process::exit(1);
 }
 
@@ -45,11 +50,24 @@ fn install_crash_hook() {
             .location()
             .map(|location| format!(" ({location})"))
             .unwrap_or_default();
-        record(&format!("panic: {payload}{loc}"));
+        record(
+            &format!("panic: {payload}{loc}"),
+            fatal_dialog_on_panic(MAIN_THREAD.get().copied(), std::thread::current().id()),
+        );
     }));
 }
 
-fn record(message: &str) {
+/// A fatal dialog is for the thread that started the process. A panic on a
+/// script, constellation, or other worker thread must not pop a process-wide
+/// message box; that thread can unwind into Servo's crash page.
+pub(crate) fn fatal_dialog_on_panic(
+    starter: Option<std::thread::ThreadId>,
+    current: std::thread::ThreadId,
+) -> bool {
+    starter.is_none_or(|starter| starter == current)
+}
+
+fn record(message: &str, dialog: bool) {
     let line = format!("{message}\n");
     eprintln!("{}: {message}", app_name());
     if let Some(path) = log_path() {
@@ -60,7 +78,9 @@ fn record(message: &str) {
             .open(path)
             .and_then(|mut file| file.write_all(line.as_bytes()));
     }
-    show_dialog(message);
+    if dialog {
+        show_dialog(message);
+    }
 }
 
 pub(crate) fn log_path() -> Option<PathBuf> {
@@ -212,7 +232,9 @@ mod tests {
         let path = log_file(Path::new(r"C:\Users\a\AppData\Local"));
         assert_eq!(
             path,
-            Path::new(r"C:\Users\a\AppData\Local").join("Mithu").join("mithu.log")
+            Path::new(r"C:\Users\a\AppData\Local")
+                .join("Mithu")
+                .join("mithu.log")
         );
     }
 
@@ -224,6 +246,17 @@ mod tests {
     #[test]
     fn attach_is_callable_on_this_host() {
         attach_parent_console();
+    }
+
+    #[test]
+    fn only_the_starting_thread_gets_a_fatal_dialog() {
+        let main = std::thread::current().id();
+        let worker = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .expect("worker");
+        assert!(fatal_dialog_on_panic(Some(main), main));
+        assert!(!fatal_dialog_on_panic(Some(main), worker));
+        assert!(fatal_dialog_on_panic(None, worker));
     }
 
     #[test]

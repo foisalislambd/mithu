@@ -26,5 +26,9 @@ url = "2"
 [target.'cfg(target_os = "windows")'.dependencies]
 servo = { path = "../../third_party/servo/components/servo", default-features = false, features = ["bundled", "clipboard", "js_jit", "multiprocess", "no-wgl"] }
 
+[[test]]
+name = "survives_webview_close"
+harness = false
+
 [lints]
 workspace = true
