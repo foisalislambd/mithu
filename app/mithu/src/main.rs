@@ -134,7 +134,11 @@ fn smoke(url: &str) -> Result<(), String> {
         return Err("smoke test painted an empty frame".into());
     }
     println!("smoke ok");
-    Ok(())
+    // Dropping Servo races the Windows ipc-channel router: a completion
+    // arrives for a receiver the set already removed, and that expect
+    // aborts the process after this line. The window ends the same way,
+    // without running that destructor.
+    std::process::exit(0);
 }
 
 fn hold(seconds: u64, url: &str, tabs: usize) {
