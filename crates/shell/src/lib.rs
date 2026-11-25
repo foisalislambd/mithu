@@ -63,6 +63,9 @@ struct Delegate {
     shot: Rc<RefCell<Option<servo::RgbaImage>>>,
     saves: Rc<RefCell<Vec<String>>>,
     permissions: Rc<RefCell<Vec<PendingPermission>>>,
+    /// Webviews whose script thread stopped answering. The tab shows
+    /// "This page crashed" until a later load finishes with a title.
+    crashed: Rc<RefCell<Vec<servo::WebViewId>>>,
     /// One rendering context shared by every tab, when the window has one.
     shared: Rc<RefCell<Option<Rc<dyn RenderingContext>>>>,
 }
@@ -130,6 +133,16 @@ impl WebViewDelegate for Delegate {
             feature: feature.to_string(),
             request,
         });
+        self.frame.store(true, Ordering::SeqCst);
+    }
+
+    fn notify_crashed(&self, webview: WebView, _reason: String, _backtrace: Option<String>) {
+        let id = webview.id();
+        let mut crashed = self.crashed.borrow_mut();
+        if !crashed.contains(&id) {
+            crashed.push(id);
+        }
+        drop(crashed);
         self.frame.store(true, Ordering::SeqCst);
     }
 }
@@ -225,6 +238,16 @@ thread_local! {
 /// The engine thread calls this before [`Browser::new`] so Servo can wake it.
 pub fn bind_engine_wake(wake: Arc<EngineWake>) {
     ENGINE_WAKE.with(|slot| *slot.borrow_mut() = Some(wake));
+}
+
+/// The channel-disconnect test stays in-process. A content-process re-exec
+/// needs a harness that understands `--content-process`, and Servo's drop
+/// waits on that child.
+static STAY_IN_PROCESS: AtomicBool = AtomicBool::new(false);
+
+/// Keep every page on the in-process script thread. For the regression test.
+pub fn stay_in_process() {
+    STAY_IN_PROCESS.store(true, Ordering::Relaxed);
 }
 
 /// Child processes spawned for a site re-exec this binary. Servo passes
@@ -412,6 +435,7 @@ impl Browser {
             ready: Rc::new(RefCell::new(Vec::new())),
             saves: Rc::new(RefCell::new(Vec::new())),
             permissions: Rc::new(RefCell::new(Vec::new())),
+            crashed: Rc::new(RefCell::new(Vec::new())),
             shared: Rc::new(RefCell::new(None)),
         };
         let config = mithu_config_dir();
@@ -441,8 +465,11 @@ impl Browser {
         preferences.network_http_disk_cache_size = 32 * 1024 * 1024;
         preferences.session_history_max_length = 8;
         let mut opts = Opts::default();
-        opts.multiprocess = true;
+        opts.multiprocess = !STAY_IN_PROCESS.load(Ordering::Relaxed);
         opts.sandbox = false;
+        // Servo's default is the test-runner mode: a pipeline panic calls
+        // process::exit. A crashed page has to stay inside its tab.
+        opts.hard_fail = false;
         opts.config_dir = Some(config);
         if let Ok(path) = std::env::var("MITHU_TIME_PROFILE") {
             if path == "-" {
@@ -723,6 +750,10 @@ impl Browser {
         self.omnibox_focused = false;
         self.tab_search = false;
         self.spin();
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
     }
 
     pub fn close_tab(&mut self) {
@@ -1762,11 +1793,19 @@ impl Browser {
             .url()
             .map(|url| url.to_string())
             .unwrap_or_default();
-        let title = tab
-            .webview
-            .page_title()
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| display_title(&url));
+        let id = tab.webview.id();
+        let page_title = tab.webview.page_title().filter(|title| !title.is_empty());
+        let mut crashed_ids = self.delegate.crashed.borrow_mut();
+        if crashed_ids.contains(&id) && status == LoadStatus::Complete && page_title.is_some() {
+            crashed_ids.retain(|item| *item != id);
+        }
+        let crashed = crashed_ids.contains(&id);
+        drop(crashed_ids);
+        let title = if crashed {
+            "This page crashed".to_string()
+        } else {
+            page_title.unwrap_or_else(|| display_title(&url))
+        };
         let changed = tab.status != status || tab.url != url || tab.title != title;
         let link = tab.webview.status_text().unwrap_or_default();
         tab.status = status;
