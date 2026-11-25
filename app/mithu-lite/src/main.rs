@@ -514,7 +514,8 @@ struct Model {
 impl Model {
     fn new() -> Self {
         let prefs = mithu_ui::pages::load(&mithu_ui::pages::path());
-        mithu_ui::set_search_engine(&prefs.search);
+        mithu_ui::pages::set_edition("Mithu Lite");
+        mithu_ui::pages::sync_runtime(&prefs);
         let bookmarks = prefs
             .bookmarks
             .iter()
@@ -947,6 +948,9 @@ impl App {
     /// background tab's webview (and with it the WebKit web process that
     /// rendered it) by an empty one, keeping its title and URL in the strip.
     fn relieve_memory_pressure(&mut self) {
+        if !self.model().prefs.memory_saver {
+            return;
+        }
         let now = Instant::now();
         let (candidates, urls) = {
             let mut model = self.model();
@@ -1087,7 +1091,7 @@ impl App {
             return;
         };
         mithu_ui::pages::save(&mithu_ui::pages::path(), &prefs);
-        mithu_ui::set_search_engine(&prefs.search);
+        mithu_ui::pages::sync_runtime(&prefs);
         {
             let mut model = self.model();
             model.prefs = prefs.clone();

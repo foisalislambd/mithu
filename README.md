@@ -96,25 +96,29 @@ Those sizes are from Linux x86_64 release builds (`opt-level = "z"`, thin LTO, s
   <img src="docs/screenshots/lite-github.png" alt="Mithu Lite on GitHub" width="420">
 </p>
 <p align="center">
-  <img src="docs/screenshots/mithu-newtab.png" alt="Full Mithu new-tab page in the dark theme" width="420">
-  <img src="docs/screenshots/lite-newtab.png" alt="Mithu Lite new-tab page" width="420">
+  <img src="docs/screenshots/page-newtab-home.png" alt="Mithu new tab: bird logo, search box, and shortcut tiles" width="420">
+  <img src="docs/screenshots/page-newtab-home-dark.png" alt="Mithu new tab in the dark theme" width="420">
 </p>
 
-<p align="center"><em>Same Chromium-style frame on Wikipedia, GitHub, and the new tab. Servo still drops some images on Wikipedia.</em></p>
+<p align="center"><em>Same frame on Wikipedia and GitHub. The new tab is Mithu's own page: the bird mark, a search box for the chosen engine, and shortcut tiles.</em></p>
 
 The internal pages use the same layout in light and dark.
 
 <p align="center">
   <img src="docs/screenshots/page-menu.png" alt="Mithu app menu open over the new tab" width="420">
-  <img src="docs/screenshots/page-settings.png" alt="Mithu settings, You page, light theme" width="420">
+  <img src="docs/screenshots/page-settings.png" alt="Mithu settings, You and profile, light theme" width="420">
 </p>
 <p align="center">
-  <img src="docs/screenshots/page-settings-dark.png" alt="Mithu settings, Appearance page, dark theme" width="420">
+  <img src="docs/screenshots/page-settings-dark.png" alt="Mithu settings, You and profile, dark theme" width="420">
   <img src="docs/screenshots/page-site-settings.png" alt="Mithu site settings, with Ask first on each permission" width="420">
 </p>
 <p align="center">
+  <img src="docs/screenshots/page-privacy.png" alt="Privacy and security settings, with coming-soon marks on features this build does not enforce" width="420">
   <img src="docs/screenshots/page-history.png" alt="Mithu history page with visits grouped by day" width="420">
-  <img src="docs/screenshots/page-downloads.png" alt="Mithu download history with two finished downloads" width="420">
+</p>
+<p align="center">
+  <img src="docs/screenshots/page-downloads.png" alt="Mithu download history" width="420">
+  <img src="docs/screenshots/toolbar-icons.png" alt="Toolbar with the outline icon set" width="420">
 </p>
 <p align="center">
   <img src="docs/screenshots/page-bookmarks.png" alt="Mithu bookmarks manager with the Bookmarks bar folder open" width="420">

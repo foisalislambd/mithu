@@ -1,27 +1,20 @@
 Icons
 =====
 
-chromium/
----------
-
-The `.icon` files in `chromium/` are copied unchanged from the Chromium source
-tree (`components/vector_icons/`, `chrome/app/vector_icons/`,
-`ui/views/vector_icons/`). The `.svg` files beside them are 1:1 conversions
-made with `tools/icon2svg.py`: same canvas size, same path commands, color
-replaced by `currentColor`.
-
-Copyright 2012-2026 The Chromium Authors. Use of this source code is governed
-by a BSD-style license that can be found at
-https://chromium.googlesource.com/chromium/src/+/main/LICENSE (BSD 3-Clause).
-The full license text is also in THIRD_PARTY_NOTICES.md.
-
-Only generic Material/UI glyphs are included (arrows, reload, home, star,
-puzzle piece, three-dot menu, globe, lock, person avatar, and similar). No
-Google or Chrome logos, wordmarks, product icons, or the dinosaur are
-included.
-
-window/
+lucide/
 -------
 
-`minimize.svg`, `maximize.svg`, `restore.svg`, and `close.svg` are thin
-geometric caption glyphs written for Mithu and are under the same license as Mithu (Apache-2.0).
+The SVGs in `lucide/` are from Lucide 0.468.0
+(https://github.com/lucide-icons/lucide), an outline icon set.
+
+`star-filled.svg` is `star.svg` with the fill set to `currentColor` so a
+bookmarked page can show a solid star. `restore.svg` is Lucide's `copy.svg`
+(two overlapping rounded squares), used as the window restore glyph.
+
+Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part
+of Feather (MIT). All other copyright (c) for Lucide are held by Lucide
+Contributors 2022. The license is ISC. The full text is in `lucide/LICENSE`
+and in THIRD_PARTY_NOTICES.md.
+
+ISC and the Feather MIT license are compatible with Apache-2.0. No Google or
+Chrome logos, names, or product marks are included.

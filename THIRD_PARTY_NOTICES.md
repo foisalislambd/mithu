@@ -23,9 +23,9 @@ Chromium sources (`chrome/browser/ui/layout_constants.cc`,
 `chrome/browser/ui/views/toolbar/toolbar_view.cc`,
 `chrome/browser/ui/views/location_bar/`, `chrome/browser/ui/color/`,
 `ui/color/ref_color_mixer.cc`, `ui/color/sys_color_mixer.cc`, and
-`ui/views/layout/layout_provider.cc`). The vector icons under
-`crates/ui/icons/chromium/` are copied from Chromium's `.icon` sources and
-converted to SVG with `tools/icon2svg.py`; see `crates/ui/icons/NOTICE`.
+`ui/views/layout/layout_provider.cc`). Toolbar and window icons are the
+Lucide outline set (ISC), not Chromium's vector icons. See
+`crates/ui/icons/NOTICE` and `crates/ui/icons/lucide/LICENSE`.
 Settings-page metrics and the Roboto webfonts under `assets/fonts/roboto/`
 also come from Chromium (`ui/webui/resources/cr_elements/` and
 `ui/webui/resources/roboto/`). No Google or Chrome logos, names, or product
@@ -70,6 +70,10 @@ product UI. The window mark is Mithu's.
 Other bundled assets and dependencies keep their own licenses, including:
 
 - Noto Sans Bengali (`crates/text/fonts/OFL.txt`): SIL Open Font License 1.1.
+- Lucide icons (`crates/ui/icons/lucide/`, ISC). Copyright (c) for portions
+  of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All
+  other copyright (c) for Lucide are held by Lucide Contributors 2022.
+  The license text is in `crates/ui/icons/lucide/LICENSE`.
 - Rust crate dependencies declared in `Cargo.toml` / `Cargo.lock`, under
   each crate's own license.
 
