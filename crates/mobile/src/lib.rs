@@ -39,6 +39,7 @@ impl Edition {
 
 /// The first screen. Both editions open the shared new-tab document.
 pub fn start_document(edition: Edition, prefs: &Prefs, version: &str) -> Document {
+    pages::set_edition(edition.display_name());
     let mut document = pages::open("mithu://newtab", prefs, version).expect("new tab");
     document.title = edition.display_name().to_string();
     document

@@ -1,9 +1,9 @@
 //! Frame icons rasterized with resvg.
 //!
-//! The SVGs in `icons/chromium/` are converted one-to-one from Chromium's
-//! `.icon` vector sources (BSD-3-Clause; see `icons/NOTICE`). They are drawn
-//! on Chromium's 16 or 20 DIP grid, so they are rasterized straight at the
-//! destination size, as Skia does, which keeps the strokes pixel-aligned.
+//! The SVGs in `icons/lucide/` are the Lucide outline set (ISC; see
+//! `icons/lucide/LICENSE` and `icons/NOTICE`). Each icon is a 24×24 vector,
+//! rasterized at the destination pixel size so strokes stay sharp at 1× and
+//! 2×.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use resvg::tiny_skia::{self, Pixmap};
 use resvg::usvg::{self, Tree};
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Kind {
     Back,
@@ -96,7 +96,7 @@ fn raster(kind: Kind, color: u32, size: u32) -> Vec<u8> {
     if let Some(hit) = cache.lock().expect("icon cache").get(&key) {
         return hit.clone();
     }
-    let painted = paint_svg(kind.source(), color, size);
+    let painted = paint_svg(kind.svg(), color, size);
     cache.lock().expect("icon cache").insert(key, painted.clone());
     painted
 }
@@ -112,7 +112,7 @@ fn paint_svg(svg: &str, color: u32, size: u32) -> Vec<u8> {
     let hex = format!("#{color:06x}");
     let svg = svg.replace("currentColor", &hex);
     let tree = Tree::from_str(&svg, &usvg::Options::default()).unwrap_or_else(|_| {
-        Tree::from_str(Kind::Close.source(), &usvg::Options::default()).expect("close icon")
+        Tree::from_str(Kind::Close.svg(), &usvg::Options::default()).expect("close icon")
     });
     let size = size.max(1);
     let scale = size as f32 / tree.size().width().max(1.0);
@@ -144,36 +144,37 @@ fn blend(pixels: &mut [u32], width: u32, height: u32, x: i32, y: i32, color: u32
 }
 
 impl Kind {
-    fn source(self) -> &'static str {
+    /// Lucide SVG using `currentColor`. Safe to embed in internal pages.
+    pub fn svg(self) -> &'static str {
         match self {
-            Kind::Back => include_str!("../icons/chromium/back_arrow_20.svg"),
-            Kind::Forward => include_str!("../icons/chromium/forward_arrow_20.svg"),
-            Kind::Reload => include_str!("../icons/chromium/reload_20.svg"),
-            Kind::Stop => include_str!("../icons/chromium/navigate_stop_20.svg"),
-            Kind::Home => include_str!("../icons/chromium/navigate_home_20.svg"),
-            Kind::Lock => include_str!("../icons/chromium/lock_24.svg"),
-            Kind::Star => include_str!("../icons/chromium/star_20.svg"),
-            Kind::StarFilled => include_str!("../icons/chromium/star_active_20.svg"),
-            Kind::Extensions => include_str!("../icons/chromium/extension_20.svg"),
-            Kind::Menu => include_str!("../icons/chromium/browser_tools_20.svg"),
-            Kind::Plus => include_str!("../icons/chromium/add_16.svg"),
-            Kind::Search => include_str!("../icons/chromium/search_20.svg"),
-            Kind::Minimize => include_str!("../icons/window/minimize.svg"),
-            Kind::Maximize => include_str!("../icons/window/maximize.svg"),
-            Kind::Restore => include_str!("../icons/window/restore.svg"),
-            Kind::Close => include_str!("../icons/window/close.svg"),
-            Kind::Download => include_str!("../icons/chromium/file_download_20.svg"),
-            Kind::History => include_str!("../icons/chromium/history_20.svg"),
-            Kind::Settings => include_str!("../icons/chromium/settings_20.svg"),
-            Kind::Globe => include_str!("../icons/chromium/globe_16.svg"),
-            Kind::CloseTab => include_str!("../icons/chromium/close_tab_16.svg"),
-            Kind::TabSearch => include_str!("../icons/chromium/keyboard_arrow_down_20.svg"),
-            Kind::Avatar => include_str!("../icons/chromium/user_account_avatar_20.svg"),
-            Kind::PageInfo => include_str!("../icons/chromium/secure_page_info_16.svg"),
-            Kind::NotSecure => include_str!("../icons/chromium/not_secure_warning_16.svg"),
-            Kind::Info => include_str!("../icons/chromium/http_16.svg"),
-            Kind::Folder => include_str!("../icons/chromium/folder_20.svg"),
-            Kind::NewTabPage => include_str!("../icons/chromium/new_tab_16.svg"),
+            Kind::Back => include_str!("../icons/lucide/arrow-left.svg"),
+            Kind::Forward => include_str!("../icons/lucide/arrow-right.svg"),
+            Kind::Reload => include_str!("../icons/lucide/rotate-cw.svg"),
+            Kind::Stop => include_str!("../icons/lucide/x.svg"),
+            Kind::Home => include_str!("../icons/lucide/house.svg"),
+            Kind::Lock => include_str!("../icons/lucide/lock.svg"),
+            Kind::Star => include_str!("../icons/lucide/star.svg"),
+            Kind::StarFilled => include_str!("../icons/lucide/star-filled.svg"),
+            Kind::Extensions => include_str!("../icons/lucide/puzzle.svg"),
+            Kind::Menu => include_str!("../icons/lucide/ellipsis-vertical.svg"),
+            Kind::Plus => include_str!("../icons/lucide/plus.svg"),
+            Kind::Search => include_str!("../icons/lucide/search.svg"),
+            Kind::Minimize => include_str!("../icons/lucide/minus.svg"),
+            Kind::Maximize => include_str!("../icons/lucide/square.svg"),
+            Kind::Restore => include_str!("../icons/lucide/restore.svg"),
+            Kind::Close => include_str!("../icons/lucide/x.svg"),
+            Kind::Download => include_str!("../icons/lucide/download.svg"),
+            Kind::History => include_str!("../icons/lucide/history.svg"),
+            Kind::Settings => include_str!("../icons/lucide/settings.svg"),
+            Kind::Globe => include_str!("../icons/lucide/globe.svg"),
+            Kind::CloseTab => include_str!("../icons/lucide/x.svg"),
+            Kind::TabSearch => include_str!("../icons/lucide/chevron-down.svg"),
+            Kind::Avatar => include_str!("../icons/lucide/circle-user.svg"),
+            Kind::PageInfo => include_str!("../icons/lucide/sliders-horizontal.svg"),
+            Kind::NotSecure => include_str!("../icons/lucide/triangle-alert.svg"),
+            Kind::Info => include_str!("../icons/lucide/info.svg"),
+            Kind::Folder => include_str!("../icons/lucide/folder.svg"),
+            Kind::NewTabPage => include_str!("../icons/lucide/square-plus.svg"),
         }
     }
 }
@@ -184,8 +185,32 @@ mod tests {
 
     #[test]
     fn back_icon_has_ink() {
-        let bitmap = paint_svg(Kind::Back.source(), 0x1f1f1f, 16);
+        let bitmap = paint_svg(Kind::Back.svg(), 0x1f1f1f, 16);
         assert_eq!(bitmap.len(), 16 * 16 * 4);
         assert!(bitmap.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn outline_icons_have_ink_at_hidpi() {
+        for kind in [
+            Kind::Back,
+            Kind::Forward,
+            Kind::Reload,
+            Kind::Home,
+            Kind::Star,
+            Kind::StarFilled,
+            Kind::Menu,
+            Kind::Search,
+            Kind::Settings,
+            Kind::Download,
+            Kind::Close,
+            Kind::NewTabPage,
+        ] {
+            let bitmap = paint_svg(kind.svg(), 0x1f1f1f, 32);
+            assert_eq!(bitmap.len(), 32 * 32 * 4, "{kind:?}");
+            assert!(bitmap.iter().any(|byte| *byte != 0), "{kind:?}");
+            assert!(kind.svg().contains("currentColor"), "{kind:?}");
+        }
+        assert_ne!(Kind::Star.svg(), Kind::StarFilled.svg());
     }
 }

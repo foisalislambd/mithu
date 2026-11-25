@@ -42,7 +42,30 @@ pub struct Prefs {
     pub ask_where: bool,
     pub smooth_scroll: bool,
     pub hardware: bool,
+    /// Upgrade explicit http links to https. Localhost stays http.
+    pub https_only: bool,
+    /// Discard background tabs when the machine is low on memory.
+    pub memory_saver: bool,
+    /// Discard idle tabs without memory pressure. Stored only; not enforced yet.
+    pub discard_idle: bool,
+    /// Stored only. This build does not check sites against a blocklist.
+    pub safe_browsing: bool,
+    /// Stored only. Traffic is not sent through this proxy yet.
+    pub proxy: String,
+    pub spellcheck: bool,
+    pub caret_browse: bool,
+    pub autofill_passwords: bool,
+    pub autofill_payments: bool,
+    pub autofill_addresses: bool,
+    /// The user asked Mithu to become the default browser. Not registered yet.
+    pub prompt_default: bool,
+    pub offer_translate: bool,
     pub name: String,
+    pub shortcuts: Vec<Shortcut>,
+    /// Most-visited URLs the user removed from the new tab.
+    pub hidden_shortcuts: Vec<String>,
+    /// Search engines added in settings. Built-ins are not stored here.
+    pub engines: Vec<Engine>,
     pub bookmarks: Vec<Bookmark>,
     pub history: Vec<Visit>,
     pub downloads: Vec<Download>,
@@ -57,6 +80,19 @@ pub struct Exception {
     pub origin: String,
     pub feature: String,
     pub choice: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shortcut {
+    pub title: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Engine {
+    pub id: String,
+    pub name: String,
+    pub template: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,7 +133,7 @@ pub struct Command {
 impl Default for Prefs {
     fn default() -> Self {
         Self {
-            theme: "light".into(),
+            theme: "system".into(),
             font_px: 16,
             zoom: 1.0,
             show_home: true,
@@ -110,7 +146,22 @@ impl Default for Prefs {
             ask_where: false,
             smooth_scroll: true,
             hardware: true,
+            https_only: false,
+            memory_saver: true,
+            discard_idle: false,
+            safe_browsing: false,
+            proxy: String::new(),
+            spellcheck: false,
+            caret_browse: false,
+            autofill_passwords: false,
+            autofill_payments: false,
+            autofill_addresses: false,
+            prompt_default: false,
+            offer_translate: false,
             name: "Mithu".into(),
+            shortcuts: Vec::new(),
+            hidden_shortcuts: Vec::new(),
+            engines: Vec::new(),
             bookmarks: Vec::new(),
             history: Vec::new(),
             downloads: Vec::new(),
@@ -122,7 +173,11 @@ impl Default for Prefs {
 
 impl Prefs {
     pub fn dark(&self) -> bool {
-        self.theme == "dark"
+        match self.theme.as_str() {
+            "dark" => true,
+            "system" => system_prefers_dark(),
+            _ => false,
+        }
     }
 
     pub fn remember(&mut self, url: &str, title: &str) {
@@ -203,15 +258,160 @@ pub fn save(path: &Path, prefs: &Prefs) {
     let _ = std::fs::write(path, format_prefs(prefs));
 }
 
-/// DuckDuckGo, Bing, or Wikipedia. The default stays DuckDuckGo.
+/// Built-in engines. Custom engines live on [`Prefs::engines`].
+pub fn builtin_engines() -> &'static [(&'static str, &'static str, &'static str)] {
+    &[
+        ("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/?q=%s"),
+        ("bing", "Bing", "https://www.bing.com/search?q=%s"),
+        ("wikipedia", "Wikipedia", "https://en.wikipedia.org/w/index.php?search=%s"),
+    ]
+}
+
+pub fn known_engine(id: &str) -> bool {
+    if builtin_engines().iter().any(|(key, _, _)| *key == id) {
+        return true;
+    }
+    CUSTOM_ENGINES.with(|cell| cell.borrow().iter().any(|(key, _)| key == id))
+}
+
+/// Copy the search engine, HTTPS-only choice, and custom templates into the
+/// address bar. Both editions call this when preferences load or change.
+pub fn sync_runtime(prefs: &Prefs) {
+    let engines = prefs
+        .engines
+        .iter()
+        .map(|engine| (engine.id.clone(), engine.template.clone()))
+        .collect();
+    CUSTOM_ENGINES.with(|cell| *cell.borrow_mut() = engines);
+    crate::set_search_engine(&prefs.search);
+    crate::set_search_label(&engine_label(prefs));
+    crate::set_https_only(prefs.https_only);
+}
+
+thread_local! {
+    static CUSTOM_ENGINES: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static EDITION_NAME: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Which build is showing these pages. "Mithu" or "Mithu Lite".
+pub fn set_edition(name: &str) {
+    let name = name.trim();
+    if !name.is_empty() {
+        EDITION_NAME.with(|cell| *cell.borrow_mut() = name.to_string());
+    }
+}
+
+pub fn edition_name() -> String {
+    EDITION_NAME.with(|cell| {
+        let name = cell.borrow();
+        if name.is_empty() { "Mithu".to_string() } else { name.clone() }
+    })
+}
+
+fn system_prefers_dark() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(detect_system_dark)
+}
+
+fn detect_system_dark() -> bool {
+    if let Ok(value) = std::env::var("MITHU_COLOR_SCHEME") {
+        return value.eq_ignore_ascii_case("dark");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(dark) = macos_dark() {
+            return dark;
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(dark) = windows_dark() {
+            return dark;
+        }
+    }
+    gtk_settings_dark() || gsettings_dark()
+}
+
+fn gtk_settings_dark() -> bool {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let Some(home) = home else { return false };
+    for rel in ["/.config/gtk-3.0/settings.ini", "/.config/gtk-4.0/settings.ini"] {
+        let Ok(text) = std::fs::read_to_string(home.join(rel.trim_start_matches('/'))) else { continue };
+        let lower = text.to_ascii_lowercase();
+        if lower.contains("gtk-application-prefer-dark-theme=1") || lower.contains("gtk-application-prefer-dark-theme = 1") {
+            return true;
+        }
+        if let Some(line) = lower.lines().find(|line| line.contains("gtk-theme-name")) {
+            if line.contains("dark") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn gsettings_dark() -> bool {
+    let output = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+        .output();
+    let Ok(output) = output else { return false };
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.contains("prefer-dark")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_dark() -> Option<bool> {
+    let output = std::process::Command::new("defaults").args(["read", "-g", "AppleInterfaceStyle"]).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    Some(text.to_ascii_lowercase().contains("dark"))
+}
+
+#[cfg(windows)]
+fn windows_dark() -> Option<bool> {
+    let output = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "/v", "AppsUseLightTheme"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.contains("0x0") {
+        Some(true)
+    } else if text.contains("0x1") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// DuckDuckGo, Bing, Wikipedia, or a template registered with [`sync_runtime`].
 pub fn search_url(engine: &str, query: &str) -> Url {
     let q = percent(query);
-    let spec = match engine {
-        "bing" => format!("https://www.bing.com/search?q={q}"),
-        "wikipedia" => format!("https://en.wikipedia.org/w/index.php?search={q}"),
-        _ => format!("https://duckduckgo.com/?q={q}"),
-    };
-    Url::parse(&spec).expect("search")
+    let template = engine_template(engine);
+    let spec = template.replace("%s", &q);
+    Url::parse(&spec).unwrap_or_else(|_| Url::parse("https://duckduckgo.com/").expect("search"))
+}
+
+fn engine_template(engine: &str) -> String {
+    if let Some((_, template)) = CUSTOM_ENGINES.with(|cell| {
+        cell.borrow().iter().find(|(id, _)| id == engine).cloned()
+    }) {
+        return template;
+    }
+    builtin_engines()
+        .iter()
+        .find(|(id, _, _)| *id == engine)
+        .map(|(_, _, template)| (*template).to_string())
+        .unwrap_or_else(|| "https://duckduckgo.com/?q=%s".into())
+}
+
+pub fn engine_label(prefs: &Prefs) -> String {
+    if let Some(engine) = prefs.engines.iter().find(|engine| engine.id == prefs.search) {
+        return engine.name.clone();
+    }
+    builtin_engines()
+        .iter()
+        .find(|(id, _, _)| *id == prefs.search)
+        .map(|(_, name, _)| (*name).to_string())
+        .unwrap_or_else(|| "DuckDuckGo".into())
 }
 
 /// Save a remote page into `dir`. The name comes from the URL path.
@@ -343,6 +543,17 @@ pub fn command(spec: &str, prefs: &mut Prefs) -> Option<Command> {
             }
         }
         "bookmark-del" => prefs.bookmarks.retain(|mark| mark.url != value),
+        "shortcut-add" => add_shortcut(prefs, &value, &field(&extra, "title")),
+        "shortcut-del" => prefs.shortcuts.retain(|item| item.url != value),
+        "shortcut-hide" => hide_shortcut(prefs, &value),
+        "engine-add" => add_engine(prefs, &key, &value),
+        "engine-del" => {
+            prefs.engines.retain(|engine| engine.id != value);
+            if prefs.search == value {
+                prefs.search = "duckduckgo".into();
+            }
+        }
+        "clear-downloads" => prefs.downloads.clear(),
         "import" => import_html(prefs, &value),
         "reset" => {
             let bookmarks = prefs.bookmarks.clone();
@@ -358,7 +569,93 @@ pub fn command(spec: &str, prefs: &mut Prefs) -> Option<Command> {
     if !back.starts_with("mithu://") {
         back = "mithu://settings".into();
     }
+    sync_runtime(prefs);
     Some(Command { redirect: back, open_path, reveal_path })
+}
+
+fn add_shortcut(prefs: &mut Prefs, raw: &str, title: &str) {
+    let Some(url) = normalize_shortcut(raw) else { return };
+    let title = title.trim();
+    let title = if title.is_empty() { host_of(&url) } else { title.to_string() };
+    prefs.hidden_shortcuts.retain(|item| item != &url);
+    if let Some(item) = prefs.shortcuts.iter_mut().find(|item| item.url == url) {
+        item.title = title;
+        return;
+    }
+    if prefs.shortcuts.len() < 12 {
+        prefs.shortcuts.push(Shortcut { title, url });
+    }
+}
+
+fn hide_shortcut(prefs: &mut Prefs, url: &str) {
+    if url.is_empty() {
+        return;
+    }
+    prefs.shortcuts.retain(|item| item.url != url);
+    if !prefs.hidden_shortcuts.iter().any(|item| item == url) {
+        prefs.hidden_shortcuts.push(url.to_string());
+    }
+}
+
+fn add_engine(prefs: &mut Prefs, name: &str, template: &str) {
+    let name = name.trim();
+    let Some(template) = clean_template(template) else { return };
+    if name.is_empty() {
+        return;
+    }
+    let id = engine_id(name);
+    if builtin_engines().iter().any(|(key, _, _)| *key == id) {
+        return;
+    }
+    if let Some(engine) = prefs.engines.iter_mut().find(|engine| engine.id == id) {
+        engine.name = name.to_string();
+        engine.template = template;
+    } else {
+        prefs.engines.push(Engine { id: id.clone(), name: name.to_string(), template });
+    }
+    prefs.search = id;
+}
+
+fn normalize_shortcut(raw: &str) -> Option<String> {
+    let text = raw.trim();
+    if text.is_empty() || text.contains(['\n', '\t']) {
+        return None;
+    }
+    if text.starts_with("https://") || text.starts_with("http://") || text.starts_with("mithu://") {
+        return Some(text.to_string());
+    }
+    if !text.contains(' ') && text.contains('.') {
+        return Some(format!("https://{text}"));
+    }
+    None
+}
+
+fn clean_template(raw: &str) -> Option<String> {
+    let text = raw.trim();
+    if !(text.starts_with("https://") || text.starts_with("http://")) || !text.contains("%s") {
+        return None;
+    }
+    if text.contains(['\n', '\t', ' ', '"', '<', '>']) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+fn engine_id(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect();
+    if slug.is_empty() { "custom".into() } else { format!("c-{slug}") }
+}
+
+fn flag(value: &str) -> bool {
+    value != "0" && value != "false"
+}
+
+fn is_search_choice(prefs: &Prefs, value: &str) -> bool {
+    builtin_engines().iter().any(|(id, _, _)| *id == value) || prefs.engines.iter().any(|engine| engine.id == value)
 }
 
 fn field(pairs: &[(String, String)], name: &str) -> String {
@@ -367,7 +664,7 @@ fn field(pairs: &[(String, String)], name: &str) -> String {
 
 fn apply_set(prefs: &mut Prefs, key: &str, value: &str) {
     match key {
-        "theme" if value == "light" || value == "dark" => prefs.theme = value.into(),
+        "theme" if matches!(value, "light" | "dark" | "system") => prefs.theme = value.into(),
         "font_px" => {
             if let Ok(px) = value.parse::<u32>() {
                 prefs.font_px = px.clamp(12, 24);
@@ -378,15 +675,27 @@ fn apply_set(prefs: &mut Prefs, key: &str, value: &str) {
                 prefs.zoom = zoom.clamp(0.5, 2.0);
             }
         }
-        "show_home" => prefs.show_home = value != "0" && value != "false",
-        "show_bookmarks" => prefs.show_bookmarks = value != "0" && value != "false",
-        "search" if matches!(value, "duckduckgo" | "bing" | "wikipedia") => prefs.search = value.into(),
+        "show_home" => prefs.show_home = flag(value),
+        "show_bookmarks" => prefs.show_bookmarks = flag(value),
+        "search" if is_search_choice(prefs, value) => prefs.search = value.into(),
         "startup" if matches!(value, "newtab" | "continue" | "pages") => prefs.startup = value.into(),
-        "download_dir" => prefs.download_dir = value.into(),
-        "languages" => prefs.languages = value.into(),
-        "ask_where" => prefs.ask_where = value != "0" && value != "false",
-        "smooth_scroll" => prefs.smooth_scroll = value != "0" && value != "false",
-        "hardware" => prefs.hardware = value != "0" && value != "false",
+        "download_dir" => prefs.download_dir = value.replace(['\n', '\t'], " "),
+        "languages" => prefs.languages = value.replace(['\n', '\t'], " "),
+        "ask_where" => prefs.ask_where = flag(value),
+        "smooth_scroll" => prefs.smooth_scroll = flag(value),
+        "hardware" => prefs.hardware = flag(value),
+        "https_only" => prefs.https_only = flag(value),
+        "memory_saver" => prefs.memory_saver = flag(value),
+        "discard_idle" => prefs.discard_idle = flag(value),
+        "safe_browsing" => prefs.safe_browsing = flag(value),
+        "proxy" => prefs.proxy = value.replace(['\n', '\t'], " "),
+        "spellcheck" => prefs.spellcheck = flag(value),
+        "caret_browse" => prefs.caret_browse = flag(value),
+        "autofill_passwords" => prefs.autofill_passwords = flag(value),
+        "autofill_payments" => prefs.autofill_payments = flag(value),
+        "autofill_addresses" => prefs.autofill_addresses = flag(value),
+        "prompt_default" => prefs.prompt_default = flag(value),
+        "offer_translate" => prefs.offer_translate = flag(value),
         "name" => {
             if !value.trim().is_empty() {
                 prefs.name = value.trim().to_string();
@@ -516,7 +825,7 @@ fn classify(spec: &str) -> Option<Kind> {
 
 fn render(kind: Kind, spec: &str, prefs: &Prefs, version: &str) -> Document {
     let (url, title, body) = match kind {
-        Kind::Settings => ("mithu://settings", "Settings", settings_body(spec, prefs)),
+        Kind::Settings => ("mithu://settings", "Settings", settings_body(spec, prefs, version)),
         Kind::History => ("mithu://history", "History", history_body(spec, prefs)),
         Kind::Downloads => ("mithu://downloads", "Downloads", downloads_body(spec, prefs)),
         Kind::Bookmarks => ("mithu://bookmarks", "Bookmarks", bookmarks_body(spec, prefs)),
@@ -602,12 +911,13 @@ fn logo_src() -> String {
 
 /// SVG for an internal page's own icon. The New Tab page has none.
 fn page_svg(title: &str) -> Option<&'static str> {
+    use crate::icons::Kind;
     Some(match title {
-        "Settings" => include_str!("../icons/chromium/settings_20.svg"),
-        "History" => include_str!("../icons/chromium/history_20.svg"),
-        "Downloads" => include_str!("../icons/chromium/file_download_20.svg"),
-        "Bookmarks" => include_str!("../icons/chromium/star_20.svg"),
-        "Extensions" => include_str!("../icons/chromium/extension_20.svg"),
+        "Settings" => Kind::Settings.svg(),
+        "History" => Kind::History.svg(),
+        "Downloads" => Kind::Download.svg(),
+        "Bookmarks" => Kind::Star.svg(),
+        "Extensions" => Kind::Extensions.svg(),
         _ => return None,
     })
 }
@@ -649,7 +959,11 @@ fn icon_src() -> String {
 }
 
 fn shell(title: &str, prefs: &Prefs, version: &str, body: &str) -> String {
-    let theme = if prefs.dark() { "dark" } else { "light" };
+    let theme = match prefs.theme.as_str() {
+        "dark" => "dark",
+        "system" => "system",
+        _ => "light",
+    };
     format!(
         r#"<!DOCTYPE html>
 <html lang="en" data-theme="{theme}">
@@ -677,24 +991,50 @@ fn shell(title: &str, prefs: &Prefs, version: &str, body: &str) -> String {
   --nav-bg: #e8f0fe;
   --hover: #e8eaed;
   --danger: #d93025;
+  --shadow: 0 1px 2px rgba(60, 64, 67, .12), 0 1px 3px rgba(60, 64, 67, .08);
+}}
+html[data-theme="dark"], html[data-theme="system"] {{
+  color-scheme: light dark;
 }}
 html[data-theme="dark"] {{
   color-scheme: dark;
   --bg: #1f1f1f;
-  --card: #292a2d;
-  --ink: #e3e3e3;
+  --card: #2a2a2d;
+  --ink: #e8eaed;
   --muted: #9aa0a6;
-  --line: rgba(255, 255, 255, .1);
-  --hairline: rgba(255, 255, 255, .14);
-  --field: #3c3c3c;
-  --accent: #a8c7fa;
+  --line: rgba(255, 255, 255, .08);
+  --hairline: rgba(255, 255, 255, .12);
+  --field: #3c4043;
+  --accent: #8ab4f8;
   --accent-ink: #062e6f;
   --side: #1f1f1f;
-  --nav: #fff;
+  --nav: #e8eaed;
   --nav-selected: #202124;
   --nav-bg: #8ab4f8;
   --hover: #3c4043;
   --danger: #f28b82;
+  --shadow: 0 1px 3px rgba(0, 0, 0, .4);
+}}
+@media (prefers-color-scheme: dark) {{
+  html[data-theme="system"] {{
+    color-scheme: dark;
+    --bg: #1f1f1f;
+    --card: #2a2a2d;
+    --ink: #e8eaed;
+    --muted: #9aa0a6;
+    --line: rgba(255, 255, 255, .08);
+    --hairline: rgba(255, 255, 255, .12);
+    --field: #3c4043;
+    --accent: #8ab4f8;
+    --accent-ink: #062e6f;
+    --side: #1f1f1f;
+    --nav: #e8eaed;
+    --nav-selected: #202124;
+    --nav-bg: #8ab4f8;
+    --hover: #3c4043;
+    --danger: #f28b82;
+    --shadow: 0 1px 3px rgba(0, 0, 0, .4);
+  }}
 }}
 * {{ box-sizing: border-box; }}
 html, body {{ margin:0; background:var(--bg); color:var(--ink); font: {font}px/1.54 Roboto, "Noto Sans", Arial, sans-serif; }}
@@ -704,21 +1044,24 @@ button, input, select, textarea {{ font: inherit; color: inherit; }}
 .markimg {{ width:24px; height:24px; border-radius:50%; }}
 img.logo {{ width:min(240px, 70vw); height:auto; display:block; margin:0 auto 8px; }}
 .app {{ display:flex; min-height:100vh; }}
-aside {{ width:256px; flex:none; padding:8px 0 24px; }}
+aside {{ width:256px; flex:none; padding:8px 0 24px; position:sticky; top:0; align-self:flex-start; height:100vh; overflow:auto; }}
 .pagetitle {{ display:flex; align-items:center; gap:12px; height:48px; padding:8px 20px 0; font-size:22px; font-weight:400; }}
 .maincol {{ flex:1; min-width:0; display:flex; flex-direction:column; }}
 .searchrow {{ height:56px; display:flex; align-items:center; padding:8px 24px 0; }}
-.search {{ width:min(720px, 100%); height:40px; background:var(--field); border:0; border-radius:20px; padding:0 16px 0 16px; }}
+.search {{ width:min(680px, 100%); height:44px; background:var(--field); border:0; border-radius:22px; padding:0 16px; }}
+.search:focus {{ outline:2px solid var(--accent); background:var(--card); }}
 nav a, .folders a {{ display:flex; align-items:center; gap:12px; min-height:40px; margin:0 8px 0 0; padding:0 16px 0 20px; border-radius:0 100px 100px 0; color:var(--nav); font-size:13px; font-weight:500; text-decoration:none; }}
-nav a svg {{ width:20px; height:20px; flex:none; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }}
+nav a svg {{ width:20px; height:20px; flex:none; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }}
 nav a:hover, .folders a:hover {{ background:var(--hover); }}
 nav a.on, .folders a.on {{ background:var(--nav-bg); color:var(--nav-selected); }}
 main {{ flex:1; padding:8px 24px 64px; max-width:760px; }}
-h1 {{ font-size:15px; font-weight:400; line-height:1.4; margin:12px 0 12px; color:var(--muted); }}
-h2 {{ font-size:13px; font-weight:500; margin:16px 0 8px; color:var(--muted); }}
+h1 {{ font-size:28px; font-weight:400; line-height:1.3; margin:12px 0 20px; color:var(--ink); }}
+h2 {{ font-size:16px; font-weight:500; margin:20px 0 8px; color:var(--ink); }}
 section.on > h2 {{ display:none; }}
+body.searching section h2 {{ display:block; }}
 .lead {{ color:var(--muted); margin:0 0 16px; font-size:13px; }}
-.card {{ background:var(--card); border:1px solid var(--hairline); border-radius:8px; padding:0 16px; margin:0 0 16px; }}
+.card {{ background:var(--card); border:1px solid var(--hairline); border-radius:12px; padding:4px 20px; margin:0 0 16px; box-shadow:var(--shadow); }}
+.soon {{ display:inline-block; margin-left:8px; padding:1px 8px; border-radius:999px; background:var(--field); color:var(--muted); font-size:11px; font-weight:500; letter-spacing:.01em; vertical-align:1px; }}
 .row {{ display:flex; align-items:center; gap:16px; min-height:48px; border-top:1px solid var(--line); padding:8px 0; }}
 .card .row:first-child {{ border-top:0; }}
 .row .grow {{ flex:1; }}
@@ -765,6 +1108,32 @@ html[data-theme="dark"] .htime {{ color:#9aa0a6; }}
 .aboutbox .logo {{ margin-bottom:12px; }}
 .sub {{ color:var(--muted); font-size:13px; margin:4px 0 16px; }}
 .app.ntp .searchrow {{ display:none; }}
+.app.ntp main {{ max-width:none; min-height:100vh; display:flex; align-items:flex-start; justify-content:center; padding:8vh 24px 48px; }}
+.home {{ width:min(640px, 100%); }}
+.home .logo {{ width:min(196px, 56vw); margin:0 auto 28px; }}
+.homeform {{ position:relative; }}
+.homeform input {{ width:100%; height:48px; border-radius:24px; border:1px solid var(--hairline); background:var(--card); box-shadow:var(--shadow); padding:0 20px 0 48px; font-size:16px; }}
+.homeform input:hover {{ box-shadow:0 1px 6px rgba(32, 33, 36, .16); }}
+.homeform input:focus {{ outline:none; border-color:transparent; box-shadow:var(--shadow), 0 0 0 2px var(--accent); }}
+.homeform svg {{ position:absolute; left:16px; top:14px; width:20px; height:20px; stroke:var(--muted); fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }}
+.shortcuts {{ display:flex; flex-wrap:wrap; justify-content:center; gap:6px; margin-top:32px; }}
+.shortcut {{ width:104px; position:relative; }}
+.shortcut a {{ display:flex; flex-direction:column; align-items:center; gap:8px; padding:12px 6px 10px; border-radius:12px; color:var(--ink); text-decoration:none; }}
+.shortcut a:hover {{ background:var(--hover); text-decoration:none; }}
+.shortcut .slabel {{ font-size:12px; line-height:1.3; max-width:96px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.shortcut .x {{ position:absolute; top:2px; right:6px; width:22px; height:22px; border:0; border-radius:50%; background:transparent; color:var(--muted); cursor:pointer; opacity:0; }}
+.shortcut:hover .x, .shortcut .x:focus {{ opacity:1; background:var(--card); }}
+.shortcut.add button {{ width:100%; border:0; background:transparent; color:var(--ink); cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:8px; padding:12px 6px 10px; border-radius:12px; }}
+.shortcut.add button:hover {{ background:var(--hover); }}
+.fav {{ width:48px; height:48px; border-radius:16px; display:grid; place-items:center; position:relative; color:#fff; font-size:18px; font-weight:500; overflow:hidden; }}
+.fav img {{ position:absolute; inset:8px; width:32px; height:32px; object-fit:contain; background:#fff; border-radius:6px; }}
+.fav.got b {{ visibility:hidden; }}
+.fav.add {{ background:var(--field); color:var(--ink); font-size:28px; font-weight:400; }}
+.hrow .fav {{ width:16px; height:16px; border-radius:4px; font-size:9px; flex:none; }}
+.hrow .fav img {{ inset:1px; width:14px; height:14px; border-radius:2px; }}
+td .fav {{ width:16px; height:16px; border-radius:4px; font-size:9px; display:inline-grid; margin-right:8px; vertical-align:middle; }}
+td .fav img {{ inset:1px; width:14px; height:14px; }}
+.dl svg {{ width:24px; height:24px; flex:none; stroke:var(--accent); fill:none; stroke-width:2; }}
 </style>
 </head>
 <body>
@@ -784,8 +1153,9 @@ html[data-theme="dark"] .htime {{ color:#9aa0a6; }}
 var q = document.getElementById("q");
 q.addEventListener("input", function () {{
   var needle = q.value.toLowerCase();
+  document.body.classList.toggle("searching", needle.length > 0);
   document.querySelectorAll("[data-section]").forEach(function (node) {{
-    var hay = (node.getAttribute("data-section") || "").toLowerCase();
+    var hay = ((node.getAttribute("data-section") || "") + " " + (node.innerText || "")).toLowerCase();
     var show = needle ? hay.indexOf(needle) >= 0 : node.classList.contains("on");
     node.classList.toggle("hidden", !show);
   }});
@@ -858,30 +1228,36 @@ fn nav_link(href: &str, label: &str, on: bool) -> String {
     )
 }
 
-fn nav_icon(label: &str) -> &'static str {
-    match label {
-        "You" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"8\" r=\"3\"/><path d=\"M5 19c1.5-3 4-4.5 7-4.5S17.5 16 19 19\"/></svg>",
-        "Autofill and passwords" => "<svg viewBox=\"0 0 24 24\"><rect x=\"6\" y=\"10\" width=\"12\" height=\"9\" rx=\"1\"/><path d=\"M9 10V8a3 3 0 0 1 6 0v2\"/></svg>",
-        "Privacy and security" => "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z\"/></svg>",
-        "Performance" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 8v5l3 2\"/></svg>",
-        "Appearance" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M12 3v2M12 19v2M3 12h2M19 12h2\"/></svg>",
-        "Search engine" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"11\" cy=\"11\" r=\"6\"/><path d=\"M16 16l4 4\"/></svg>",
-        "Default browser" => "<svg viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"6\" width=\"16\" height=\"12\" rx=\"1\"/></svg>",
-        "On startup" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 8v4\"/></svg>",
-        "Languages" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M4 12h16M12 4c2 3 2 13 0 16M12 4c-2 3-2 13 0 16\"/></svg>",
-        "Downloads" => "<svg viewBox=\"0 0 24 24\"><path d=\"M12 4v10M8 10l4 4 4-4M5 19h14\"/></svg>",
-        "Accessibility" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"5\" r=\"2\"/><path d=\"M5 9h14M12 9v11M8 20l4-6 4 6\"/></svg>",
-        "System" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M12 3v3M12 18v3M3 12h3M18 12h3\"/></svg>",
-        "Reset settings" => "<svg viewBox=\"0 0 24 24\"><path d=\"M4 12a8 8 0 1 0 2-5\"/><path d=\"M4 4v5h5\"/></svg>",
-        "Extensions" | "My extensions" => "<svg viewBox=\"0 0 24 24\"><path d=\"M8 8h3V4H8v4zm5 0h3V4h-3v4zM8 14h8v6H8z\"/></svg>",
-        "About Mithu" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 11v5M12 8h.01\"/></svg>",
-        "History" | "Mithu history" => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 8v5l3 2\"/></svg>",
-        "Tabs from other devices" => "<svg viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"6\" width=\"12\" height=\"10\" rx=\"1\"/><path d=\"M16 10h4v8H8\"/></svg>",
-        "Delete browsing data" => "<svg viewBox=\"0 0 24 24\"><path d=\"M5 7h14M9 7V5h6v2M8 7l1 12h6l1-12\"/></svg>",
-        "Keyboard shortcuts" => "<svg viewBox=\"0 0 24 24\"><rect x=\"3\" y=\"6\" width=\"18\" height=\"12\" rx=\"1\"/></svg>",
-        "Bookmarks bar" | "Other bookmarks" => "<svg viewBox=\"0 0 24 24\"><path d=\"M4 6h7l2 2h7v10H4z\"/></svg>",
-        _ => "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/></svg>",
-    }
+fn nav_svg(svg: &str) -> String {
+    svg.replacen("<svg", "<svg class=\"navico\"", 1).replace('\n', "")
+}
+
+fn nav_icon(label: &str) -> String {
+    use crate::icons::Kind;
+    let svg = match label {
+        "You and profile" => Kind::Avatar.svg(),
+        "Autofill and passwords" => include_str!("../icons/lucide/key-round.svg"),
+        "Privacy and security" => include_str!("../icons/lucide/shield.svg"),
+        "Performance" => Kind::History.svg(),
+        "Appearance" => include_str!("../icons/lucide/sun.svg"),
+        "Search engine" => Kind::Search.svg(),
+        "Default browser" => include_str!("../icons/lucide/monitor.svg"),
+        "On startup" => Kind::Home.svg(),
+        "Languages" => include_str!("../icons/lucide/languages.svg"),
+        "Downloads" => Kind::Download.svg(),
+        "Accessibility" => include_str!("../icons/lucide/accessibility.svg"),
+        "System" => Kind::Settings.svg(),
+        "Reset settings" => include_str!("../icons/lucide/rotate-cw.svg"),
+        "Extensions" | "My extensions" => Kind::Extensions.svg(),
+        "About Mithu" => include_str!("../icons/lucide/info.svg"),
+        "History" | "Mithu history" => Kind::History.svg(),
+        "Tabs from other devices" => include_str!("../icons/lucide/monitor.svg"),
+        "Delete browsing data" => include_str!("../icons/lucide/trash-2.svg"),
+        "Keyboard shortcuts" => include_str!("../icons/lucide/square.svg"),
+        "Bookmarks bar" | "Other bookmarks" => Kind::Folder.svg(),
+        _ => include_str!("../icons/lucide/circle-alert.svg"),
+    };
+    nav_svg(svg)
 }
 
 fn nav_html(title: &str, body: &str, prefs: &Prefs) -> String {
@@ -939,7 +1315,7 @@ fn nav_html(title: &str, body: &str, prefs: &Prefs) -> String {
 }
 
 const SETTINGS_NAV: &[(&str, &str)] = &[
-    ("you", "You"),
+    ("you", "You and profile"),
     ("autofill", "Autofill and passwords"),
     ("privacy", "Privacy and security"),
     ("performance", "Performance"),
@@ -955,38 +1331,34 @@ const SETTINGS_NAV: &[(&str, &str)] = &[
     ("about", "About Mithu"),
 ];
 
-fn settings_body(spec: &str, prefs: &Prefs) -> String {
+fn settings_body(spec: &str, prefs: &Prefs, version: &str) -> String {
     let path = Url::parse(spec).map(|url| url.path().trim_matches('/').to_string()).unwrap_or_default();
     if path == "site" || path.starts_with("site/") {
         return site_settings_body(&path, prefs);
     }
     let raw = path.split('/').next().unwrap_or("");
-    let focus = if raw.is_empty() { "you" } else { raw };
+    let focus = if raw.is_empty() || !SETTINGS_NAV.iter().any(|(id, _)| *id == raw) { "you" } else { raw };
     let heading = SETTINGS_NAV.iter().find(|(id, _)| *id == focus).map(|(_, label)| *label).unwrap_or("Settings");
     let mut out = format!("<h1>{}</h1>", esc(heading));
-    out.push_str(&section("you profile name", "You", &you_card(prefs), focus == "you"));
-    out.push_str(&section("autofill passwords", "Autofill and passwords", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Password manager<small>Nothing is stored until a lock is added. Nothing leaves this computer.</small></div></div><div class=\"row\"><div class=\"grow\">Payment methods</div></div><div class=\"row\"><div class=\"grow\">Addresses and more</div></div></div>", focus == "autofill"));
-    out.push_str(&section("privacy security clear", "Privacy and security", &privacy_card(), focus == "privacy"));
-    out.push_str(&section("performance memory", "Performance", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Memory saver<small>Open tabs stay as they are. Mithu does not discard them in the background yet.</small></div></div></div>", focus == "performance"));
+    out.push_str(&section("you profile name", "You and profile", &you_card(prefs), focus == "you"));
+    out.push_str(&section("autofill passwords payments addresses", "Autofill and passwords", &autofill_card(prefs), focus == "autofill"));
+    out.push_str(&section("privacy security clear cookies permissions https safe", "Privacy and security", &privacy_card(prefs), focus == "privacy"));
+    out.push_str(&section("performance memory saver discard tabs", "Performance", &performance_card(prefs), focus == "performance"));
     out.push_str(&section("appearance theme font zoom home bookmarks", "Appearance", &appearance_card(prefs), focus == "appearance"));
     out.push_str(&section("search engine", "Search engine", &search_card(prefs), focus == "search"));
-    out.push_str(&section("default browser", "Default browser", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Mithu is not registered as the system browser.<small>The operating system still chooses which app opens links.</small></div></div></div>", focus == "default"));
+    out.push_str(&section("default browser", "Default browser", &default_card(prefs), focus == "default"));
     out.push_str(&section("startup on start", "On startup", &startup_card(prefs), focus == "startup"));
-    out.push_str(&section("languages", "Languages", &lang_card(prefs), focus == "languages"));
-    out.push_str(&section("downloads folder", "Downloads", &download_card(prefs), focus == "downloads"));
+    out.push_str(&section("languages translate", "Languages", &lang_card(prefs), focus == "languages"));
+    out.push_str(&section("downloads folder save", "Downloads", &download_card(prefs), focus == "downloads"));
     out.push_str(&section("accessibility", "Accessibility", &a11y_card(prefs), focus == "accessibility"));
-    out.push_str(&section("system hardware", "System", &system_card(prefs), focus == "system"));
-    out.push_str(&section("reset", "Reset settings", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Restore Mithu defaults<small>Bookmarks, history, and downloads stay.</small></div><button class=\"btn danger\" onclick=\"go('reset', {{}}, 'mithu://settings')\">Reset</button></div></div>", focus == "reset"));
-    out.push_str(&section(
-        "about version",
-        "About Mithu",
-        &format!(
-            "<div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\"><strong>Mithu</strong></div></div><div class=\"row\"><div class=\"grow\">Version<small>Also at mithu://version</small></div><a href=\"mithu://version\">Open</a></div><div class=\"row\"><div class=\"grow\">Open source notices<small>THIRD_PARTY_NOTICES.md</small></div></div></div>",
-            mark = mark_src(),
-        ),
-        focus == "about",
-    ));
+    out.push_str(&section("system hardware proxy", "System", &system_card(prefs), focus == "system"));
+    out.push_str(&section("reset", "Reset settings", "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Restore Mithu defaults<small>Bookmarks, history, and downloads stay. New-tab shortcuts and search engines return to the defaults.</small></div><button class=\"btn danger\" onclick=\"go('reset', {{}}, 'mithu://settings')\">Reset</button></div></div>", focus == "reset"));
+    out.push_str(&section("about version edition license", "About Mithu", &about_card(version), focus == "about"));
     out
+}
+
+fn soon_label(text: &str) -> String {
+    format!("{text}<span class=\"soon\">Coming soon</span>")
 }
 
 fn section(keys: &str, title: &str, body: &str, on: bool) -> String {
@@ -1001,13 +1373,29 @@ fn section(keys: &str, title: &str, body: &str, on: bool) -> String {
 }
 
 fn you_card(prefs: &Prefs) -> String {
+    let avatar = crate::icons::Kind::Avatar.svg().replacen("<svg", "<svg class=\"markimg\" aria-hidden=\"true\"", 1);
     format!(
-        "<div class=\"card\"><div class=\"row\">{avatar}<div class=\"grow\">{name}<small>Local profile. Not an account.</small></div></div>
+        "<div class=\"card\"><div class=\"row\">{avatar}<div class=\"grow\">{name}<small>Local profile on this computer. Not an account.</small></div></div>
 <div class=\"row\"><div class=\"grow\">Customize profile</div><button class=\"btn quiet\" onclick=\"go('set', {{key:'name', value: prompt('Profile name', '{name}') || '{name}'}}, 'mithu://settings/you')\">Edit</button></div>
 <div class=\"row\"><div class=\"grow\">Import bookmarks</div><a href=\"mithu://bookmarks\">Open</a></div></div>",
         name = esc(&prefs.name),
-        // A generic person avatar, as Chrome shows for a profile without a photo.
-        avatar = include_str!("../icons/chromium/user_account_avatar_20.svg").replacen("<svg ", "<svg class=\"markimg\" aria-hidden=\"true\" ", 1),
+        avatar = avatar,
+    )
+}
+
+fn autofill_card(prefs: &Prefs) -> String {
+    format!(
+        "<div class=\"card\">
+<div class=\"row\"><div class=\"grow\">{}<small>Passwords stay on this computer once a lock exists. Nothing is saved yet.</small></div>{}</div>
+<div class=\"row\"><div class=\"grow\">{}<small>Cards are not stored in this build.</small></div>{}</div>
+<div class=\"row\"><div class=\"grow\">{}<small>Addresses are not stored in this build.</small></div>{}</div>
+</div>",
+        soon_label("Password manager"),
+        toggle("autofill_passwords", prefs.autofill_passwords, "mithu://settings/autofill"),
+        soon_label("Payment methods"),
+        toggle("autofill_payments", prefs.autofill_payments, "mithu://settings/autofill"),
+        soon_label("Addresses and more"),
+        toggle("autofill_addresses", prefs.autofill_addresses, "mithu://settings/autofill"),
     )
 }
 
@@ -1023,7 +1411,7 @@ fn appearance_card(prefs: &Prefs) -> String {
 <div class=\"row\"><div class=\"grow\">Show home button</div>{home}</div>
 <div class=\"row\"><div class=\"grow\">Show bookmarks bar</div>{bar}</div>
 </div>",
-        theme = options(&[("light", "Light"), ("dark", "Dark")], &prefs.theme),
+        theme = options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")], &prefs.theme),
         font = prefs.font_px,
         fonts = options(&[("14", "14"), ("16", "16"), ("18", "18"), ("20", "20")], &prefs.font_px.to_string()),
         zoom = prefs.zoom,
@@ -1034,10 +1422,45 @@ fn appearance_card(prefs: &Prefs) -> String {
 }
 
 fn search_card(prefs: &Prefs) -> String {
+    let mut choices: Vec<(String, String)> = builtin_engines()
+        .iter()
+        .map(|(id, name, _)| ((*id).to_string(), (*name).to_string()))
+        .collect();
+    for engine in &prefs.engines {
+        choices.push((engine.id.clone(), engine.name.clone()));
+    }
+    let refs: Vec<(&str, &str)> = choices.iter().map(|(id, name)| (id.as_str(), name.as_str())).collect();
+    let mut rows = String::new();
+    for engine in &prefs.engines {
+        rows.push_str(&format!(
+            "<div class=\"row\"><div class=\"grow\">{}<small>{}</small></div><button class=\"btn quiet\" onclick=\"go('engine-del', {{value:'{}'}}, 'mithu://settings/search')\">Remove</button></div>",
+            esc(&engine.name),
+            esc(&engine.template),
+            js(&engine.id),
+        ));
+    }
     format!(
-        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Address bar search<small>Used when the text is not a site name.</small></div>
-<select onchange=\"go('set', {{key:'search', value:this.value}}, 'mithu://settings/search')\">{}</select></div></div>",
-        options(&[("duckduckgo", "DuckDuckGo"), ("bing", "Bing"), ("wikipedia", "Wikipedia")], &prefs.search)
+        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Default search engine<small>Used by the address bar and the new tab when the text is not a site name.</small></div>
+<select onchange=\"go('set', {{key:'search', value:this.value}}, 'mithu://settings/search')\">{}</select></div>
+<div class=\"row\"><div class=\"grow\">Manage search engines<small>Add an https address that contains %s where the query goes.</small></div>
+<button class=\"btn quiet\" onclick=\"go('engine-add', {{key: prompt('Engine name') || '', value: prompt('https address with %s') || ''}}, 'mithu://settings/search')\">Add</button></div>
+{rows}</div>",
+        options(&refs, &prefs.search),
+        rows = rows,
+    )
+}
+
+fn default_card(prefs: &Prefs) -> String {
+    let note = if prefs.prompt_default {
+        "Saved. Mithu is still not the operating system's default browser."
+    } else {
+        "Mithu is not registered as the system browser."
+    };
+    format!(
+        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">{}<small>{note}</small></div>{}</div></div>",
+        soon_label("Default browser"),
+        toggle("prompt_default", prefs.prompt_default, "mithu://settings/default"),
+        note = note,
     )
 }
 
@@ -1058,11 +1481,14 @@ fn startup_card(prefs: &Prefs) -> String {
 
 fn lang_card(prefs: &Prefs) -> String {
     format!(
-        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Display language<small>{}</small></div>
-<button class=\"btn quiet\" onclick=\"go('set', {{key:'languages', value: prompt('Languages', '{}') || '{}'}}, 'mithu://settings/languages')\">Edit</button></div></div>",
+        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Preferred languages<small>{}</small></div>
+<button class=\"btn quiet\" onclick=\"go('set', {{key:'languages', value: prompt('Languages', '{}') || '{}'}}, 'mithu://settings/languages')\">Edit</button></div>
+<div class=\"row\"><div class=\"grow\">{}<small>Pages are not sent to a translation service.</small></div>{}</div></div>",
         esc(&prefs.languages),
         esc(&prefs.languages),
         esc(&prefs.languages),
+        soon_label("Offer to translate pages"),
+        toggle("offer_translate", prefs.offer_translate, "mithu://settings/languages"),
     )
 }
 
@@ -1071,23 +1497,58 @@ fn download_card(prefs: &Prefs) -> String {
     format!(
         "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Location<small>{dir}</small></div>
 <button class=\"btn quiet\" onclick=\"go('set', {{key:'download_dir', value: prompt('Folder', '') || ''}}, 'mithu://settings/downloads')\">Change</button></div>
-<div class=\"row\"><div class=\"grow\">Ask where to save each file</div>{}</div></div>",
-        toggle("ask_where", prefs.ask_where, "mithu://settings/downloads")
+<div class=\"row\"><div class=\"grow\">{}<small>Files still go to the folder above. A save dialog is not shown yet.</small></div>{}</div></div>",
+        soon_label("Ask where to save each file"),
+        toggle("ask_where", prefs.ask_where, "mithu://settings/downloads"),
+        dir = dir,
     )
 }
 
 fn a11y_card(prefs: &Prefs) -> String {
     format!(
-        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Smooth scrolling</div>{}</div>
+        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Smooth scrolling<small>The Servo edition animates mouse-wheel notches. Mithu Lite uses the system web view.</small></div>{}</div>
+<div class=\"row\"><div class=\"grow\">{}<small>Spell checking is not wired in this build.</small></div>{}</div>
+<div class=\"row\"><div class=\"grow\">{}<small>Caret browsing is not wired in this build.</small></div>{}</div>
 <div class=\"row\"><div class=\"grow\">Page text follows the font size in Appearance.</div></div></div>",
-        toggle("smooth_scroll", prefs.smooth_scroll, "mithu://settings/accessibility")
+        toggle("smooth_scroll", prefs.smooth_scroll, "mithu://settings/accessibility"),
+        soon_label("Spell check"),
+        toggle("spellcheck", prefs.spellcheck, "mithu://settings/accessibility"),
+        soon_label("Caret browsing"),
+        toggle("caret_browse", prefs.caret_browse, "mithu://settings/accessibility"),
     )
 }
 
 fn system_card(prefs: &Prefs) -> String {
     format!(
-        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Use hardware acceleration when available<small>The Servo build still falls back to software if the GPU context fails.</small></div>{}</div></div>",
-        toggle("hardware", prefs.hardware, "mithu://settings/system")
+        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">{}<small>Saved for a later build. This version still uses the GPU when the window can, and falls back to software if that fails.</small></div>{}</div>
+<div class=\"row\"><div class=\"grow\">{}<small>Saved only. Traffic is not sent through this proxy.</small></div>
+<input class=\"text\" value=\"{proxy}\" aria-label=\"Proxy\" onchange=\"go('set', {{key:'proxy', value:this.value}}, 'mithu://settings/system')\"></div></div>",
+        soon_label("Use hardware acceleration when available"),
+        toggle("hardware", prefs.hardware, "mithu://settings/system"),
+        soon_label("Proxy"),
+        proxy = esc(&prefs.proxy),
+    )
+}
+
+fn performance_card(prefs: &Prefs) -> String {
+    format!(
+        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Memory saver<small>When this is on and the computer is low on memory, a background tab can be discarded. Selecting it loads the page again.</small></div>{}</div>
+<div class=\"row\"><div class=\"grow\">{}<small>Discarding tabs on a timer, without memory pressure, is not done yet.</small></div>{}</div></div>",
+        toggle("memory_saver", prefs.memory_saver, "mithu://settings/performance"),
+        soon_label("Discard inactive tabs"),
+        toggle("discard_idle", prefs.discard_idle, "mithu://settings/performance"),
+    )
+}
+
+fn about_card(version: &str) -> String {
+    format!(
+        "<div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\"><strong>Mithu</strong><small>{edition}</small></div></div>
+<div class=\"row\"><div class=\"grow\">Version</div><span>{version}</span></div>
+<div class=\"row\"><div class=\"grow\">Edition</div><span>{edition}</span></div>
+<div class=\"row\"><div class=\"grow\">Licenses<small>Mithu is Apache-2.0. Third-party notices, including the Lucide icons, are listed in THIRD_PARTY_NOTICES.md.</small></div><a href=\"mithu://version\">Details</a></div></div>",
+        mark = mark_src(),
+        version = esc(version),
+        edition = esc(&edition_name()),
     )
 }
 
@@ -1217,12 +1678,22 @@ fn site_row(id: &str, label: &str, choice: &str) -> String {
     )
 }
 
-fn privacy_card() -> String {
-    "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Delete browsing data<small>History stored by Mithu on this computer.</small></div>
-<button class=\"btn danger\" onclick=\"go('forget-all', {}, 'mithu://settings/privacy')\">Delete data</button></div>
-<div class=\"row\"><div class=\"grow\">Cookies and site data<small>Mithu does not keep a separate cookie list in this build.</small></div></div>
-<div class=\"row\"><div class=\"grow\">Site settings<small>Location, camera, microphone, and the other permissions.</small></div><a href=\"mithu://settings/site\">Open</a></div>
-<div class=\"row\"><div class=\"grow\">Security<small>HTTPS pages show a lock in the address bar.</small></div></div></div>".into()
+fn privacy_card(prefs: &Prefs) -> String {
+    format!(
+        "<div class=\"card\"><div class=\"row\"><div class=\"grow\">Clear browsing history<small>Pages Mithu stored on this computer.</small></div>
+<button class=\"btn danger\" onclick=\"go('forget-all', {{}}, 'mithu://settings/privacy')\">Clear history</button></div>
+<div class=\"row\"><div class=\"grow\">Clear download history<small>Removes the list. It does not delete the files.</small></div>
+<button class=\"btn quiet\" onclick=\"go('clear-downloads', {{}}, 'mithu://settings/privacy')\">Clear list</button></div>
+<div class=\"row\"><div class=\"grow\">{}<small>Mithu does not keep a cookie list in this build, so nothing is deleted.</small></div></div>
+<div class=\"row\"><div class=\"grow\">Site permissions<small>Location, camera, microphone, and the other permissions.</small></div><a href=\"mithu://settings/site\">Open</a></div>
+<div class=\"row\"><div class=\"grow\">Always use secure connections<small>Open http addresses as https, except localhost.</small></div>{}</div>
+<div class=\"row\"><div class=\"grow\">{}<small>No site is checked against a blocklist in this build.</small></div>{}</div>
+</div>",
+        soon_label("Cookies and site data"),
+        toggle("https_only", prefs.https_only, "mithu://settings/privacy"),
+        soon_label("Safe browsing"),
+        toggle("safe_browsing", prefs.safe_browsing, "mithu://settings/privacy"),
+    )
 }
 
 fn history_body(spec: &str, prefs: &Prefs) -> String {
@@ -1285,12 +1756,13 @@ fn history_body(spec: &str, prefs: &Prefs) -> String {
 
 fn history_row(visit: &Visit) -> String {
     format!(
-        "<div class=\"hrow\"><div class=\"htime\">{}</div><div class=\"favicon\"></div><div class=\"hmain\"><a href=\"{}\">{}</a><small>{}</small></div><button class=\"btn quiet\" onclick=\"go('forget', {{value:'{}'}}, 'mithu://history')\">Delete</button></div>",
+        "<div class=\"hrow\"><div class=\"htime\">{}</div>{fav}<div class=\"hmain\"><a href=\"{}\">{}</a><small>{}</small></div><button class=\"btn quiet\" onclick=\"go('forget', {{value:'{}'}}, 'mithu://history')\">Delete</button></div>",
         esc(&clock_label(visit.at)),
         esc(&visit.url),
         esc(if visit.title.is_empty() { visit.url.as_str() } else { visit.title.as_str() }),
         esc(&host_of(&visit.url)),
         js(&visit.url),
+        fav = favicon_html(&visit.url),
     )
 }
 
@@ -1306,12 +1778,13 @@ fn downloads_body(spec: &str, prefs: &Prefs) -> String {
             continue;
         }
         rows.push_str(&format!(
-            "<div class=\"dl\"><div class=\"fileico\"></div><div class=\"grow\"><a href=\"{}\">{}</a><small style=\"display:block;color:var(--muted)\">{}</small></div>
+            "<div class=\"dl\">{ico}<div class=\"grow\"><a href=\"{}\">{}</a><small style=\"display:block;color:var(--muted)\">{}</small></div>
 <button class=\"btn quiet\" onclick=\"go('download', {{key:'{}', value:'reveal'}}, 'mithu://downloads')\">Show in folder</button></div>",
             esc(&item.url),
             esc(name),
             esc(&item.state),
             js(&item.path),
+            ico = nav_svg(crate::icons::Kind::Download.svg()),
         ));
     }
     if rows.is_empty() {
@@ -1395,7 +1868,7 @@ fn inspect_body() -> String {
 
 fn bookmark_row(mark: &Bookmark) -> String {
     format!(
-        "<tr><td><a href=\"{}\">{}</a><small style=\"display:block;color:var(--muted)\">{}</small></td><td>
+        "<tr><td>{fav}<a href=\"{}\">{}</a><small style=\"display:block;color:var(--muted)\">{}</small></td><td>
 <button class=\"btn quiet\" onclick=\"go('bookmark', {{value:'{}', title: prompt('Name', '{}')||'{}', folder: prompt('Folder', '{}')||'{}'}}, 'mithu://bookmarks')\">Edit</button>
 <button class=\"btn quiet\" onclick=\"go('bookmark-del', {{value:'{}'}}, 'mithu://bookmarks')\">Delete</button></td></tr>",
         esc(&mark.url),
@@ -1407,6 +1880,7 @@ fn bookmark_row(mark: &Bookmark) -> String {
         js(&mark.folder),
         js(&mark.folder),
         js(&mark.url),
+        fav = favicon_html(&mark.url),
     )
 }
 
@@ -1426,31 +1900,117 @@ fn extensions_body(spec: &str) -> String {
     "<div data-view=\"extensions\"><h1>All extensions</h1><div class=\"card\"><div class=\"row\"><div class=\"grow\">No extensions installed<small>Mithu does not load extension packages yet.</small></div></div></div></div>".into()
 }
 
-fn newtab_body(prefs: &Prefs) -> String {
-    let mut tiles = String::new();
-    for mark in prefs.bookmarks.iter().take(8) {
-        tiles.push_str(&format!(
-            "<a class=\"tile\" href=\"{}\"><strong>{}</strong><small style=\"display:block;color:var(--muted)\">{}</small></a>",
-            esc(&mark.url),
-            esc(&mark.title),
-            esc(&mark.folder)
-        ));
-    }
-    if tiles.is_empty() {
-        tiles = "<p class=\"lead\">Bookmark a page and it will show up here.</p>".into();
-    }
+fn favicon_html(url: &str) -> String {
+    let host = host_of(url);
+    let letter = host
+        .chars()
+        .find(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_uppercase())
+        .unwrap_or('M');
+    let palette = ["#146c94", "#c47b0a", "#1f6b4a", "#8a3d2f", "#3d4f8a", "#0e7490"];
+    let index = host.bytes().fold(0usize, |acc, byte| acc.wrapping_add(byte as usize)) % palette.len();
+    let src = if url.starts_with("http://") || url.starts_with("https://") {
+        format!("https://{host}/favicon.ico")
+    } else if file_assets() {
+        "mark.png".into()
+    } else {
+        crate::brand::favicon_data_uri()
+    };
     format!(
-        "<div class=\"center\"><div><img class=\"logo\" src=\"{logo}\" alt=\"Mithu Browser\"><p class=\"lead\">Search from the address bar, or open a bookmark.</p><div class=\"tiles\">{tiles}</div></div></div>",
-        logo = logo_src(),
+        "<span class=\"fav\" style=\"background:{}\"><img alt=\"\" src=\"{}\" onload=\"this.parentNode.classList.add('got')\" onerror=\"this.remove()\"><b>{}</b></span>",
+        palette[index],
+        esc(&src),
+        letter,
     )
+}
+
+fn newtab_tiles(prefs: &Prefs) -> String {
+    let mut html = String::new();
+    let mut shown: Vec<String> = Vec::new();
+    for item in prefs.shortcuts.iter().take(8) {
+        shown.push(item.url.clone());
+        html.push_str(&shortcut_tile(&item.title, &item.url, true));
+    }
+    let room = 8usize.saturating_sub(shown.len());
+    for (title, url) in suggested_shortcuts(prefs, &shown, room) {
+        html.push_str(&shortcut_tile(&title, &url, false));
+    }
+    html.push_str(
+        "<div class=\"shortcut add\"><button type=\"button\" onclick=\"var url=prompt('Shortcut URL'); if(!url) return; var title=prompt('Name', url)||url; go('shortcut-add', {value:url, title:title}, 'mithu://newtab')\"><span class=\"fav add\">+</span><span class=\"slabel\">Add</span></button></div>",
+    );
+    html
+}
+
+fn shortcut_tile(title: &str, url: &str, stored: bool) -> String {
+    let op = if stored { "shortcut-del" } else { "shortcut-hide" };
+    format!(
+        "<div class=\"shortcut\"><a href=\"{url}\">{fav}<span class=\"slabel\">{title}</span></a><button class=\"x\" type=\"button\" aria-label=\"Remove {title}\" onclick=\"go('{op}', {{value:'{js_url}'}}, 'mithu://newtab')\">×</button></div>",
+        url = esc(url),
+        fav = favicon_html(url),
+        title = esc(title),
+        js_url = js(url),
+    )
+}
+
+fn suggested_shortcuts(prefs: &Prefs, skip: &[String], limit: usize) -> Vec<(String, String)> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut rows: Vec<(String, String, usize, usize)> = Vec::new();
+    for (index, visit) in prefs.history.iter().enumerate() {
+        if skip.iter().any(|url| url == &visit.url) || prefs.hidden_shortcuts.iter().any(|url| url == &visit.url) {
+            continue;
+        }
+        if !(visit.url.starts_with("http://") || visit.url.starts_with("https://")) {
+            continue;
+        }
+        if let Some(row) = rows.iter_mut().find(|row| row.0 == visit.url) {
+            row.2 += 1;
+            row.3 = index;
+            if !visit.title.is_empty() {
+                row.1 = visit.title.clone();
+            }
+        } else {
+            let title = if visit.title.is_empty() { host_of(&visit.url) } else { visit.title.clone() };
+            rows.push((visit.url.clone(), title, 1, index));
+        }
+    }
+    rows.sort_by(|a, b| b.2.cmp(&a.2).then(b.3.cmp(&a.3)));
+    rows.into_iter().take(limit).map(|(url, title, _, _)| (title, url)).collect()
+}
+
+fn newtab_body(prefs: &Prefs) -> String {
+    let template = engine_template(&prefs.search);
+    let placeholder = format!("Search with {} or type a URL", engine_label(prefs));
+    let icon = crate::icons::Kind::Search.svg();
+    let mut html = format!(
+        "<div class=\"home\"><img class=\"logo\" src=\"{logo}\" alt=\"Mithu\"><form class=\"homeform\" id=\"homeform\" role=\"search\" data-template=\"{template}\">{icon}<input id=\"qbox\" type=\"search\" placeholder=\"{placeholder}\" aria-label=\"{placeholder}\" autocomplete=\"off\" spellcheck=\"false\"></form><div class=\"shortcuts\">{tiles}</div></div>",
+        logo = logo_src(),
+        template = esc(&template),
+        icon = icon,
+        placeholder = esc(&placeholder),
+        tiles = newtab_tiles(prefs),
+    );
+    html.push_str(
+        r#"<script>
+document.getElementById("homeform").addEventListener("submit", function (event) {
+  event.preventDefault();
+  var q = document.getElementById("qbox").value.trim();
+  if (!q) return;
+  var template = this.getAttribute("data-template") || "";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(q)) { location.href = q; return; }
+  if (q.indexOf(" ") < 0 && q.indexOf(".") > 0) { location.href = "https://" + q; return; }
+  location.href = template.replace("%s", encodeURIComponent(q));
+});
+</script>"#,
+    );
+    html
 }
 
 fn version_body(version: &str) -> String {
     format!(
-        "<div id=\"about\" class=\"on\"><h1>About Mithu</h1><div class=\"card\"><div class=\"row\"><img class=\"markimg\" src=\"{mark}\" alt=\"\"><div class=\"grow\"><strong>Mithu</strong><small>Version {version}</small></div></div>
-<div class=\"row\"><div class=\"grow\">Open source notices<small>THIRD_PARTY_NOTICES.md</small></div></div></div></div>",
-        version = esc(version),
-        mark = mark_src(),
+        "<div id=\"about\" class=\"on\"><h1>About Mithu</h1>{card}</div>",
+        card = about_card(version),
     )
 }
 
@@ -1616,7 +2176,33 @@ fn format_prefs(prefs: &Prefs) -> String {
     push_line(&mut out, "ask_where", if prefs.ask_where { "1" } else { "0" });
     push_line(&mut out, "smooth_scroll", if prefs.smooth_scroll { "1" } else { "0" });
     push_line(&mut out, "hardware", if prefs.hardware { "1" } else { "0" });
+    push_line(&mut out, "https_only", if prefs.https_only { "1" } else { "0" });
+    push_line(&mut out, "memory_saver", if prefs.memory_saver { "1" } else { "0" });
+    push_line(&mut out, "discard_idle", if prefs.discard_idle { "1" } else { "0" });
+    push_line(&mut out, "safe_browsing", if prefs.safe_browsing { "1" } else { "0" });
+    push_line(&mut out, "proxy", &prefs.proxy);
+    push_line(&mut out, "spellcheck", if prefs.spellcheck { "1" } else { "0" });
+    push_line(&mut out, "caret_browse", if prefs.caret_browse { "1" } else { "0" });
+    push_line(&mut out, "autofill_passwords", if prefs.autofill_passwords { "1" } else { "0" });
+    push_line(&mut out, "autofill_payments", if prefs.autofill_payments { "1" } else { "0" });
+    push_line(&mut out, "autofill_addresses", if prefs.autofill_addresses { "1" } else { "0" });
+    push_line(&mut out, "prompt_default", if prefs.prompt_default { "1" } else { "0" });
+    push_line(&mut out, "offer_translate", if prefs.offer_translate { "1" } else { "0" });
     push_line(&mut out, "name", &prefs.name);
+    for item in &prefs.shortcuts {
+        out.push_str(&format!("shortcut\t{}\t{}\n", item.title.replace(['\t', '\n'], " "), item.url.replace(['\t', '\n'], "")));
+    }
+    for url in &prefs.hidden_shortcuts {
+        out.push_str(&format!("hide\t{}\n", url.replace(['\t', '\n'], " ")));
+    }
+    for engine in &prefs.engines {
+        out.push_str(&format!(
+            "engine\t{}\t{}\t{}\n",
+            engine.id.replace(['\t', '\n'], " "),
+            engine.name.replace(['\t', '\n'], " "),
+            engine.template.replace(['\t', '\n'], "")
+        ));
+    }
     for page in &prefs.startup_pages {
         push_line(&mut out, "startup_page", page);
     }
@@ -1649,6 +2235,31 @@ fn parse_prefs(text: &str) -> Prefs {
     let mut prefs = Prefs::default();
     prefs.startup_pages.clear();
     for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("shortcut\t") {
+            let mut parts = rest.splitn(2, '\t');
+            let title = parts.next().unwrap_or("").to_string();
+            let url = parts.next().unwrap_or("").to_string();
+            if !url.is_empty() {
+                prefs.shortcuts.push(Shortcut { title, url });
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("hide\t") {
+            if !rest.is_empty() {
+                prefs.hidden_shortcuts.push(rest.to_string());
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("engine\t") {
+            let mut parts = rest.splitn(3, '\t');
+            let id = parts.next().unwrap_or("").to_string();
+            let name = parts.next().unwrap_or("").to_string();
+            let template = parts.next().unwrap_or("").to_string();
+            if !id.is_empty() && clean_template(&template).is_some() && !builtin_engines().iter().any(|(key, _, _)| *key == id) {
+                prefs.engines.push(Engine { id, name, template });
+            }
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("bookmark\t") {
             let mut parts = rest.splitn(3, '\t');
             let folder = parts.next().unwrap_or("").to_string();
@@ -1711,6 +2322,18 @@ fn parse_prefs(text: &str) -> Prefs {
             "ask_where" => prefs.ask_where = value != "0",
             "smooth_scroll" => prefs.smooth_scroll = value != "0",
             "hardware" => prefs.hardware = value != "0",
+            "https_only" => prefs.https_only = value != "0",
+            "memory_saver" => prefs.memory_saver = value != "0",
+            "discard_idle" => prefs.discard_idle = value != "0",
+            "safe_browsing" => prefs.safe_browsing = value != "0",
+            "proxy" => prefs.proxy = value.into(),
+            "spellcheck" => prefs.spellcheck = value != "0",
+            "caret_browse" => prefs.caret_browse = value != "0",
+            "autofill_passwords" => prefs.autofill_passwords = value != "0",
+            "autofill_payments" => prefs.autofill_payments = value != "0",
+            "autofill_addresses" => prefs.autofill_addresses = value != "0",
+            "prompt_default" => prefs.prompt_default = value != "0",
+            "offer_translate" => prefs.offer_translate = value != "0",
             "name" => prefs.name = value.into(),
             _ => {}
         }
@@ -1774,6 +2397,27 @@ mod tests {
         assert_ne!(downloads.2, history.2);
         assert!(downloads.2.iter().any(|byte| *byte != 0));
         assert!(favicon_rgba("New Tab").is_none());
+        let home = open("mithu://newtab", &stored, "0.1.6").unwrap();
+        assert!(home.html.contains("id=\"homeform\""));
+        assert!(home.html.contains("Search with"));
+        assert!(!strip_data_uris(&home.html).to_ascii_lowercase().contains("google"));
+        command("mithu://do?op=shortcut-add&value=example.com/notes&title=Notes&back=mithu://newtab", &mut stored).unwrap();
+        assert_eq!(stored.shortcuts.len(), 1);
+        assert!(stored.shortcuts[0].url.starts_with("https://"));
+        let again = parse_prefs(&format_prefs(&stored));
+        assert_eq!(again.shortcuts, stored.shortcuts);
+        command("mithu://do?op=engine-add&key=Example&value=https://example.com/search?q=%s&back=mithu://settings/search", &mut stored).unwrap();
+        assert_eq!(stored.search, "c-example");
+        sync_runtime(&stored);
+        assert_eq!(search_url("c-example", "bird").domain(), Some("example.com"));
+        let performance = open("mithu://settings/performance", &stored, "0.1.6").unwrap();
+        assert!(performance.html.contains("Memory saver"));
+        assert!(performance.html.contains("Coming soon"));
+        let about = open("mithu://settings/about", &stored, "9.9.9").unwrap();
+        assert!(about.html.contains("9.9.9"));
+        assert!(about.html.contains("Edition"));
+        set_edition("Mithu Lite");
+        assert!(open("mithu://version", &stored, "9.9.9").unwrap().html.contains("Mithu Lite"));
     }
 
     #[test]
@@ -1792,6 +2436,18 @@ mod tests {
             url: "https://example.com".into(),
             at: 1_700_000_000,
         });
+        prefs.history.push(Visit {
+            title: "Example".into(),
+            url: "https://example.com".into(),
+            at: 1_700_000_100,
+        });
+        for (title, url) in [
+            ("Rust", "https://www.rust-lang.org"),
+            ("Wikipedia", "https://en.wikipedia.org"),
+            ("Mithu", "https://github.com/foisalislambd/mithu"),
+        ] {
+            prefs.shortcuts.push(Shortcut { title: title.into(), url: url.into() });
+        }
         prefs.downloads.push(Download {
             url: "https://example.com/file.txt".into(),
             path: "/tmp/file.txt".into(),

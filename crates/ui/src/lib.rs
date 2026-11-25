@@ -1,7 +1,7 @@
 //! Desktop frame shared by the Servo build and Mithu Lite.
 //!
 //! The tab strip, toolbar, omnibox, bookmarks bar, status bubble, and new-tab
-//! page are painted here. Chromium vector icons are rasterized in [`icons`]. Neither
+//! page are painted here. Lucide outline icons are rasterized in [`icons`]. Neither
 //! build draws a Google or Chrome mark.
 
 use url::Url;
@@ -50,18 +50,31 @@ pub fn parse_location(input: &str) -> Url {
     if text.is_empty() {
         return Url::parse("about:blank").expect("blank");
     }
-    if text.starts_with("about:")
+        if text.starts_with("about:")
         || text.starts_with("data:")
         || text.starts_with("file:")
         || text.contains("://")
     {
-        return Url::parse(text).unwrap_or_else(|_| Url::parse("about:blank").expect("blank"));
+        return maybe_https(
+            Url::parse(text).unwrap_or_else(|_| Url::parse("about:blank").expect("blank")),
+        );
     }
     if !text.contains(' ') && text.contains('.') {
         return Url::parse(&format!("https://{text}"))
             .unwrap_or_else(|_| Url::parse("about:blank").expect("blank"));
     }
-    pages::search_url(&search_engine(), text)
+    maybe_https(pages::search_url(&search_engine(), text))
+}
+
+fn maybe_https(mut url: Url) -> Url {
+    if https_only() && url.scheme() == "http" {
+        let host = url.host_str().unwrap_or("");
+        let local = host == "localhost" || host == "127.0.0.1" || host == "::1";
+        if !local {
+            let _ = url.set_scheme("https");
+        }
+    }
+    url
 }
 
 fn search_engine() -> String {
@@ -70,24 +83,41 @@ fn search_engine() -> String {
 
 thread_local! {
     static SEARCH_ENGINE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static SEARCH_LABEL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static HTTPS_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Display name of the address-bar search engine, for the omnibox placeholder.
-pub fn search_engine_label() -> &'static str {
-    match search_engine().as_str() {
-        "bing" => "Bing",
-        "wikipedia" => "Wikipedia",
-        _ => "DuckDuckGo",
-    }
+pub fn search_engine_label() -> String {
+    SEARCH_LABEL.with(|label| {
+        let label = label.borrow();
+        if label.is_empty() { "DuckDuckGo".into() } else { label.clone() }
+    })
+}
+
+pub fn set_search_label(label: &str) {
+    SEARCH_LABEL.with(|slot| *slot.borrow_mut() = label.to_string());
 }
 
 /// Address-bar search used by both editions. Empty or unknown keeps DuckDuckGo.
+/// A custom engine id is kept when it is not one of the built-in names; the
+/// template is registered separately by [`pages::sync_runtime`].
 pub fn set_search_engine(name: &str) {
     let name = match name {
         "bing" | "wikipedia" | "duckduckgo" => name.to_string(),
+        other if !other.is_empty() && pages::known_engine(other) => other.to_string(),
         _ => "duckduckgo".into(),
     };
     SEARCH_ENGINE.with(|engine| *engine.borrow_mut() = name);
+}
+
+/// When set, explicit `http://` locations (other than localhost) open as HTTPS.
+pub fn set_https_only(on: bool) {
+    HTTPS_ONLY.with(|cell| cell.set(on));
+}
+
+pub fn https_only() -> bool {
+    HTTPS_ONLY.with(|cell| cell.get())
 }
 
 #[cfg(test)]
@@ -100,6 +130,16 @@ mod tests {
         assert_eq!(url.as_str(), "https://example.com/");
         let search = parse_location("mithu browser");
         assert_eq!(search.domain(), Some("duckduckgo.com"));
+        set_https_only(true);
+        assert_eq!(
+            parse_location("http://example.com/a").as_str(),
+            "https://example.com/a"
+        );
+        assert_eq!(
+            parse_location("http://127.0.0.1/a").as_str(),
+            "http://127.0.0.1/a"
+        );
+        set_https_only(false);
     }
 
     #[test]

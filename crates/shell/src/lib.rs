@@ -1249,6 +1249,10 @@ impl Browser {
         if self.overlay.is_some() {
             return;
         }
+        if !self.prefs.smooth_scroll {
+            self.wheel(0.0, -f64::from(dy));
+            return;
+        }
         self.scroller.add(dy, Instant::now());
         self.tick_scroll();
     }
@@ -1516,6 +1520,9 @@ impl Browser {
     /// Discard one background tab when the system is short of memory
     /// (see [`mithu_ui::memory`]).
     fn relieve_memory_pressure(&mut self) {
+        if !self.prefs.memory_saver {
+            return;
+        }
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.last_active = Instant::now();
         }
@@ -1870,7 +1877,8 @@ impl Browser {
     fn apply_prefs(&mut self) {
         self.dark = self.prefs.dark();
         self.bookmarks_open = self.prefs.show_bookmarks;
-        mithu_ui::set_search_engine(&self.prefs.search);
+        mithu_ui::pages::set_edition("Mithu");
+        mithu_ui::pages::sync_runtime(&self.prefs);
         self.bookmarks = self
             .prefs
             .bookmarks
