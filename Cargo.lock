@@ -3846,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "mithu"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "image",
  "mithu-host",
@@ -3857,18 +3857,18 @@ dependencies = [
 
 [[package]]
 name = "mithu-composite"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "glow",
 ]
 
 [[package]]
 name = "mithu-host"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "mithu-lite"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "gtk",
  "mithu-host",
@@ -3881,14 +3881,14 @@ dependencies = [
 
 [[package]]
 name = "mithu-mobile"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "mithu-ui",
 ]
 
 [[package]]
 name = "mithu-shell"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "dpi",
  "euclid",
@@ -3905,7 +3905,7 @@ dependencies = [
 
 [[package]]
 name = "mithu-text"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "flate2",
  "fontdue",
@@ -3915,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "mithu-ui"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "arboard",
  "mithu-text",
