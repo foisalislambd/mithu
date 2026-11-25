@@ -11,7 +11,7 @@
   <a href="https://github.com/foisalislambd/mithu/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/foisalislambd/mithu/ci.yml?branch=main&amp;label=CI"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
   <a href="https://github.com/foisalislambd/mithu/releases"><img alt="Platforms: Linux, macOS, Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey"></a>
-  <a href="VERSION.md"><img alt="Version 0.2.1" src="https://img.shields.io/badge/version-0.2.1-2ea44f"></a>
+  <a href="VERSION.md"><img alt="Version 0.2.2" src="https://img.shields.io/badge/version-0.2.2-2ea44f"></a>
 </p>
 
 ## Contents
@@ -128,7 +128,7 @@ The internal pages use the same layout in light and dark.
 
 ## Download
 
-Published desktop builds are on [GitHub Releases](https://github.com/foisalislambd/mithu/releases). The newest published tag is [v0.2.0](https://github.com/foisalislambd/mithu/releases/tag/v0.2.0). This tree is 0.2.1, so the next release is published after that version reaches `main`. Each release includes `SHA256SUMS`. The sums below belong to v0.1.5 only.
+Published desktop builds are on [GitHub Releases](https://github.com/foisalislambd/mithu/releases). The newest published tag is [v0.2.1](https://github.com/foisalislambd/mithu/releases/tag/v0.2.1). This tree is 0.2.2, so the next release is published after that version reaches `main`. Each release includes `SHA256SUMS`. The sums below belong to v0.1.5 only.
 
 | Platform | Mithu | Mithu Lite |
 | --- | --- | --- |
@@ -227,7 +227,7 @@ Page text uses the Roboto files in `assets/fonts/roboto`. Toolbar icons are fill
 
 ## Releases
 
-The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.2.1`. That file is the only place to change it.
+The version is the first line of [VERSION.md](VERSION.md). Right now that line is `0.2.2`. That file is the only place to change it.
 
 `python3 tools/version.py sync` copies the line into `[workspace.package] version`, the workspace packages in `Cargo.lock`, the version badge at the top of this file, and, when those projects are in the tree, Android `versionName` / `versionCode` and iOS `CFBundleShortVersionString`, `CFBundleVersion`, `MARKETING_VERSION`, and `CURRENT_PROJECT_VERSION`. The numeric code is `major * 1000000 + minor * 1000 + patch` (0.1.7 is 1007). `python3 tools/version.py check` prints any files that still differ and exits 0. `python3 tools/version.py set 0.1.7` writes `VERSION.md` and syncs.
 
