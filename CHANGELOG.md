@@ -4,7 +4,11 @@ Mithu follows the first line of `VERSION.md`. Dates are the day the release is t
 
 ## Unreleased
 
-A closed script or namespace channel no longer aborts the browser. The in-process script thread stays up while tabs close, and if a receiver still disconnects the affected tab shows "This page crashed" with Reload. Other tabs stay open. A pipeline panic stays in that tab (`hard_fail` is off). The fatal dialog is only for a panic on the thread that started the process.
+## 0.2.3
+
+`mithu://newtab` is a Mithu home page: the mark, a search box that uses the saved search engine or opens a URL, and shortcut tiles from the pages you visit most. `mithu://settings` is a sidebar with search and cards. Profile, appearance, search engines, startup, languages, the download folder, site permissions, history clearing, and memory saver are saved and applied. Choices this build does not do yet stay saved and are marked Coming soon. History, downloads, bookmarks, and About use that same layout. Toolbar, tab, and window glyphs are Lucide 0.468.0 (ISC).
+
+A closed script or namespace channel no longer aborts the browser. The in-process script thread stays up while tabs close, and if a receiver still disconnects the affected tab shows "This page crashed" with Reload. Other tabs stay open. A pipeline panic stays in that tab (`hard_fail` is off). The fatal dialog is only for a panic on the thread that started the process. On Windows the smoke test exits without dropping Servo, because that drop panics the ipc-channel router after `smoke ok`.
 
 ## 0.2.2
 
